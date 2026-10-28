@@ -80,4 +80,4 @@ claude plugin test ~/.claude/mods/ccc
 
 ## Credits
 
-Version 1.0 was built by Love. Fan themes are a hobby: their names and logos belong to their owners, and this project is not for sale.
+Version 1.0 was created by [Love Klockars](https://github.com/lokl4297). Fan themes are a hobby: their names and logos belong to their owners, and this project is not for sale.
