@@ -120,7 +120,7 @@ export function followWheel(state, { now, shiftKey, delta }) {
   return { state: { at: now, mode, isDropping, size }, drop: isDropping }
 }
 
-/** Shift pressed or let go: a movement still going stops right there. */
+/** Shift (or the scroll button) pressed or let go: a movement still going stops right there. */
 export function shiftChanged(state, now) {
   return state.mode && now - state.at <= WHEEL_GAP_MS ? { ...state, isDropping: true } : state
 }
@@ -136,6 +136,58 @@ export function wheelGoes({ isOn, shiftKey, ctrlKey, inWindow, canScrollInside, 
   if (shiftKey) return 'page'
   if (canScrollInside) return 'inside'
   return inCard ? 'card' : 'nothing'
+}
+
+// the scroll button: a mouse button or a key that, held with the wheel, moves the board as Shift does.
+// Kept as 'mouse:<event.button>' or 'key:<event.code>' (its event.key when it has no code, as keys sent
+// by a mouse's own app can have), or '' when none is picked.
+const MOUSE_ID = /^mouse:(\d{1,2})$/
+const KEY_ID = /^key:([A-Za-z0-9]{1,32})$/
+// the left button clicks and the right one opens menus
+const TAKEN_BUTTONS = [0, 2]
+// Shift already moves the board, Control with the wheel zooms, Escape stops the picking, and a key
+// the browser cannot tell apart from others has no name of its own
+const TAKEN_KEYS = /^(Shift|Control|Escape|Unidentified)/
+const MOUSE_NAMES = { 1: 'Middle mouse button', 3: 'Mouse button 4 (back)', 4: 'Mouse button 5 (forward)' }
+const KEY_NAMES = { AltLeft: 'Left Option', AltRight: 'Right Option', MetaLeft: 'Left Command', MetaRight: 'Right Command', Alt: 'Option', Meta: 'Command' }
+
+/** The scroll button a press is, from { kind: 'mouse', button } or { kind: 'key', code, key }. */
+export function scrollButtonOf(press) {
+  return press.kind === 'mouse' ? `mouse:${press.button}` : `key:${press.code || press.key || ''}`
+}
+
+/** Whether a kept value is a scroll button that can be used. */
+export function isScrollButton(value) {
+  if (typeof value !== 'string') return false
+  const button = MOUSE_ID.exec(value)?.[1]
+  if (button) return !TAKEN_BUTTONS.includes(Number(button))
+  const code = KEY_ID.exec(value)?.[1]
+  return Boolean(code) && !TAKEN_KEYS.test(code)
+}
+
+/**
+ * What a press means while the scroll button is being picked (a press as `scrollButtonOf` takes it):
+ * { pick } the button to keep, { cancel } (Escape), { refuse } with why it cannot be used, or null for
+ * a left click, which goes on as a click.
+ */
+export function scrollButtonPress(press) {
+  if (press.kind === 'mouse' && press.button === 0) return null
+  const id = scrollButtonOf(press)
+  if (id === 'key:Escape') return { cancel: true }
+  if (isScrollButton(id)) return { pick: id }
+  if (press.kind === 'mouse') return { refuse: 'The right button opens menus.' }
+  if (id.startsWith('key:Shift')) return { refuse: 'Shift already moves the board.' }
+  if (id.startsWith('key:Control')) return { refuse: 'Control with the wheel zooms.' }
+  return { refuse: 'That key cannot be used.' }
+}
+
+/** The scroll button as the settings show it, like "Mouse button 4 (back)" or "Left Option". */
+export function scrollButtonName(id) {
+  if (!isScrollButton(id)) return 'None'
+  const button = MOUSE_ID.exec(id)?.[1]
+  if (button) return MOUSE_NAMES[button] ?? `Mouse button ${Number(button) + 1}`
+  const code = KEY_ID.exec(id)[1]
+  return KEY_NAMES[code] ?? code.replace(/^(Key|Digit)(?=.)/, '').replace(/([a-z])([A-Z0-9])/g, '$1 $2')
 }
 
 /**
@@ -1085,6 +1137,8 @@ export function normalizeSettings(raw) {
     sidePanel: typeof value.sidePanel === 'boolean' ? value.sidePanel : true,
     // the wheel moves only what is under the pointer, and Shift with the wheel moves the board; off unless turned on
     shiftScroll: typeof value.shiftScroll === 'boolean' ? value.shiftScroll : false,
+    // a mouse button or key that moves the board with the wheel as Shift does; none unless the person picks one
+    scrollButton: isScrollButton(value.scrollButton) ? value.scrollButton : '',
     // Claude's short notes between steps, shown as the Claude app shows them, unless the person hides them
     showNotes: typeof value.showNotes === 'boolean' ? value.showNotes : true,
     // the app CCC opens terminal windows in: iTerm when this Mac has it, unless the person picks one

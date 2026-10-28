@@ -2904,6 +2904,17 @@ body.shift-scroll .chat-side {
   outline-offset: 2px;
 }
 
+/* the scroll button's picker, waiting for the press to keep */
+.settings button.secondary.picking {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 25%, transparent);
+}
+
+.settings button.secondary:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
 /* ---------- a question box Claude put to the person, in the chat ---------- */
 
 .msg-question {

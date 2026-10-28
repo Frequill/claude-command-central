@@ -470,8 +470,8 @@ test('a card is one card wide, two when large, or the width it was pulled to', (
 })
 
 test('settings fall back to their defaults; wobble follows the mode', () => {
-  assert.deepEqual(L.normalizeSettings(null), { theme: 'clean', animations: true, wobble: 'aero', cardSize: 'compact', freeze: false, statusBar: true, sidePanel: true, shiftScroll: false, showNotes: true, terminalApp: 'auto', editor: 'off' })
-  assert.deepEqual(L.normalizeSettings({ theme: 'doom', animations: 'yes', wobble: 'x', cardSize: 'huge', freeze: 'no', statusBar: 1 }), { theme: 'clean', animations: true, wobble: 'aero', cardSize: 'compact', freeze: false, statusBar: true, sidePanel: true, shiftScroll: false, showNotes: true, terminalApp: 'auto', editor: 'off' })
+  assert.deepEqual(L.normalizeSettings(null), { theme: 'clean', animations: true, wobble: 'aero', cardSize: 'compact', freeze: false, statusBar: true, sidePanel: true, shiftScroll: false, scrollButton: '', showNotes: true, terminalApp: 'auto', editor: 'off' })
+  assert.deepEqual(L.normalizeSettings({ theme: 'doom', animations: 'yes', wobble: 'x', cardSize: 'huge', freeze: 'no', statusBar: 1 }), { theme: 'clean', animations: true, wobble: 'aero', cardSize: 'compact', freeze: false, statusBar: true, sidePanel: true, shiftScroll: false, scrollButton: '', showNotes: true, terminalApp: 'auto', editor: 'off' })
   assert.equal(L.normalizeSettings({ statusBar: false }).statusBar, false)
   assert.equal(L.normalizeSettings({ freeze: true }).freeze, true)
   assert.equal(L.normalizeSettings({ cardSize: 'large' }).cardSize, 'large')
@@ -1294,6 +1294,61 @@ test('a scroll that Shift changes in the middle of stops there; its glide goes n
   assert.deepEqual([next.drop, next.state.mode], [false, 'page'])
   // pressing Shift with no scroll going on changes nothing
   assert.deepEqual(L.shiftChanged(L.WHEEL_START, 500), L.WHEEL_START)
+})
+
+test('the scroll button: a mouse button or a key picked in the settings, besides Shift', () => {
+  const mouse = button => L.scrollButtonPress({ kind: 'mouse', button })
+  const key = code => L.scrollButtonPress({ kind: 'key', code })
+  // the extra mouse buttons and the middle one are picked
+  assert.deepEqual(mouse(3), { pick: 'mouse:3' })
+  assert.deepEqual(mouse(4), { pick: 'mouse:4' })
+  assert.deepEqual(mouse(1), { pick: 'mouse:1' })
+  assert.deepEqual(mouse(7), { pick: 'mouse:7' })
+  // a left click goes on as a click; the right button opens menus
+  assert.equal(mouse(0), null)
+  assert.deepEqual(mouse(2), { refuse: 'The right button opens menus.' })
+  // keys are picked by where they sit on the keyboard; Escape stops the picking
+  assert.deepEqual(key('AltLeft'), { pick: 'key:AltLeft' })
+  assert.deepEqual(key('F13'), { pick: 'key:F13' })
+  assert.deepEqual(key('Escape'), { cancel: true })
+  assert.deepEqual(key('ShiftRight'), { refuse: 'Shift already moves the board.' })
+  assert.deepEqual(key('ControlLeft'), { refuse: 'Control with the wheel zooms.' })
+  // a key with no place on the keyboard, as a mouse's own app can send, goes by its name instead
+  const sent = name => L.scrollButtonPress({ kind: 'key', code: '', key: name })
+  assert.deepEqual(sent('F13'), { pick: 'key:F13' })
+  assert.deepEqual(sent('Alt'), { pick: 'key:Alt' })
+  assert.deepEqual(sent('Shift'), { refuse: 'Shift already moves the board.' })
+  assert.deepEqual(sent('Escape'), { cancel: true })
+  assert.deepEqual(sent('Unidentified'), { refuse: 'That key cannot be used.' })
+  assert.deepEqual(sent('+'), { refuse: 'That key cannot be used.' })
+  assert.deepEqual(sent(''), { refuse: 'That key cannot be used.' })
+  assert.deepEqual(key('<script>'), { refuse: 'That key cannot be used.' })
+  // the board holds a press against the kept button the same way
+  assert.equal(L.scrollButtonOf({ kind: 'key', code: 'AltLeft', key: 'Alt' }), 'key:AltLeft')
+  assert.equal(L.scrollButtonOf({ kind: 'key', code: '', key: 'F13' }), 'key:F13')
+  assert.equal(L.scrollButtonOf({ kind: 'mouse', button: 3 }), 'mouse:3')
+})
+
+test('the scroll button is named as the settings show it, and a broken one is none', () => {
+  assert.equal(L.scrollButtonName('mouse:3'), 'Mouse button 4 (back)')
+  assert.equal(L.scrollButtonName('mouse:4'), 'Mouse button 5 (forward)')
+  assert.equal(L.scrollButtonName('mouse:1'), 'Middle mouse button')
+  assert.equal(L.scrollButtonName('mouse:6'), 'Mouse button 7')
+  assert.equal(L.scrollButtonName('key:AltRight'), 'Right Option')
+  assert.equal(L.scrollButtonName('key:MetaLeft'), 'Left Command')
+  assert.equal(L.scrollButtonName('key:KeyF'), 'F')
+  assert.equal(L.scrollButtonName('key:Digit5'), '5')
+  assert.equal(L.scrollButtonName('key:F13'), 'F13')
+  assert.equal(L.scrollButtonName('key:CapsLock'), 'Caps Lock')
+  assert.equal(L.scrollButtonName('key:Alt'), 'Option')
+  assert.equal(L.scrollButtonName(''), 'None')
+  // kept values are checked again when the settings are read
+  assert.equal(L.normalizeSettings({ scrollButton: 'mouse:3' }).scrollButton, 'mouse:3')
+  assert.equal(L.normalizeSettings({ scrollButton: 'key:AltLeft' }).scrollButton, 'key:AltLeft')
+  for (const broken of ['mouse:0', 'mouse:2', 'mouse:123', 'key:ShiftLeft', 'key:Escape', 'key:', 'keyboard:F', 3, null]) {
+    assert.equal(L.normalizeSettings({ scrollButton: broken }).scrollButton, '', String(broken))
+    assert.equal(L.scrollButtonName(broken), 'None', String(broken))
+  }
 })
 
 test('the Claude app branch question is drawn as the app draws it, not as an approval', () => {
