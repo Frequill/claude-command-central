@@ -9587,6 +9587,27 @@ body.theme-cyberpunk .compose-send:hover {
   background: #5ef6ff;
 }
 
+/* Stop: the same cut corner as Send beside it, in the HUD's red */
+body.theme-cyberpunk .compose-stop {
+  border-radius: 0;
+  background: #f75049;
+  color: #05060a;
+  font-family: var(--cp-font);
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  clip-path: polygon(0 0, 100% 0, 100% calc(100% - 8px), calc(100% - 8px) 100%, 0 100%);
+}
+
+body.theme-cyberpunk .compose-stop:hover {
+  background: #ff2a4a;
+}
+
+body.theme-cyberpunk .compose-stop .stop-square {
+  border-radius: 0;
+  background: #05060a;
+}
+
 body.theme-cyberpunk .chat-close {
   border-radius: 0;
   color: #f75049;
@@ -9597,6 +9618,15 @@ body.theme-cyberpunk .chat-close {
 body.theme-cyberpunk .chat-close:hover {
   background: #f75049;
   color: #05060a;
+}
+
+/* a toggle that is on (caveman mode, the side panel) is filled, so it reads apart from one that is off */
+body.theme-cyberpunk .caveman-toggle[aria-pressed='true'],
+body.theme-cyberpunk .side-toggle[aria-pressed='true'] {
+  border-color: #f75049;
+  background: #f75049;
+  color: #05060a;
+  box-shadow: 0 0 10px rgba(247, 80, 73, 0.55);
 }
 
 body.theme-cyberpunk .switch-track {
@@ -9923,6 +9953,15 @@ body.theme-cyberpunk .th-period {
   font-family: var(--cp-font);
   letter-spacing: 0.08em;
   text-transform: uppercase;
+}
+
+/* the chosen tab: black on objective yellow, as the game marks what is picked */
+body.theme-cyberpunk .th-period[aria-checked='true'],
+body.theme-cyberpunk .th-period[aria-selected='true'] {
+  background: #fcee0a;
+  color: #05060a;
+  font-weight: 700;
+  text-shadow: none;
 }
 
 body.theme-cyberpunk .theme-choice {
