@@ -79,31 +79,40 @@ function setupTabs() {
 const PICK_PROMPT = 'Press a mouse button or a key… Esc cancels'
 
 /**
- * The scroll button's picker: a click on it waits for the next press of a mouse button or a key, and
- * keeps that one. Escape, a second click on it or closing the window stops the waiting; a left click
- * elsewhere goes on as a click. `show` draws the kept choice; `keep` gets a new one ('' for none).
+ * The scroll buttons: each one added, with a cross to remove it, and Add button, which waits for the
+ * next press of a mouse button or a key and adds that one. Escape, a second click on Add button or
+ * closing the window stops the waiting; a left click elsewhere goes on as a click. `show` draws the
+ * kept list; `keep` gets the new one.
  */
-function setupScrollButton(dialog, { getSettings, keep }) {
-  const button = document.querySelector('#opt-scroll-button')
-  const clear = document.querySelector('#opt-scroll-button-clear')
+function setupScrollButtons(dialog, { getSettings, keep }) {
+  const list = document.querySelector('#scroll-buttons')
+  const button = document.querySelector('#scroll-button-add')
   let isPicking = false
   const show = (refused = '') => {
-    const { shiftScroll, scrollButton } = getSettings()
-    button.textContent = isPicking ? `${refused ? `${refused} ` : ''}${PICK_PROMPT}` : L.scrollButtonName(scrollButton)
+    const { scrollButtons } = getSettings()
+    list.replaceChildren(
+      ...scrollButtons.map(id => {
+        const name = L.scrollButtonName(id)
+        const remove = node('button', { type: 'button', class: 'scroll-button-remove', 'aria-label': `Remove ${name}`, title: `Remove ${name}` }, '×')
+        remove.addEventListener('click', () => keep(scrollButtons.filter(one => one !== id)))
+        return node('span', { class: 'chip scroll-button', role: 'listitem' }, name, remove)
+      }),
+    )
+    list.hidden = scrollButtons.length === 0
+    button.textContent = isPicking ? `${refused ? `${refused} ` : ''}${PICK_PROMPT}` : 'Add button'
     button.classList.toggle('picking', isPicking)
-    button.disabled = !shiftScroll
-    clear.hidden = !scrollButton || isPicking
-    clear.disabled = !shiftScroll
+    button.hidden = !isPicking && scrollButtons.length >= L.MAX_SCROLL_BUTTONS
   }
   const take = (event, press) => {
-    const said = L.scrollButtonPress(press)
+    const { scrollButtons } = getSettings()
+    const said = L.scrollButtonPress(press, scrollButtons)
     if (!said) return
     // the press only picks: Escape does not close the window, Space does not click the button
     event.preventDefault()
     event.stopPropagation()
     if (said.refuse) return show(said.refuse)
     stop()
-    if (said.pick) keep(said.pick)
+    if (said.pick) keep([...scrollButtons, said.pick])
   }
   const onKey = event => take(event, { kind: 'key', code: event.code, key: event.key })
   const onMouse = event => take(event, { kind: 'mouse', button: event.button })
@@ -125,9 +134,8 @@ function setupScrollButton(dialog, { getSettings, keep }) {
     window.addEventListener('contextmenu', onMenu, true)
     show()
   })
-  clear.addEventListener('click', () => keep(''))
   dialog.addEventListener('close', stop)
-  return { show, stop }
+  return { show }
 }
 
 /** Fills and wires the dialog; `onChange` gets the new settings after every change. */
@@ -175,12 +183,12 @@ export function setupSettings(initial, { onChange, onResetLayout }) {
     settings = L.normalizeSettings({ ...settings, ...patch })
     saveSettings(settings)
     showMotion()
-    scrollButton.show()
+    scrollButtons.show()
     onChange(settings)
   }
-  const scrollButton = setupScrollButton(dialog, { getSettings: () => settings, keep: picked => update({ scrollButton: picked }) })
+  const scrollButtons = setupScrollButtons(dialog, { getSettings: () => settings, keep: kept => update({ scrollButtons: kept }) })
   showMotion()
-  scrollButton.show()
+  scrollButtons.show()
   // one click in the header turns every motion off or on, as the box in the settings does
   toggle.addEventListener('click', () => update({ animations: !settings.animations }))
   freeze.addEventListener('click', () => update({ freeze: !settings.freeze }))
@@ -193,10 +201,7 @@ export function setupSettings(initial, { onChange, onResetLayout }) {
   sidePanel.addEventListener('change', () => update({ sidePanel: sidePanel.checked }))
   wobble.addEventListener('change', () => update({ wobble: wobble.value }))
   terminalApp.addEventListener('change', () => update({ terminalApp: terminalApp.value }))
-  shiftScroll.addEventListener('change', () => {
-    if (!shiftScroll.checked) scrollButton.stop()
-    update({ shiftScroll: shiftScroll.checked })
-  })
+  shiftScroll.addEventListener('change', () => update({ shiftScroll: shiftScroll.checked }))
   editor.addEventListener('change', () => update({ editor: editor.value }))
   showNotes.addEventListener('change', () => update({ showNotes: showNotes.checked }))
   setupTabs()
