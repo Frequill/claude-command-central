@@ -246,13 +246,6 @@ export const register: Register = on => {
     return next(note ? { ...e, context: [...(e.context ?? []), note] } : e)
   }).catch(($, e, next) => next(e))
 
-  // a summary may drop the caveman rules: the next message carries them in full again
-  on('session.compact', async ($, e, next) => {
-    if (e.agentId === undefined) cavemanTold = undefined
-
-    return next(e)
-  }).catch(($, e, next) => next(e))
-
   // the engine's own guess at the person's next prompt, which the app shows dim in its prompt box for
   // Tab to take: kept on the turn for CCC's write box, until the next turn starts and drops it
   on('prompt.suggest', async ($, e, next) => {

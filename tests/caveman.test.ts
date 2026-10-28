@@ -29,10 +29,11 @@ describe('caveman mode switched from CCC', () => {
     expect(cavemanNote('lite', 'off', 'Talk terse.')).toContain('Talk terse.')
   })
 
-  test('while it stays the same, only a short reminder; switched off, one line; never on, nothing', () => {
-    const reminder = cavemanNote('full', 'full', 'Talk terse.')
-    expect(reminder).toContain('still on')
-    expect(reminder).not.toContain('Talk terse.')
+  test('while it stays on, every message carries the whole rules again; switched off, one line; never on, nothing', () => {
+    const again = cavemanNote('full', 'full', 'Talk terse.')
+    expect(again).toContain('still on')
+    expect(again).toContain('at the full level')
+    expect(again).toContain('Talk terse.')
     expect(cavemanNote(undefined, 'ultra', 'Talk terse.')).toContain('switched off')
     expect(cavemanNote(undefined, 'off', 'Talk terse.')).toBeUndefined()
     expect(cavemanNote(undefined, undefined, 'Talk terse.')).toBeUndefined()

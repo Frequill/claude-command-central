@@ -6,7 +6,8 @@ import { isSafeSessionId } from './snapshot'
  * Caveman mode, switched per session from CCC. The board's server keeps the choice in
  * `~/.claude/ccc/caveman/<session>.json` (or `default.json` for sessions with no choice of their own).
  * While it is on, each message to Claude carries a note the person does not see: the caveman skill's
- * rules the first time, then a short reminder. Switching costs no turn and no message.
+ * whole rules, every time, so they hold however long the session runs. Switching costs no turn and
+ * no message.
  *
  * Not the system prompt: the built-in security plugin answers those events before any mod sees them.
  */
@@ -51,21 +52,19 @@ export function skillRules(text: string | undefined): string {
 }
 
 /**
- * The note a message carries: the whole rules when caveman mode was just switched on or to another
- * level (`told` is the level the last note gave, undefined when none was given yet), a short reminder
- * while it stays the same, one line when it was just switched off, else nothing. `wasChosen` says a
- * choice is stored: after a restart the mod cannot know what earlier messages said, so off is said once.
+ * The note a message carries: the whole rules on every message while caveman mode is on (`told` is
+ * the level the last note gave, undefined when none was given yet), one line when it was just switched
+ * off, else nothing. `wasChosen` says a choice is stored: after a restart the mod cannot know what
+ * earlier messages said, so off is said once.
  */
 export function cavemanNote(level: CavemanLevel | undefined, told: CavemanLevel | 'off' | undefined, rules: string, wasChosen = false): string | undefined {
   if (!level) {
     if (told === undefined && wasChosen) return 'Caveman mode is off for this session (set in CCC). If earlier messages switched it on, write normally again from this reply on.'
     return told && told !== 'off' ? 'Caveman mode was switched off in CCC. Write normally again from this reply on.' : undefined
   }
-  if (level === told) {
-    return `Caveman mode is still on for this session, at the ${level} level (switched on in CCC): reply terse like a smart caveman. Drop filler, pleasantries and hedging; at full and ultra also articles, fragments OK. Technical terms, code and quoted errors stay exact. Code, commits, PRs, security warnings and confirmations of irreversible actions: write normally.`
-  }
+  const said = level === told ? `Caveman mode is still on for this session in CCC, at the ${level} level.` : `Caveman mode is switched on for this session in CCC, at the ${level} level.`
   return [
-    `Caveman mode is switched on for this session in CCC, at the ${level} level. Follow these rules in every reply, at that level, until a note says it was switched off. The rules mention /caveman and "stop caveman": here the level is set in CCC instead.`,
+    `${said} Follow these rules in this reply and every reply after it, at that level, until a note says it was switched off. The rules mention /caveman and "stop caveman": here the level is set in CCC instead.`,
     rules,
   ].join('\n\n')
 }
