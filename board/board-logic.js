@@ -170,6 +170,15 @@ export function scrollButtonHeld(buttons, { held, shiftKey }) {
   return [...held].some(id => buttons.includes(id)) || Boolean(shiftKey && buttons.includes(SHIFT_BUTTON))
 }
 
+/**
+ * Shift-scrolling turned on or off, as a change to the settings. Turned on with every scroll button
+ * removed, Shift comes back, so the board can always be moved. (Removing the last one turns it off:
+ * see `normalizeSettings`.)
+ */
+export function switchShiftScroll(settings, isOn) {
+  return isOn && settings.scrollButtons.length === 0 ? { shiftScroll: true, scrollButtons: [SHIFT_BUTTON] } : { shiftScroll: isOn }
+}
+
 /** The scroll buttons as kept, without broken ones or the same one twice; Shift alone when none were kept. */
 export function normalizeScrollButtons(value) {
   return Array.isArray(value) ? [...new Set(value.filter(isScrollButton))].slice(0, MAX_SCROLL_BUTTONS) : [SHIFT_BUTTON]
@@ -1143,6 +1152,7 @@ export const CARD_SIZES = ['compact', 'large']
 /** Settings as stored, with anything missing or broken put back to its default. */
 export function normalizeSettings(raw) {
   const value = raw && typeof raw === 'object' ? raw : {}
+  const scrollButtons = normalizeScrollButtons(value.scrollButtons)
   return {
     theme: THEME_IDS.includes(value.theme) ? value.theme : 'clean',
     animations: typeof value.animations === 'boolean' ? value.animations : true,
@@ -1154,10 +1164,11 @@ export function normalizeSettings(raw) {
     statusBar: typeof value.statusBar === 'boolean' ? value.statusBar : true,
     // the column at the right (the radar, the tool mix, the notes), on unless the person turns it off
     sidePanel: typeof value.sidePanel === 'boolean' ? value.sidePanel : true,
-    // the wheel moves only what is under the pointer, and Shift with the wheel moves the board; off unless turned on
-    shiftScroll: typeof value.shiftScroll === 'boolean' ? value.shiftScroll : false,
+    // the wheel moves only what is under the pointer, and a scroll button with the wheel moves the board; off
+    // unless turned on, and off with no scroll buttons left, since then nothing could move the board
+    shiftScroll: value.shiftScroll === true && scrollButtons.length > 0,
     // with shift-scrolling on, the buttons that move the board while held: Shift unless the person changes them
-    scrollButtons: normalizeScrollButtons(value.scrollButtons),
+    scrollButtons,
     // Claude's short notes between steps, shown as the Claude app shows them, unless the person hides them
     showNotes: typeof value.showNotes === 'boolean' ? value.showNotes : true,
     // the app CCC opens terminal windows in: iTerm when this Mac has it, unless the person picks one

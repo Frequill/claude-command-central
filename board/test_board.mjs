@@ -1271,6 +1271,22 @@ test('with shift-scrolling on, the wheel moves what is under the pointer, and a 
   assert.equal(L.normalizeSettings({ shiftScroll: 'yes' }).shiftScroll, false)
 })
 
+test('shift-scrolling is never on with no scroll button to move the board', () => {
+  // removing the last scroll button turns it off, also when kept like that before this rule
+  assert.equal(L.normalizeSettings({ shiftScroll: true, scrollButtons: [] }).shiftScroll, false)
+  assert.equal(L.normalizeSettings({ shiftScroll: true, scrollButtons: ['mouse:0', 'key:Escape'] }).shiftScroll, false)
+  assert.equal(L.normalizeSettings({ shiftScroll: true, scrollButtons: ['key:KeyG'] }).shiftScroll, true)
+  // turned on again with none left, Shift comes back; with some left, they stay as they are
+  const none = L.normalizeSettings({ shiftScroll: false, scrollButtons: [] })
+  assert.deepEqual(L.switchShiftScroll(none, true), { shiftScroll: true, scrollButtons: [L.SHIFT_BUTTON] })
+  assert.deepEqual(L.normalizeSettings({ ...none, ...L.switchShiftScroll(none, true) }).scrollButtons, [L.SHIFT_BUTTON])
+  const some = L.normalizeSettings({ shiftScroll: false, scrollButtons: ['mouse:3'] })
+  assert.deepEqual(L.switchShiftScroll(some, true), { shiftScroll: true })
+  // turned off, the list is kept for next time
+  assert.deepEqual(L.switchShiftScroll(some, false), { shiftScroll: false })
+  assert.deepEqual(L.switchShiftScroll(none, false), { shiftScroll: false })
+})
+
 test('a scroll button is held: Shift from the wheel event, the others from their presses', () => {
   const none = new Set()
   // Shift, there from the start

@@ -98,7 +98,7 @@ function setupScrollButtons(dialog, { getSettings, keep }) {
       remove.addEventListener('click', () => keep(scrollButtons.filter(one => one !== id)))
       return node('span', { class: 'chip scroll-button', role: 'listitem' }, name, remove)
     })
-    // with none, the wheel never moves the board; its scroll bar still does
+    // none left: shift-scrolling is off until it is turned on again, which brings Shift back
     list.replaceChildren(...(chips.length ? chips : [node('span', { class: 'hint' }, 'None')]))
     list.classList.toggle('off', !shiftScroll)
     button.textContent = isPicking ? `${refused ? `${refused} ` : ''}${PICK_PROMPT}` : 'Add button'
@@ -186,6 +186,8 @@ export function setupSettings(initial, { onChange, onResetLayout }) {
     settings = L.normalizeSettings({ ...settings, ...patch })
     saveSettings(settings)
     showMotion()
+    // removing the last scroll button turns shift-scrolling off, and the box shows it
+    shiftScroll.checked = settings.shiftScroll
     scrollButtons.show()
     onChange(settings)
   }
@@ -204,7 +206,7 @@ export function setupSettings(initial, { onChange, onResetLayout }) {
   sidePanel.addEventListener('change', () => update({ sidePanel: sidePanel.checked }))
   wobble.addEventListener('change', () => update({ wobble: wobble.value }))
   terminalApp.addEventListener('change', () => update({ terminalApp: terminalApp.value }))
-  shiftScroll.addEventListener('change', () => update({ shiftScroll: shiftScroll.checked }))
+  shiftScroll.addEventListener('change', () => update(L.switchShiftScroll(settings, shiftScroll.checked)))
   editor.addEventListener('change', () => update({ editor: editor.value }))
   showNotes.addEventListener('change', () => update({ showNotes: showNotes.checked }))
   setupTabs()
