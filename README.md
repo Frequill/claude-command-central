@@ -6,7 +6,7 @@ A live board of every Claude Code session on your Mac, from the Claude app, VS C
 
 ## What you need
 
-- macOS
+- macOS (might make this OS-independant in the future idk)
 - Claude Code with mods (built on 2.1.312; mods are early access and may change)
 - Python 3
 - Google Chrome or Microsoft Edge, for the board's own window (optional)
