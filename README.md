@@ -2,7 +2,7 @@
 
 A live board of every Claude Code session on your Mac, from the Claude app, VS Code and the terminal. See what each one is doing, which ones need you, how full their context is, their agents, tokens and cost. Chat with them, answer their questions and approvals, and run terminals, all from one page.
 
-![CCC in the Clean theme](docs/screenshots/clean.png)
+![CCC in the Clean Dark theme](docs/screenshots/clean-dark.png)
 
 ## What you need
 
@@ -61,7 +61,7 @@ Twelve of them, from Clean to Cyberpunk 2077. Pick one in Settings.
 
 | | | |
 |---|---|---|
-| ![Clean Dark](docs/screenshots/clean-dark.png) | ![macOS](docs/screenshots/macos.png) | ![Windows 98](docs/screenshots/win98.png) |
+| ![Clean](docs/screenshots/clean.png) | ![macOS](docs/screenshots/macos.png) | ![Windows 98](docs/screenshots/win98.png) |
 | ![Inferno](docs/screenshots/inferno.png) | ![Cyberpunk 2077](docs/screenshots/cyberpunk.png) | ![Evangelion](docs/screenshots/eva.png) |
 
 ## Safety
