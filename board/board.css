@@ -2911,8 +2911,8 @@ body.shift-scroll .chat-side {
   gap: 8px;
 }
 
-.scroll-buttons[hidden] {
-  display: none;
+.scroll-buttons.off {
+  opacity: 0.5;
 }
 
 .chip.scroll-button {
@@ -2933,9 +2933,15 @@ body.shift-scroll .chat-side {
   cursor: pointer;
 }
 
-.scroll-button-remove:hover {
+.scroll-button-remove:hover:not(:disabled) {
   color: #fff;
   background: var(--fail);
+}
+
+.scroll-button-remove:disabled,
+.settings button.secondary:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 
 .settings button.secondary.picking {
