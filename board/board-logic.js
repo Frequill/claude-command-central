@@ -120,22 +120,91 @@ export function followWheel(state, { now, shiftKey, delta }) {
   return { state: { at: now, mode, isDropping, size }, drop: isDropping }
 }
 
-/** Shift pressed or let go: a movement still going stops right there. */
+/** Shift (or the scroll button) pressed or let go: a movement still going stops right there. */
 export function shiftChanged(state, now) {
   return state.mode && now - state.at <= WHEEL_GAP_MS ? { ...state, isDropping: true } : state
 }
 
 /**
- * What one turn of the wheel does with shift-scrolling on: 'page' moves the board (Shift held),
- * 'inside' leaves it to the box under the pointer that can still move that way, 'card' scrolls the
- * chat or terminal the pointer is over (on its header or write box), 'nothing' over the background.
- * The board itself never moves without Shift. Windows over the board are left alone.
+ * Whether the wheel moves the board itself: a scroll button held, with shift-scrolling on or off,
+ * or Shift held with shift-scrolling on.
  */
-export function wheelGoes({ isOn, shiftKey, ctrlKey, inWindow, canScrollInside, inCard }) {
-  if (!isOn || ctrlKey || inWindow) return 'default'
-  if (shiftKey) return 'page'
+export function movesBoard({ isOn, shiftKey, buttonHeld }) {
+  return Boolean(buttonHeld || (isOn && shiftKey))
+}
+
+/**
+ * What one turn of the wheel does: 'page' moves the board (a scroll button held, or Shift with
+ * shift-scrolling on), 'default' scrolls as on any web page (shift-scrolling off), and with
+ * shift-scrolling on 'inside' leaves it to the box under the pointer that can still move that way,
+ * 'card' scrolls the chat or terminal the pointer is over (on its header or write box), 'nothing'
+ * over the background. Windows over the board, and pinch-to-zoom, are left alone.
+ */
+export function wheelGoes({ isOn, shiftKey, buttonHeld, ctrlKey, inWindow, canScrollInside, inCard }) {
+  if (ctrlKey || inWindow) return 'default'
+  if (movesBoard({ isOn, shiftKey, buttonHeld })) return 'page'
+  if (!isOn) return 'default'
   if (canScrollInside) return 'inside'
   return inCard ? 'card' : 'nothing'
+}
+
+// the scroll buttons: mouse buttons or keys that, held with the wheel, move the board, with or without
+// shift-scrolling. Each kept as 'mouse:<event.button>' or 'key:<event.code>' (its event.key when it has
+// no code, as keys sent by a mouse's own app can have).
+export const MAX_SCROLL_BUTTONS = 8
+const MOUSE_ID = /^mouse:(\d{1,2})$/
+const KEY_ID = /^key:([A-Za-z0-9]{1,32})$/
+// the left button clicks and the right one opens menus
+const TAKEN_BUTTONS = [0, 2]
+// Shift already moves the board, Control with the wheel zooms, Escape stops the picking, and a key
+// the browser cannot tell apart from others has no name of its own
+const TAKEN_KEYS = /^(Shift|Control|Escape|Unidentified)/
+const MOUSE_NAMES = { 1: 'Middle mouse button', 3: 'Mouse button 4 (back)', 4: 'Mouse button 5 (forward)' }
+const KEY_NAMES = { AltLeft: 'Left Option', AltRight: 'Right Option', MetaLeft: 'Left Command', MetaRight: 'Right Command', Alt: 'Option', Meta: 'Command' }
+
+/** The scroll button a press is, from { kind: 'mouse', button } or { kind: 'key', code, key }. */
+export function scrollButtonOf(press) {
+  return press.kind === 'mouse' ? `mouse:${press.button}` : `key:${press.code || press.key || ''}`
+}
+
+/** The scroll buttons as kept, without broken ones or the same one twice. */
+export function normalizeScrollButtons(value) {
+  return Array.isArray(value) ? [...new Set(value.filter(isScrollButton))].slice(0, MAX_SCROLL_BUTTONS) : []
+}
+
+/** Whether a kept value is a scroll button that can be used. */
+export function isScrollButton(value) {
+  if (typeof value !== 'string') return false
+  const button = MOUSE_ID.exec(value)?.[1]
+  if (button) return !TAKEN_BUTTONS.includes(Number(button))
+  const code = KEY_ID.exec(value)?.[1]
+  return Boolean(code) && !TAKEN_KEYS.test(code)
+}
+
+/**
+ * What a press means while a scroll button is being added (a press as `scrollButtonOf` takes it), with
+ * the ones already `picked`: { pick } the button to add, { cancel } (Escape), { refuse } with why it
+ * cannot be used, or null for a left click, which goes on as a click.
+ */
+export function scrollButtonPress(press, picked = []) {
+  if (press.kind === 'mouse' && press.button === 0) return null
+  const id = scrollButtonOf(press)
+  if (id === 'key:Escape') return { cancel: true }
+  if (picked.includes(id)) return { refuse: `${scrollButtonName(id)} is already added.` }
+  if (isScrollButton(id)) return { pick: id }
+  if (press.kind === 'mouse') return { refuse: 'The right button opens menus.' }
+  if (id.startsWith('key:Shift')) return { refuse: 'Shift already moves the board.' }
+  if (id.startsWith('key:Control')) return { refuse: 'Control with the wheel zooms.' }
+  return { refuse: 'That key cannot be used.' }
+}
+
+/** The scroll button as the settings show it, like "Mouse button 4 (back)" or "Left Option". */
+export function scrollButtonName(id) {
+  if (!isScrollButton(id)) return 'None'
+  const button = MOUSE_ID.exec(id)?.[1]
+  if (button) return MOUSE_NAMES[button] ?? `Mouse button ${Number(button) + 1}`
+  const code = KEY_ID.exec(id)[1]
+  return KEY_NAMES[code] ?? code.replace(/^(Key|Digit)(?=.)/, '').replace(/([a-z])([A-Z0-9])/g, '$1 $2')
 }
 
 /**
@@ -1085,6 +1154,8 @@ export function normalizeSettings(raw) {
     sidePanel: typeof value.sidePanel === 'boolean' ? value.sidePanel : true,
     // the wheel moves only what is under the pointer, and Shift with the wheel moves the board; off unless turned on
     shiftScroll: typeof value.shiftScroll === 'boolean' ? value.shiftScroll : false,
+    // mouse buttons or keys that, held, move the board with the wheel, shift-scrolling on or off; none unless added
+    scrollButtons: normalizeScrollButtons(value.scrollButtons),
     // Claude's short notes between steps, shown as the Claude app shows them, unless the person hides them
     showNotes: typeof value.showNotes === 'boolean' ? value.showNotes : true,
     // the app CCC opens terminal windows in: iTerm when this Mac has it, unless the person picks one

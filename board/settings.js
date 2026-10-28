@@ -76,6 +76,68 @@ function setupTabs() {
   })
 }
 
+const PICK_PROMPT = 'Press a mouse button or a key… Esc cancels'
+
+/**
+ * The scroll buttons: each one added, with a cross to remove it, and Add button, which waits for the
+ * next press of a mouse button or a key and adds that one. Escape, a second click on Add button or
+ * closing the window stops the waiting; a left click elsewhere goes on as a click. `show` draws the
+ * kept list; `keep` gets the new one.
+ */
+function setupScrollButtons(dialog, { getSettings, keep }) {
+  const list = document.querySelector('#scroll-buttons')
+  const button = document.querySelector('#scroll-button-add')
+  let isPicking = false
+  const show = (refused = '') => {
+    const { scrollButtons } = getSettings()
+    list.replaceChildren(
+      ...scrollButtons.map(id => {
+        const name = L.scrollButtonName(id)
+        const remove = node('button', { type: 'button', class: 'scroll-button-remove', 'aria-label': `Remove ${name}`, title: `Remove ${name}` }, '×')
+        remove.addEventListener('click', () => keep(scrollButtons.filter(one => one !== id)))
+        return node('span', { class: 'chip scroll-button', role: 'listitem' }, name, remove)
+      }),
+    )
+    list.hidden = scrollButtons.length === 0
+    button.textContent = isPicking ? `${refused ? `${refused} ` : ''}${PICK_PROMPT}` : 'Add button'
+    button.classList.toggle('picking', isPicking)
+    button.hidden = !isPicking && scrollButtons.length >= L.MAX_SCROLL_BUTTONS
+  }
+  const take = (event, press) => {
+    const { scrollButtons } = getSettings()
+    const said = L.scrollButtonPress(press, scrollButtons)
+    if (!said) return
+    // the press only picks: Escape does not close the window, Space does not click the button
+    event.preventDefault()
+    event.stopPropagation()
+    if (said.refuse) return show(said.refuse)
+    stop()
+    if (said.pick) keep([...scrollButtons, said.pick])
+  }
+  const onKey = event => take(event, { kind: 'key', code: event.code, key: event.key })
+  const onMouse = event => take(event, { kind: 'mouse', button: event.button })
+  // the right button is refused, and opens no menu either
+  const onMenu = event => event.preventDefault()
+  const stop = () => {
+    if (!isPicking) return
+    isPicking = false
+    window.removeEventListener('keydown', onKey, true)
+    window.removeEventListener('mousedown', onMouse, true)
+    window.removeEventListener('contextmenu', onMenu, true)
+    show()
+  }
+  button.addEventListener('click', () => {
+    if (isPicking) return stop()
+    isPicking = true
+    window.addEventListener('keydown', onKey, true)
+    window.addEventListener('mousedown', onMouse, true)
+    window.addEventListener('contextmenu', onMenu, true)
+    show()
+  })
+  dialog.addEventListener('close', stop)
+  return { show }
+}
+
 /** Fills and wires the dialog; `onChange` gets the new settings after every change. */
 export function setupSettings(initial, { onChange, onResetLayout }) {
   let settings = initial
@@ -121,9 +183,12 @@ export function setupSettings(initial, { onChange, onResetLayout }) {
     settings = L.normalizeSettings({ ...settings, ...patch })
     saveSettings(settings)
     showMotion()
+    scrollButtons.show()
     onChange(settings)
   }
+  const scrollButtons = setupScrollButtons(dialog, { getSettings: () => settings, keep: kept => update({ scrollButtons: kept }) })
   showMotion()
+  scrollButtons.show()
   // one click in the header turns every motion off or on, as the box in the settings does
   toggle.addEventListener('click', () => update({ animations: !settings.animations }))
   freeze.addEventListener('click', () => update({ freeze: !settings.freeze }))

@@ -268,6 +268,13 @@
               <p class="hint">Off, scrolling works as on any web page: a chat scrolls until its end, and then the board does.</p>
             </fieldset>
             <fieldset>
+              <legend>Scroll buttons</legend>
+              <p id="scroll-buttons-about" class="hint">Hold one of these and scroll to move the board, even over a chat. Works with shift-scrolling on or off.</p>
+              <div id="scroll-buttons" class="scroll-buttons" role="list" aria-describedby="scroll-buttons-about"></div>
+              <button id="scroll-button-add" type="button" class="secondary">Add button</button>
+              <p class="hint">Click Add button, then press the mouse button or key to use, like an extra button on the side of your mouse.</p>
+            </fieldset>
+            <fieldset>
               <legend>Motion</legend>
               <label class="check"><input id="opt-animations" type="checkbox" /> Animations</label>
               <label class="field" for="opt-wobble">

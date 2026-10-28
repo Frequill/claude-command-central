@@ -797,35 +797,60 @@ function cardScroller(target) {
 /**
  * Shift-scrolling (a setting): the wheel moves what is under the pointer and never the board, so a
  * board full of chats and terminals stays put while you read; Shift with the wheel moves the board.
- * A window over the board (settings, the start window) scrolls as always.
+ * The scroll buttons (another setting: extra mouse buttons or keys) move the board while held, with
+ * shift-scrolling on or off. A window over the board (settings, the start window) scrolls as always.
  */
 function setupShiftScroll() {
   let wheel = L.WHEEL_START
-  const onShift = event => {
-    if (event.key === 'Shift') wheel = L.shiftChanged(wheel, performance.now())
+  // the scroll buttons held down right now
+  const held = new Set()
+  const isScrollButton = id => view.settings.scrollButtons.includes(id)
+  const hold = (id, isDown) => {
+    if (!isScrollButton(id) || isDown === held.has(id)) return
+    const wasHeld = held.size > 0
+    if (isDown) held.add(id)
+    else held.delete(id)
+    if (wasHeld !== held.size > 0) wheel = L.shiftChanged(wheel, performance.now())
   }
-  window.addEventListener('keydown', onShift, true)
-  window.addEventListener('keyup', onShift, true)
+  const onKey = event => {
+    if (event.key === 'Shift' && view.settings.shiftScroll) wheel = L.shiftChanged(wheel, performance.now())
+    hold(L.scrollButtonOf({ kind: 'key', code: event.code, key: event.key }), event.type === 'keydown')
+  }
+  const onMouse = event => {
+    const id = L.scrollButtonOf({ kind: 'mouse', button: event.button })
+    if (!isScrollButton(id)) return
+    if (event.type !== 'auxclick') hold(id, event.type === 'mousedown')
+    // held for scrolling, the back and forward buttons must not change the page, nor the middle one open a link
+    event.preventDefault()
+  }
+  window.addEventListener('keydown', onKey, true)
+  window.addEventListener('keyup', onKey, true)
+  for (const type of ['mousedown', 'mouseup', 'auxclick']) window.addEventListener(type, onMouse, true)
+  // a button let go outside the window is never heard of; leaving the window lets go of it
+  window.addEventListener('blur', () => held.clear())
   window.addEventListener(
     'wheel',
     event => {
       if (event.defaultPrevented) return
       const unit = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? window.innerHeight : 1
       const target = event.target
-      const isOurs = view.settings.shiftScroll && !event.ctrlKey && !document.querySelector('dialog[open]')
+      const isOn = view.settings.shiftScroll
+      const isOurs = (isOn || view.settings.scrollButtons.length > 0) && !event.ctrlKey && !document.querySelector('dialog[open]')
+      const movesBoard = L.movesBoard({ isOn, shiftKey: event.shiftKey, buttonHeld: held.size > 0 })
       if (isOurs) {
-        // the glide left of a movement Shift changed in the middle of goes nowhere
+        // the glide left of a movement Shift or a scroll button changed in the middle of goes nowhere
         const delta = Math.abs(event.deltaY) >= Math.abs(event.deltaX) ? event.deltaY : event.deltaX
-        const followed = L.followWheel(wheel, { now: performance.now(), shiftKey: event.shiftKey, delta: delta * unit })
+        const followed = L.followWheel(wheel, { now: performance.now(), shiftKey: movesBoard, delta: delta * unit })
         wheel = followed.state
         if (followed.drop) return event.preventDefault()
       }
       const goes = L.wheelGoes({
-        isOn: view.settings.shiftScroll,
+        isOn,
         shiftKey: event.shiftKey,
+        buttonHeld: held.size > 0,
         ctrlKey: event.ctrlKey,
         inWindow: Boolean(document.querySelector('dialog[open]')),
-        canScrollInside: !event.shiftKey && canScrollInside(target, event.deltaX, event.deltaY),
+        canScrollInside: !movesBoard && canScrollInside(target, event.deltaX, event.deltaY),
         inCard: Boolean(cardScroller(target)),
       })
       if (goes === 'default' || goes === 'inside') return
