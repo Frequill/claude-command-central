@@ -1,0 +1,442 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Claude Command Central</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link
+      rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=Open+Sans:wght@400;600;700;800&family=IBM+Plex+Mono:wght@400;500;600&family=Metal+Mania&family=Orbitron:wght@500;700;900&family=Exo+2:wght@400;600;700;800&family=Press+Start+2P&family=Noto+Serif+JP:wght@900&family=Barlow+Condensed:wght@600;700;800&family=Rajdhani:wght@500;600;700&family=Share+Tech+Mono&display=swap"
+    />
+    <link rel="stylesheet" href="/xterm.css" />
+    <link rel="stylesheet" href="/gridstack.css" />
+    <link rel="stylesheet" href="/board.css" />
+  </head>
+  <body class="theme-aero">
+    <div class="scene" aria-hidden="true">
+      <canvas id="scene-canvas" class="scene-canvas"></canvas>
+      <div id="scene-aero" class="scene-aero">
+        <div class="ribbon ribbon-a"></div>
+        <div class="ribbon ribbon-b"></div>
+        <div class="ribbon ribbon-c"></div>
+        <svg class="hills" viewBox="0 0 1440 220" preserveAspectRatio="none">
+          <defs>
+            <linearGradient id="hill-a" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0" stop-color="#9be15d" />
+              <stop offset="1" stop-color="#3f9b25" />
+            </linearGradient>
+            <linearGradient id="hill-b" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0" stop-color="#7ccf3f" />
+              <stop offset="1" stop-color="#2e7d18" />
+            </linearGradient>
+          </defs>
+          <path d="M0 120 C240 40 520 60 760 110 S1200 170 1440 80 L1440 220 L0 220 Z" fill="url(#hill-a)" opacity="0.85" />
+          <path d="M0 170 C300 110 620 150 900 160 S1260 120 1440 150 L1440 220 L0 220 Z" fill="url(#hill-b)" />
+        </svg>
+        <div id="bubbles" class="bubbles"></div>
+      </div>
+    </div>
+
+    <header class="taskbar shine">
+      <div class="orb" aria-hidden="true">CCC</div>
+      <div class="title">
+        <span class="name">Claude Command Central</span>
+        <span class="tagline">Every Claude Code session on this Mac, live</span>
+      </div>
+      <span id="link" class="pill pill-idle">○ CONNECTING</span>
+      <button id="new-session" class="new-session-button" type="button" aria-haspopup="dialog" aria-controls="start-dialog" title="Start a Claude Code session" aria-label="Start a Claude Code session">+</button>
+      <button id="update-ready" class="pill pill-wait update-ready" type="button" title="CCC has new code. Reload to get it; what you are writing stays until then." hidden>↻ UPDATE READY</button>
+      <div id="summary" class="summary" role="group" aria-label="Overview">
+        <button id="tokens" class="sum sum-tokens" type="button" aria-haspopup="dialog" aria-controls="tokens-history" title="Tokens today, all sessions, their agents and closed sessions too. Starts over at midnight. Click for the history.">
+          <span class="sum-lines tok-main">
+            <span class="sum-label">TOKENS TODAY</span>
+            <span id="tokens-total" class="sum-value tok-total">–</span>
+          </span>
+          <span class="tok-kinds">
+            <span class="sum-lines tok-kind" title="Output: what Claude wrote today, its answers, code and commands.">
+              <span class="sum-label">OUTPUT</span>
+              <span id="tokens-output" class="sum-value small">–</span>
+            </span>
+            <span class="sum-lines tok-kind" title="Input: new text Claude read today, your messages, files and command results.">
+              <span class="sum-label">INPUT</span>
+              <span id="tokens-input" class="sum-value small">–</span>
+            </span>
+            <span class="sum-lines tok-kind" title="Cached: the conversation so far, which Claude reads again from its cache at every step.">
+              <span class="sum-label">CACHED</span>
+              <span id="tokens-cached" class="sum-value small">–</span>
+            </span>
+          </span>
+          <svg id="tokens-chart" class="sum-chart tok-chart" viewBox="0 0 240 48" preserveAspectRatio="none" role="img" aria-label="Tokens through the day">
+            <defs>
+              <linearGradient id="tokens-fill" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0" style="stop-color: var(--chart)" stop-opacity="0.55" />
+                <stop offset="1" style="stop-color: var(--chart)" stop-opacity="0" />
+              </linearGradient>
+            </defs>
+            <path id="tokens-area" fill="url(#tokens-fill)" />
+            <path id="tokens-line" class="spend-line" />
+            <line id="tokens-cursor" class="tok-cursor" x1="0" x2="0" y1="0" y2="48" visibility="hidden" />
+          </svg>
+          <span id="tokens-yesterday-box" class="sum-lines tok-kind tok-yesterday-box">
+            <span class="sum-label">YESTERDAY</span>
+            <span id="tokens-yesterday" class="sum-value small">–</span>
+          </span>
+          <span class="tok-open" aria-hidden="true">
+            <svg viewBox="0 0 16 16" width="14" height="14"><path d="M3 13V8M7 13V4M11 13V6M15 13H1" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" /></svg>
+          </span>
+        </button>
+        <div id="prompts" class="sum sum-prompts" title="Prompts you wrote today, to every session">
+          <span class="sum-lines">
+            <span class="sum-label">PROMPTS TODAY</span>
+            <span id="prompts-total" class="sum-value">–</span>
+          </span>
+        </div>
+        <div class="sum sum-sessions">
+          <svg id="sessions-ring" class="sum-ring" width="34" height="34" viewBox="0 0 104 104" role="img" aria-label="Sessions">
+            <defs>
+              <linearGradient id="g-work" x1="0" y1="0" x2="1" y2="1">
+                <stop offset="0" style="stop-color: var(--work-from)" />
+                <stop offset="1" style="stop-color: var(--work-to)" />
+              </linearGradient>
+              <linearGradient id="g-wait" x1="0" y1="0" x2="1" y2="1">
+                <stop offset="0" style="stop-color: var(--wait-from)" />
+                <stop offset="1" style="stop-color: var(--wait-to)" />
+              </linearGradient>
+              <linearGradient id="g-done" x1="0" y1="0" x2="1" y2="1">
+                <stop offset="0" style="stop-color: var(--done-from)" />
+                <stop offset="1" style="stop-color: var(--done-to)" />
+              </linearGradient>
+              <linearGradient id="g-ok" x1="0" y1="0" x2="1" y2="1">
+                <stop offset="0" style="stop-color: var(--ok-from)" />
+                <stop offset="1" style="stop-color: var(--ok-to)" />
+              </linearGradient>
+            </defs>
+            <circle class="ring-track" cx="52" cy="52" r="40" stroke-width="16" />
+            <circle id="ring-working" class="ring-arc" cx="52" cy="52" r="40" stroke="url(#g-work)" stroke-width="16" />
+            <circle id="ring-needs" class="ring-arc" cx="52" cy="52" r="40" stroke="url(#g-wait)" stroke-width="16" />
+            <circle id="ring-done" class="ring-arc" cx="52" cy="52" r="40" stroke="url(#g-done)" stroke-width="16" />
+            <text id="ring-live" class="ring-text" x="52" y="66" font-size="40">0</text>
+          </svg>
+          <span class="sum-lines">
+            <span class="sum-label">SESSIONS</span>
+            <span class="sum-counts"><span class="key key-work"></span><span id="stat-working">0 working</span> <span class="key key-wait"></span><span id="stat-needs">0 need you</span> <span class="key key-done"></span><span id="stat-done">0 done</span></span>
+          </span>
+          <span id="stat-agents" class="sum-note">0 agents running</span>
+        </div>
+        <div id="limits" class="sum-limits"></div>
+      </div>
+      <span class="tray">
+        <span id="clock" class="clock">--:--:--</span>
+        <span id="tray-date" class="tray-date"></span>
+      </span>
+      <button id="motion-toggle" class="settings-button switch" type="button" role="switch" aria-checked="true" title="Turns all motion on the board off or on: the background, the glows and the moving lines">
+        <span class="switch-track" aria-hidden="true"><span class="switch-thumb"></span></span>
+        <span>Animations</span>
+      </button>
+      <button id="freeze-toggle" class="settings-button switch" type="button" role="switch" aria-checked="false" title="When on, the board holds still while its window is in the background, which saves power. When off, it keeps moving.">
+        <span class="switch-track" aria-hidden="true"><span class="switch-thumb"></span></span>
+        <span>Freeze in background</span>
+      </button>
+      <button id="settings-open" class="settings-button" type="button" aria-haspopup="dialog" aria-controls="settings">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <circle cx="12" cy="12" r="3" />
+          <path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 0 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 0 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 0 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 0 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z" />
+        </svg>
+        <span>Settings</span>
+      </button>
+    </header>
+
+    <div id="decor-top" class="decor-top"></div>
+
+    <main class="content">
+
+      <div class="workspace">
+        <div class="main-column">
+          <section class="sessions" aria-labelledby="sessions-title">
+            <h2 id="sessions-title" class="visually-hidden">Sessions</h2>
+            <p id="sessions-empty" class="glass empty-card">No sessions yet. Start or continue a Claude session and it shows up here.</p>
+            <div id="sessions" class="tiles grid-stack"></div>
+          </section>
+
+          <section class="glass map-panel panel" data-panel="map" aria-labelledby="map-title" hidden>
+            <h2 id="map-title" class="window-title">
+              AGENT MAP <span id="map-count" class="title-note"></span>
+              <button id="map-clear" class="title-button" type="button" title="Remove everything that is not working right now from the board">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="M20 11a8 8 0 1 0-2.3 5.7" />
+                  <path d="M20 4v7h-7" />
+                </svg>
+                <span>Clear finished</span>
+              </button>
+            </h2>
+            <p id="map-empty" class="note">No agents right now.</p>
+            <div id="map" class="map"></div>
+          </section>
+
+        </div>
+
+        <aside id="sidebar" class="sidebar" aria-label="Tool mix and notes">
+          <div id="decor-side" class="decor-side"></div>
+          <section class="glass side panel tools-panel" data-panel="tools" aria-labelledby="tools-title">
+            <h2 id="tools-title" class="window-title">TOOL MIX <span class="title-note">· sessions on the board</span></h2>
+            <p id="tools-empty" class="note">No tool calls yet.</p>
+            <div id="tools"></div>
+          </section>
+
+          <section class="glass notes-panel panel" data-panel="notes" aria-labelledby="notes-title">
+            <h2 id="notes-title" class="window-title">NOTES</h2>
+            <textarea id="notes-text" class="notes-text" aria-labelledby="notes-title" spellcheck="true" maxlength="20000"></textarea>
+          </section>
+        </aside>
+      </div>
+    </main>
+
+    <dialog id="settings" class="settings settings-window" aria-labelledby="settings-title">
+      <form method="dialog" class="settings-body">
+        <h2 id="settings-title" class="window-title">SETTINGS</h2>
+        <div id="settings-tabs" class="th-periods settings-tabs" role="tablist" aria-label="Settings">
+          <button type="button" role="tab" class="th-period" id="settings-tab-look" data-tab="look" aria-controls="settings-page-look">Theme</button>
+          <button type="button" role="tab" class="th-period" id="settings-tab-board" data-tab="board" aria-controls="settings-page-board">Board</button>
+          <button type="button" role="tab" class="th-period" id="settings-tab-behaviour" data-tab="behaviour" aria-controls="settings-page-behaviour">Scrolling &amp; motion</button>
+          <button type="button" role="tab" class="th-period" id="settings-tab-terminal" data-tab="terminal" aria-controls="settings-page-terminal">Terminal &amp; editor</button>
+        </div>
+        <div class="settings-pages">
+          <section id="settings-page-look" class="settings-page" role="tabpanel" aria-labelledby="settings-tab-look" data-page="look">
+            <fieldset>
+              <legend>Background</legend>
+              <div id="theme-choices" class="theme-grid"></div>
+            </fieldset>
+          </section>
+          <section id="settings-page-board" class="settings-page" role="tabpanel" aria-labelledby="settings-tab-board" data-page="board" hidden>
+            <fieldset>
+              <legend>Status bar</legend>
+              <label class="check"><input id="opt-status-bar" type="checkbox" /> Show the status bar along the bottom</label>
+              <p class="hint">Your 5-hour and weekly limits, what you spent today and the agents at work, in the look of the theme you picked.</p>
+            </fieldset>
+            <fieldset>
+              <legend>Side panel</legend>
+              <label class="check"><input id="opt-side-panel" type="checkbox" /> Show the panel at the right</label>
+              <p class="hint">The radar, the tool mix and your notes. Turned off, its room goes to the Claude windows and terminals. Your notes are kept.</p>
+            </fieldset>
+            <fieldset>
+              <legend>Chat</legend>
+              <label class="check has-tip">
+                <input id="opt-show-notes" type="checkbox" aria-describedby="tip-show-notes" />
+                Show Claude's notes between steps
+                <span class="tip-mark" aria-hidden="true">?</span>
+                <span id="tip-show-notes" class="tip-pop" role="tooltip">
+                  While Claude works, it writes short notes between its steps, like "The manifest is stale, checking whether the server rebuilt". The Claude app shows them as ordinary text.<br /><br />
+                  <strong>On:</strong> CCC shows them too, as the app does.<br /><br />
+                  <strong>Off:</strong> only Claude's full replies show, and its steps are grouped more tightly, like "Ran 3 commands, read a file".
+                </span>
+              </label>
+              <p class="hint">Off, nothing is lost: the notes stay in the conversation and show again when you turn this on.</p>
+            </fieldset>
+            <fieldset>
+              <legend>Caveman mode</legend>
+              <label class="field" for="opt-caveman">
+                Caveman mode for sessions you have not switched yourself
+                <select id="opt-caveman">
+                  <option value="off">Off</option>
+                  <option value="lite">Lite</option>
+                  <option value="full">Full</option>
+                  <option value="ultra">Ultra</option>
+                </select>
+              </label>
+              <p class="hint">Claude answers tersely to save tokens, with the caveman skill's rules. Switch it for one session with the rock button in its title bar. It starts with your next message to that session. Code, commits and warnings stay written normally.</p>
+            </fieldset>
+            <fieldset>
+              <legend>Layout</legend>
+              <p class="hint">Drag a card by its title bar to move it: the cards in its way make room. Drag a card's side, bottom or corner to resize it. Reset layout puts every card back, two to a row.</p>
+              <button id="layout-reset" type="button" class="secondary">Reset layout</button>
+            </fieldset>
+          </section>
+          <section id="settings-page-behaviour" class="settings-page" role="tabpanel" aria-labelledby="settings-tab-behaviour" data-page="behaviour" hidden>
+            <fieldset>
+              <legend>Scrolling</legend>
+              <label class="check has-tip">
+                <input id="opt-shift-scroll" type="checkbox" aria-describedby="tip-shift-scroll" />
+                Enable shift-scrolling for Command Central
+                <span class="tip-mark" aria-hidden="true">?</span>
+                <span id="tip-shift-scroll" class="tip-pop" role="tooltip">
+                  <strong>On:</strong> scrolling moves only what is under the mouse: a chat, a terminal, the facts beside a chat, your notes. Over a chat's header or write box it scrolls that chat. It never moves the board itself, so a board full of windows stays put while you read.<br /><br />
+                  <strong>Hold Shift and scroll</strong> to move the board up and down.<br /><br />
+                  Windows that open over the board, like this one, scroll as they always do.
+                </span>
+              </label>
+              <p class="hint">Off, scrolling works as on any web page: a chat scrolls until its end, and then the board does.</p>
+            </fieldset>
+            <fieldset>
+              <legend>Motion</legend>
+              <label class="check"><input id="opt-animations" type="checkbox" /> Animations</label>
+              <label class="field" for="opt-wobble">
+                Wobble when you drag a card or move the window
+                <select id="opt-wobble">
+                  <option value="aero">Only in Aero 2007</option>
+                  <option value="always">In every theme</option>
+                  <option value="never">Never</option>
+                </select>
+              </label>
+            </fieldset>
+          </section>
+          <section id="settings-page-terminal" class="settings-page" role="tabpanel" aria-labelledby="settings-tab-terminal" data-page="terminal" hidden>
+            <fieldset>
+              <legend>Terminal app</legend>
+              <label class="field" for="opt-terminal-app">
+                Open terminal windows in
+                <select id="opt-terminal-app">
+                  <option value="auto">Automatic (iTerm when it is installed)</option>
+                  <option value="iterm">iTerm</option>
+                  <option value="terminal">Terminal</option>
+                </select>
+              </label>
+              <p class="hint">Used by "Start in" for new Claude sessions, by Resume, and by "Open in…" on a terminal card.</p>
+            </fieldset>
+            <fieldset>
+              <legend>Editor</legend>
+              <label class="field" for="opt-editor">
+                Open files from Claude's steps in
+                <select id="opt-editor">
+                  <option value="off">Off: file names are plain text</option>
+                  <option value="auto">Automatic (the editor you have open)</option>
+                  <option value="intellij">IntelliJ IDEA</option>
+                  <option value="vscode">VS Code</option>
+                </select>
+              </label>
+              <p class="hint">On, the file name in an opened step (an edit, a read, a new file) opens that file in your editor at the line Claude changed or read.</p>
+            </fieldset>
+          </section>
+        </div>
+        <div class="settings-actions settings-foot">
+          <button value="close" class="primary">Done</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="tokens-history" class="settings token-history" aria-labelledby="tokens-history-title">
+      <div class="settings-body">
+        <div class="th-head">
+          <h2 id="tokens-history-title" class="window-title">TOKEN HISTORY</h2>
+          <span class="th-select-box"><select id="th-period" class="th-select" aria-label="Period"></select></span>
+          <button id="th-close" class="th-close" type="button" aria-label="Close">×</button>
+        </div>
+        <p class="hint th-intro">Every session on this Mac, their agents and closed sessions too, read from Claude Code's transcripts.</p>
+        <div id="th-kinds" class="th-tabs" role="tablist" aria-label="Kind of tokens"></div>
+        <section id="th-page" class="th-page" role="tabpanel">
+          <h3 id="th-graph-title" class="th-graph-title"></h3>
+          <div id="th-plot" class="th-plot"></div>
+          <div id="th-stats" class="th-stats"></div>
+        </section>
+        <p id="th-note" class="hint th-note" hidden></p>
+        <details class="th-table-box">
+          <summary>Show as a table</summary>
+          <div class="th-table-scroll"><table id="th-table" class="th-table"></table></div>
+        </details>
+        <div id="th-tip" class="tok-tip" role="tooltip" hidden></div>
+      </div>
+    </dialog>
+
+    <dialog id="agent-steps" class="settings agent-steps" aria-labelledby="agent-steps-title">
+      <div class="settings-body">
+        <div class="th-head">
+          <h2 id="agent-steps-title" class="window-title">AGENT STEPS</h2>
+          <button id="as-close" class="th-close" type="button" aria-label="Close">×</button>
+        </div>
+        <div id="as-head" class="as-head"></div>
+        <ol id="as-plan" class="as-plan" aria-label="Its plan" hidden></ol>
+        <p id="as-note" class="hint" hidden></p>
+        <ol id="as-steps" class="as-steps" aria-label="Steps, the latest last"></ol>
+      </div>
+    </dialog>
+
+    <dialog id="start-dialog" class="settings start-dialog" aria-labelledby="start-title">
+      <form method="dialog" class="settings-body">
+        <h2 id="start-title" class="window-title">ADD A SESSION</h2>
+        <div id="start-mode" class="th-periods start-mode" role="radiogroup" aria-label="What to add">
+          <button type="button" role="radio" class="th-period" data-mode="new" aria-checked="true">New session</button>
+          <button type="button" role="radio" class="th-period" data-mode="existing" aria-checked="false">From an existing conversation</button>
+          <button type="button" role="radio" class="th-period" data-mode="terminal" aria-checked="false">New terminal</button>
+        </div>
+        <div id="start-existing" class="start-existing" hidden>
+          <input id="existing-search" class="existing-search" type="search" placeholder="Search by name or folder" aria-label="Search your conversations" />
+          <p class="hint">Your conversations in Claude on this Mac, the newest first. Add one to CCC to follow it and write to it here.</p>
+          <div id="existing-list" class="existing-list" role="list" aria-label="Your conversations"></div>
+        </div>
+        <fieldset class="start-new">
+          <legend>Folder</legend>
+          <div id="start-folders" class="start-folders" role="radiogroup" aria-label="Recent folders"></div>
+          <div class="start-pick">
+            <button id="start-pick" type="button" class="secondary">Choose folder…</button>
+            <span class="hint">opens the Mac's own folder window</span>
+          </div>
+        </fieldset>
+        <p id="start-shell-note" class="hint start-note" hidden>A shell on the board, in this folder: your own zsh, with its colours, Tab and Ctrl+C. Each terminal card can open the same folder in a real window of your terminal app.</p>
+        <fieldset id="start-in" class="start-new">
+          <legend>Start in</legend>
+          <div id="start-where" class="th-periods start-where" role="radiogroup" aria-label="Start in">
+            <button type="button" role="radio" class="th-period" data-where="app">Claude app</button>
+            <button type="button" role="radio" class="th-period" data-where="terminal" id="start-app-name">Terminal</button>
+          </div>
+          <p id="start-note" class="hint start-note"></p>
+          <label class="field start-perm" for="start-perm">
+            Mode
+            <select id="start-perm">
+              <option value="">Your default (from Claude Code's settings)</option>
+              <option value="auto">Auto</option>
+              <option value="acceptEdits">Accept edits</option>
+              <option value="plan">Plan</option>
+              <option value="manual">Ask before acting</option>
+            </select>
+          </label>
+          <p id="start-perm-note" class="hint start-perm-note"></p>
+          <textarea id="start-prompt" class="start-prompt" rows="3" maxlength="20000" placeholder="First message to Claude (optional)" aria-label="First message to Claude" hidden></textarea>
+        </fieldset>
+        <p id="start-problem" class="hint start-problem" role="status"></p>
+        <div class="settings-actions confirm-actions">
+          <button value="cancel" class="secondary">Cancel</button>
+          <button id="start-go" type="button" class="primary">Start</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="remove-dialog" class="settings confirm" aria-labelledby="remove-title">
+      <form method="dialog" class="settings-body">
+        <h2 id="remove-title" class="window-title">CLOSE SESSION</h2>
+        <p class="confirm-question">What should happen to <strong id="remove-name">this session</strong>?</p>
+        <div class="close-choices">
+          <button id="remove-confirm" value="remove" class="close-choice">
+            <strong>Close from CCC</strong>
+            <span>Only CCC lets go of it. The conversation goes on where it runs, stays in Claude's history, and comes back here as soon as you write in it again.</span>
+          </button>
+          <button id="remove-end" value="end" class="close-choice close-end">
+            <strong>Clear its context</strong>
+            <span id="remove-end-note">Stops Claude, then runs /clear in the session, so it starts over with an empty context. The old conversation stays in Claude's history. CCC closes it too.</span>
+          </button>
+        </div>
+        <div class="settings-actions confirm-actions">
+          <button value="cancel" class="secondary">Cancel</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="terminal-close-dialog" class="settings confirm" aria-labelledby="terminal-close-title">
+      <form method="dialog" class="settings-body">
+        <h2 id="terminal-close-title" class="window-title">CLOSE TERMINAL</h2>
+        <p class="confirm-question">Are you sure? This will terminate <strong id="terminal-close-name">this terminal</strong>.</p>
+        <p class="hint">Its shell ends, and so does anything still running in it. This cannot be undone.</p>
+        <div class="settings-actions confirm-actions">
+          <button value="cancel" class="secondary">Cancel</button>
+          <button id="terminal-close-confirm" value="close" class="primary">Close terminal</button>
+        </div>
+      </form>
+    </dialog>
+
+    <div id="decor-bottom" class="decor-bottom"></div>
+
+    <script src="/xterm.js"></script>
+    <script src="/xterm-fit.js"></script>
+    <script src="/gridstack.js"></script>
+    <script type="module" src="/board.js"></script>
+  </body>
+</html>

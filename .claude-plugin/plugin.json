@@ -1,0 +1,6 @@
+{
+  "name": "ccc",
+  "version": "2.0.0",
+  "description": "Claude Command Central: live progress, agents, log and usage for every Claude Code session",
+  "types": "./types/index.d.ts"
+}

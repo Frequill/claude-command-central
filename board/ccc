@@ -1,0 +1,125 @@
+#!/bin/bash
+# ccc: opens the CCC board in a browser window of its own.
+#   ccc        starts the server when needed, asks whether to close this terminal,
+#                      then opens the board
+#   ccc stop   stops the server; it asks first while terminals run on the board,
+#              since stopping it ends them (ccc stop --force does not ask)
+# Exits 100 when the person asked to close the terminal: the ccc function in
+# ~/.zshrc then exits the shell, which closes the terminal window cleanly.
+set -uo pipefail
+
+PORT="${CCC_PORT:-8765}"
+URL="http://127.0.0.1:${PORT}/"
+BOARD_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+SERVER="$BOARD_DIR/serve.py"
+LOG="$HOME/.claude/ccc/server.log"
+CLOSE_TERMINAL=100
+
+is_up() {
+  curl -fsS --max-time 1 "${URL}api/health" 2>/dev/null | grep -q '"app": "ccc"'
+}
+
+is_port_taken() {
+  lsof -nP -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1
+}
+
+start_server() {
+  mkdir -p "$(dirname "$LOG")"
+  CCC_PORT="$PORT" nohup python3 "$SERVER" >>"$LOG" 2>&1 </dev/null &
+  disown
+  for _ in $(seq 1 30); do
+    is_up && return 0
+    sleep 0.1
+  done
+  echo "The board server did not start. See $LOG" >&2
+  return 1
+}
+
+# how many terminals on the board still run a shell: the server ends them all when it stops
+running_terminals() {
+  curl -fsS --max-time 2 "${URL}api/sessions" 2>/dev/null |
+    python3 -I -c 'import json, sys
+try:
+    cards = json.load(sys.stdin).get("terminals", [])
+except ValueError:
+    cards = []
+print(sum(1 for card in cards if isinstance(card, dict) and not card.get("endedAt")))' 2>/dev/null || echo 0
+}
+
+# yes only when the person says so; with no one at the keyboard to ask, it is no
+sure_to_end_terminals() {
+  local count="$1" answer word="terminals"
+  [ "$count" = "1" ] && word="terminal"
+  echo "Are you sure? This will terminate all active terminals: $count $word running in CCC, and anything running in them."
+  if [ ! -t 0 ]; then
+    echo "Nothing was stopped. Run 'ccc stop --force' to stop it anyway." >&2
+    return 1
+  fi
+  read -r -n 1 -p "Stop the board server? (y/n) " answer
+  echo
+  [[ "$answer" =~ ^[yY]$ ]]
+}
+
+stop_server() {
+  local pid force="${1:-}" count
+  pid="$(lsof -t -nP -iTCP:"$PORT" -sTCP:LISTEN 2>/dev/null | head -1)"
+  if [ -n "$pid" ] && is_up; then
+    count="$(running_terminals)"
+    if [ "$force" != "--force" ] && [ "${count:-0}" -gt 0 ] && ! sure_to_end_terminals "$count"; then
+      echo "The board server keeps running."
+      return 1
+    fi
+    kill "$pid"
+    echo "Board server stopped."
+  else
+    echo "Board server was not running."
+  fi
+}
+
+open_board() {
+  local app
+  for app in "Google Chrome" "Microsoft Edge"; do
+    if [ -d "/Applications/$app.app" ]; then
+      open -na "$app" --args --app="$URL" --new-window
+      return
+    fi
+  done
+  open "$URL"
+}
+
+wants_terminal_closed() {
+  local answer
+  read -r -n 1 -p "Close this terminal when the board opens? (y/n) " answer
+  echo
+  [[ "$answer" =~ ^[yY]$ ]]
+}
+
+main() {
+  case "${1:-}" in
+    stop)
+      stop_server "${2:-}"
+      return
+      ;;
+    "") ;;
+    *)
+      echo "Usage: ccc [stop [--force]]" >&2
+      return 2
+      ;;
+  esac
+
+  if ! is_up; then
+    if is_port_taken; then
+      echo "Port $PORT is already in use by something else. Pick another with CCC_PORT=<port>." >&2
+      return 1
+    fi
+    start_server || return 1
+  fi
+
+  local close=false
+  if [ -t 0 ] && wants_terminal_closed; then close=true; fi
+  open_board
+  if $close; then return "$CLOSE_TERMINAL"; fi
+  return 0
+}
+
+main "$@"
