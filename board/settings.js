@@ -79,28 +79,31 @@ function setupTabs() {
 const PICK_PROMPT = 'Press a mouse button or a key… Esc cancels'
 
 /**
- * The scroll buttons: each one added, with a cross to remove it, and Add button, which waits for the
- * next press of a mouse button or a key and adds that one. Escape, a second click on Add button or
- * closing the window stops the waiting; a left click elsewhere goes on as a click. `show` draws the
- * kept list; `keep` gets the new one.
+ * Shift-scrolling's scroll buttons: each one, with a cross to remove it, and Add button, which waits
+ * for the next press of a mouse button or a key and adds that one. Escape, a second click on Add
+ * button, closing the window or turning shift-scrolling off stops the waiting; a left click elsewhere
+ * goes on as a click. `show` draws the kept list; `keep` gets the new one.
  */
 function setupScrollButtons(dialog, { getSettings, keep }) {
   const list = document.querySelector('#scroll-buttons')
   const button = document.querySelector('#scroll-button-add')
   let isPicking = false
   const show = (refused = '') => {
-    const { scrollButtons } = getSettings()
-    list.replaceChildren(
-      ...scrollButtons.map(id => {
-        const name = L.scrollButtonName(id)
-        const remove = node('button', { type: 'button', class: 'scroll-button-remove', 'aria-label': `Remove ${name}`, title: `Remove ${name}` }, '×')
-        remove.addEventListener('click', () => keep(scrollButtons.filter(one => one !== id)))
-        return node('span', { class: 'chip scroll-button', role: 'listitem' }, name, remove)
-      }),
-    )
-    list.hidden = scrollButtons.length === 0
+    const { shiftScroll, scrollButtons } = getSettings()
+    if (!shiftScroll) stop()
+    const chips = scrollButtons.map(id => {
+      const name = L.scrollButtonName(id)
+      const remove = node('button', { type: 'button', class: 'scroll-button-remove', 'aria-label': `Remove ${name}`, title: `Remove ${name}` }, '×')
+      remove.disabled = !shiftScroll
+      remove.addEventListener('click', () => keep(scrollButtons.filter(one => one !== id)))
+      return node('span', { class: 'chip scroll-button', role: 'listitem' }, name, remove)
+    })
+    // with none, the wheel never moves the board; its scroll bar still does
+    list.replaceChildren(...(chips.length ? chips : [node('span', { class: 'hint' }, 'None')]))
+    list.classList.toggle('off', !shiftScroll)
     button.textContent = isPicking ? `${refused ? `${refused} ` : ''}${PICK_PROMPT}` : 'Add button'
     button.classList.toggle('picking', isPicking)
+    button.disabled = !shiftScroll
     button.hidden = !isPicking && scrollButtons.length >= L.MAX_SCROLL_BUTTONS
   }
   const take = (event, press) => {
