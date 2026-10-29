@@ -5,9 +5,10 @@ import { isSafeSessionId } from './snapshot'
 /**
  * Caveman mode, switched per session from CCC. The board's server keeps the choice in
  * `~/.claude/ccc/caveman/<session>.json` (or `default.json` for sessions with no choice of their own).
- * While it is on, each message to Claude carries a note the person does not see: the caveman skill's
- * whole rules, every time, so they hold however long the session runs. Switching costs no turn and
- * no message.
+ * While it is on, each message written in CCC goes through the caveman skill, as `/caveman <level>
+ * <message>` (cavemanPrompt). A message typed in the session itself carries a note the person does
+ * not see instead: the skill's whole rules, every time, so they hold however long the session runs.
+ * Switching costs no turn and no message.
  *
  * Not the system prompt: the built-in security plugin answers those events before any mod sees them.
  */
@@ -67,6 +68,19 @@ export function cavemanNote(level: CavemanLevel | undefined, told: CavemanLevel 
     `${said} Follow these rules in this reply and every reply after it, at that level, until a note says it was switched off. The rules mention /caveman and "stop caveman": here the level is set in CCC instead.`,
     rules,
   ].join('\n\n')
+}
+
+/**
+ * A message written in CCC, as it goes into the session. While caveman mode is on, it goes through
+ * the caveman skill every time, as if the person picked the skill in the app's prompt box:
+ * `/caveman <level> <message>`. The first message after caveman mode was switched off starts with
+ * the skill's own words for off, "stop caveman". Where the session has no caveman skill, the message
+ * goes in as written. `told` is the level the last message gave, undefined when none was given yet.
+ */
+export function cavemanPrompt(text: string, level: CavemanLevel | undefined, told: CavemanLevel | 'off' | undefined, hasSkill: boolean): string {
+  if (!hasSkill) return text
+  if (level) return `/caveman ${level} ${text}`
+  return told && told !== 'off' ? `stop caveman\n\n${text}` : text
 }
 
 /** The level in force for this session now, read from where the board's server keeps it, and whether any choice is stored. */

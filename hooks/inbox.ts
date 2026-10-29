@@ -133,8 +133,11 @@ export function createInbox(io: InboxIo): Inbox {
   }
 }
 
-/** This session's inbox, or undefined where none can be read. */
-export async function inboxFor($: EngineInterface, interrupt: (at: number) => Promise<void>, isBusy?: () => Promise<boolean>): Promise<Inbox | undefined> {
+/**
+ * This session's inbox, or undefined where none can be read. `dress` turns a message that is not a
+ * slash command into what goes in (caveman mode sends it through its skill).
+ */
+export async function inboxFor($: EngineInterface, interrupt: (at: number) => Promise<void>, isBusy?: () => Promise<boolean>, dress?: (text: string) => Promise<string>): Promise<Inbox | undefined> {
   const home = await $.env.get('HOME')
   const sessionId = await $.session.id()
   if (!home || !isSafeSessionId(sessionId)) return undefined
@@ -150,7 +153,9 @@ export async function inboxFor($: EngineInterface, interrupt: (at: number) => Pr
     submit: async text => {
       // a slash command the session knows (a skill, /model, /effort...) runs as one, as if typed
       if (await runSlash($, text).catch(() => false)) return
-      await $.prompt.submit({ text, asUser: true })
+      const dressed = dress ? await dress(text).catch(() => text) : text
+      if (dressed !== text && (await runSlash($, dressed).catch(() => false))) return
+      await $.prompt.submit({ text: dressed, asUser: true })
     },
     interrupt,
     now: () => $.clock.now(),

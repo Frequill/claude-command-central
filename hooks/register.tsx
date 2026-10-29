@@ -33,7 +33,7 @@ import {
   trackAgent,
   waitFor,
 } from './activity'
-import { cavemanNote, cavemanNow, cavemanRules } from './caveman'
+import { cavemanNote, cavemanNow, cavemanPrompt, cavemanRules } from './caveman'
 import type { CavemanLevel } from './caveman'
 import { drawPane } from './draw'
 import type { Kit } from './draw'
@@ -91,6 +91,7 @@ export const register: Register = on => {
       $,
       at => stopTurn($, at),
       async () => Boolean((await read($, turn)).isRunning),
+      text => cavemanDressed($, text),
     ).catch(() => undefined)
     await publishCommands($).catch(() => undefined)
     startTicking($)
@@ -316,6 +317,19 @@ export const register: Register = on => {
       columns: e.props.bodyColumns,
     })
   })
+}
+
+/** A message from CCC's write box, sent through the caveman skill while caveman mode is on (cavemanPrompt). */
+async function cavemanDressed($: EngineInterface, text: string): Promise<string> {
+  try {
+    const { level } = await cavemanNow($)
+    const hasSkill = (await $.command.list()).some(command => command.name === 'caveman')
+    const dressed = cavemanPrompt(text, level, cavemanTold, hasSkill)
+    if (dressed !== text) cavemanTold = level ?? 'off'
+    return dressed
+  } catch {
+    return text
+  }
 }
 
 async function nextCavemanNote($: EngineInterface): Promise<string | undefined> {

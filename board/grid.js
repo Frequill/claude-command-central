@@ -249,6 +249,7 @@ export function makeGrid(box, { onStart, onEnd, oldPlace, wobbles, animates, onA
   const kept = load()
   const items = new Map()
   const room = keptRoom(box, () => grid.getRow() * ROW)
+  const view = keptView()
   // cards put in a gap by its +: there, where the person is looking, the board does not go to them
   const placedInGap = new Map()
   // where the next new card goes: a gap whose + was clicked, kept a while for the card it starts
@@ -345,6 +346,7 @@ export function makeGrid(box, { onStart, onEnd, oldPlace, wobbles, animates, onA
   }
   grid.on('resizestart', (_, el) => {
     document.body.classList.add('is-resizing')
+    view.hold()
     room.hold()
     take(el)
     onStart?.()
@@ -368,6 +370,7 @@ export function makeGrid(box, { onStart, onEnd, oldPlace, wobbles, animates, onA
     if (wobbles?.() && el?.firstElementChild) jelly(el.firstElementChild)
     save()
     onEnd?.()
+    if (event.type === 'resizestop') view.release()
   })
   grid.on('change', save)
 
@@ -583,6 +586,49 @@ function gapMarks(box, nodes, onAddAt, onCloseStrip) {
         hint.style.left = `${pointer.x}px`
         hint.style.top = `${pointer.y}px`
       }
+    },
+  }
+}
+
+/**
+ * The page kept where the person is looking while a card is resized, and for a moment after: any
+ * scroll they did not make themselves (the browser keeping something in view, the board redrawing)
+ * is put back. Their own wheel, keys and touch still scroll it.
+ */
+function keptView() {
+  // how long after a resize the view is still kept, while the cards settle and the board redraws
+  const SETTLE_MS = 1000
+  // a scroll this soon after the person's own wheel, keys, touch or click is theirs
+  const OWN_MS = 400
+  let at = null
+  let ends = 0
+  let ownAt = 0
+  const own = event => {
+    // a press counts only on the page's own scroll bar, not on a card's grip
+    if (event.type === 'mousedown' && event.target !== document.documentElement) return
+    ownAt = performance.now()
+    if (at !== null) at = window.scrollY
+  }
+  for (const type of ['wheel', 'keydown', 'touchmove', 'mousedown']) window.addEventListener(type, own, { capture: true, passive: true })
+  window.addEventListener(
+    'scroll',
+    () => {
+      if (at === null) return
+      if (performance.now() - ownAt < OWN_MS) at = window.scrollY
+      else if (window.scrollY !== at) window.scrollTo(0, at)
+    },
+    { passive: true },
+  )
+  return {
+    hold() {
+      clearTimeout(ends)
+      at = window.scrollY
+    },
+    release() {
+      clearTimeout(ends)
+      ends = setTimeout(() => {
+        at = null
+      }, SETTLE_MS)
     },
   }
 }
