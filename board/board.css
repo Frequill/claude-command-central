@@ -1369,7 +1369,8 @@ body.theme-inferno #limits {
 /* the cards lie where the person put them (placement.js); the board is as tall as the lowest one */
 .tiles {
   position: relative;
-  min-height: 120px;
+  /* kept as tall as it was while a card is moved, resized or closed, so the view stays (grid.js) */
+  min-height: max(120px, var(--grid-keep, 0px));
 }
 
 .tiles > .tile {
@@ -10385,6 +10386,51 @@ body.side-off .sidebar {
 }
 
 /* ---------- the board as a grid (grid.js, GridStack) ---------- */
+
+/* an empty space: a dashed outline and a + to start something there; held over one, a card's landing */
+.grid-gap {
+  position: absolute;
+  z-index: 1;
+  display: grid;
+  place-items: center;
+  border: 2px dashed color-mix(in srgb, var(--accent) 45%, transparent);
+  border-radius: var(--panel-radius);
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
+  pointer-events: none;
+}
+
+.grid-gap[hidden] {
+  display: none;
+}
+
+.grid-gap-add {
+  width: 54px;
+  height: 54px;
+  border: none;
+  border-radius: 50%;
+  font: 800 30px/1 var(--sans);
+  color: var(--pill-ink);
+  background: var(--pill-work);
+  box-shadow: var(--pill-shadow), 0 6px 20px rgba(0, 0, 0, 0.2);
+  cursor: pointer;
+  pointer-events: auto;
+  transition: transform 0.12s ease;
+}
+
+.grid-gap-add:hover {
+  transform: scale(1.08);
+}
+
+/* a card held over an empty space: the outline shows where it lands and how big, and no + */
+.grid-gap.is-target {
+  border-style: solid;
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+
+.grid-gap.is-target .grid-gap-add {
+  display: none;
+}
 
 /* the grid's outer margin lines the cards up with the board's edges, as before */
 .tiles.grid-stack {

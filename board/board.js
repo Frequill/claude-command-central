@@ -247,6 +247,11 @@ function setupLayout() {
     },
     wobbles: () => view.wobble,
     animates: () => view.settings.animations,
+    // the + in an empty space: the start window, and what it starts lands in that space
+    onAddAt: gap => {
+      view.grid.placeNext(gap)
+      document.querySelector('#new-session').click()
+    },
   })
   setupPanels()
 }
@@ -446,7 +451,7 @@ const TYPING_MS = 4000
 function setupStart() {
   const dialog = document.querySelector('#start-dialog')
   const prompt = document.querySelector('#start-prompt')
-  view.start = { folder: '', folders: [], where: L.startState({ where: readStored(START_PLACE_KEY) }).where, isStarting: false, mode: 'new', existing: null, search: '' }
+  view.start = { folder: '', folders: [], where: L.startState({ where: readStored(START_PLACE_KEY) }).where, isStarting: false, didStart: false, mode: 'new', existing: null, search: '' }
   document.querySelector('#start-mode').addEventListener('click', event => {
     const button = event.target.closest('[data-mode]')
     if (!button) return
@@ -459,7 +464,12 @@ function setupStart() {
     view.start.search = event.target.value
     drawExisting()
   })
+  // closed without starting anything, a space kept by a + is let go
+  dialog.addEventListener('close', () => {
+    if (!view.start.didStart) view.grid?.placeNext(null)
+  })
   document.querySelector('#new-session').addEventListener('click', async () => {
+    view.start.didStart = false
     document.querySelector('#start-problem').textContent = ''
     prompt.value = ''
     dialog.showModal()
@@ -643,6 +653,7 @@ async function addExisting(conversation, button) {
       if (button) button.disabled = false
       return
     }
+    view.start.didStart = true
     document.querySelector('#start-dialog').close()
     await poll()
     window.dispatchEvent(new CustomEvent('ccc:show-session', { detail: { sessionId: conversation.sessionId } }))
@@ -679,8 +690,9 @@ async function startSession(dialog) {
     })
     const data = response.ok ? await response.json() : { problem: 'Could not start it. Is the board still running?' }
     if (data.ok) {
+      start.didStart = true
       dialog.close()
-      // the board goes to the session's card once it shows up, at the bottom where it is added
+      // the board goes to the session's card once it shows up
       view.startedAt = Date.now()
     }
     else problem.textContent = data.problem || 'Could not start it.'
@@ -704,6 +716,7 @@ async function openTerminal(dialog) {
     document.querySelector('#start-problem').textContent = problem
     return
   }
+  start.didStart = true
   dialog.close()
   await poll()
   window.dispatchEvent(new CustomEvent('ccc:show-session', { detail: { sessionId: id } }))
@@ -2126,7 +2139,7 @@ measureBar()
 new ResizeObserver(measureBar).observe(document.querySelector('.taskbar'))
 window.addEventListener('resize', measureBar)
 applySettings(view.settings)
-setupSettings(view.settings, { onChange: applySettings, onResetLayout: resetLayout })
+setupSettings(view.settings, { onChange: applySettings, onResetLayout: resetLayout, onCloseGaps: () => view.grid?.closeGaps() })
 setupLayout()
 setupNotes()
 setupCaveman()
@@ -2173,6 +2186,8 @@ window.addEventListener('ccc:show-session', event => {
   const id = event.detail?.sessionId
   const node = view.tiles.get(id)?.node
   if (!node) return
+  // put in a gap by its +, the card is where the person is looking: no glide, the cursor goes in
+  if (view.grid?.isInGap(id)) return isTerminal(id) ? focusTerminal(id) : focusChat(id)
   const pinned = Math.max(...['.taskbar', '#decor-top'].map(selector => document.querySelector(selector)?.getBoundingClientRect().bottom ?? 0))
   const most = document.scrollingElement.scrollHeight - window.innerHeight
   const top = Math.min(most, Math.max(0, window.scrollY + node.getBoundingClientRect().top - pinned - SHOW_GAP))

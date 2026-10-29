@@ -7,7 +7,7 @@ import { blocks, inline } from './markdown.js'
 import * as C from './chat-logic.js'
 import { chooseCrater, planFlight } from './dragon.js'
 import * as P from './placement.js'
-import { cellsOf, lowestSpot } from './grid.js'
+import { cellsOf, gapAt, isRoomForCard, lowestSpot } from './grid.js'
 
 const NOW = 1_000_000_000
 
@@ -1544,4 +1544,21 @@ test('a picked file takes the place of the "@" typed; a folder leaves the menu o
   assert.deepEqual(C.withMention('@sr', C.mentionTyped('@sr', 3), 3, 'src/'), { value: '@src/', caret: 5 })
   // a path with a space goes in quotes
   assert.deepEqual(C.withMention('@my', C.mentionTyped('@my', 3), 3, 'My Notes/plan.md'), { value: '@"My Notes/plan.md" ', caret: 20 })
+})
+
+test('an empty space on the board: as big as it goes, from the top down to the lowest card', () => {
+  // two sessions side by side, a terminal under the left one: the space beside the terminal
+  const nodes = [{ x: 0, y: 0, w: 6, h: 32 }, { x: 6, y: 0, w: 6, h: 32 }, { x: 0, y: 32, w: 6, h: 32 }]
+  assert.deepEqual(gapAt(nodes, { x: 8, y: 40 }), { x: 6, y: 32, w: 6, h: 32 })
+  assert.equal(isRoomForCard(gapAt(nodes, { x: 8, y: 40 })), true)
+  // on a card, or below every card, there is none
+  assert.equal(gapAt(nodes, { x: 2, y: 5 }), null)
+  assert.equal(gapAt(nodes, { x: 8, y: 64 }), null)
+  // the bigger of wide-first and tall-first
+  const steps = [{ x: 0, y: 0, w: 4, h: 20 }, { x: 4, y: 0, w: 8, h: 10 }, { x: 0, y: 20, w: 12, h: 10 }]
+  assert.deepEqual(gapAt(steps, { x: 6, y: 15 }), { x: 4, y: 10, w: 8, h: 10 })
+  // too small for a card: no +
+  const narrow = [{ x: 0, y: 0, w: 10, h: 32 }, { x: 0, y: 32, w: 12, h: 4 }]
+  assert.deepEqual(gapAt(narrow, { x: 11, y: 3 }), { x: 10, y: 0, w: 2, h: 32 })
+  assert.equal(isRoomForCard(gapAt(narrow, { x: 11, y: 3 })), false)
 })

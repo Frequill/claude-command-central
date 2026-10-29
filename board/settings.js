@@ -144,7 +144,7 @@ function setupScrollButtons(dialog, { getSettings, keep }) {
 }
 
 /** Fills and wires the dialog; `onChange` gets the new settings after every change. */
-export function setupSettings(initial, { onChange, onResetLayout }) {
+export function setupSettings(initial, { onChange, onResetLayout, onCloseGaps }) {
   let settings = initial
   const dialog = document.querySelector('#settings')
   const animations = document.querySelector('#opt-animations')
@@ -211,6 +211,7 @@ export function setupSettings(initial, { onChange, onResetLayout }) {
   showNotes.addEventListener('change', () => update({ showNotes: showNotes.checked }))
   setupTabs()
   document.querySelector('#layout-reset').addEventListener('click', onResetLayout)
+  document.querySelector('#layout-close-gaps').addEventListener('click', onCloseGaps)
   document.querySelector('#settings-open').addEventListener('click', () => dialog.showModal())
   dialog.addEventListener('click', event => {
     if (event.target === dialog) dialog.close()
