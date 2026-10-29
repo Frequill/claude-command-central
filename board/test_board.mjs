@@ -7,7 +7,7 @@ import { blocks, inline } from './markdown.js'
 import * as C from './chat-logic.js'
 import { chooseCrater, planFlight } from './dragon.js'
 import * as P from './placement.js'
-import { cellsOf, gapAt, isRoomForCard, lowestSpot } from './grid.js'
+import { cellsOf, closedStrip, gapAt, isRoomForCard, lowestSpot, passedAt, resizedTo, stripAt } from './grid.js'
 
 const NOW = 1_000_000_000
 
@@ -1561,4 +1561,53 @@ test('an empty space on the board: as big as it goes, from the top down to the l
   const narrow = [{ x: 0, y: 0, w: 10, h: 32 }, { x: 0, y: 32, w: 12, h: 4 }]
   assert.deepEqual(gapAt(narrow, { x: 11, y: 3 }), { x: 10, y: 0, w: 2, h: 32 })
   assert.equal(isRoomForCard(gapAt(narrow, { x: 11, y: 3 })), false)
+})
+
+test('a card moved past others in its column: they make room for it, as in a list', () => {
+  // the left column: Bagarmossen, the held card, a tall one under it; one card on the right
+  const top = { id: 'top', x: 0, y: 0, w: 6, h: 20 }
+  const tall = { id: 'tall', x: 0, y: 36, w: 6, h: 40 }
+  const right = { id: 'right', x: 6, y: 0, w: 6, h: 76 }
+  const held = { x: 0, y: 20, w: 6, h: 16 }
+  const others = [top, tall, right]
+  // over the lower half of the tall one: it rises into the room left, the held card goes under it
+  assert.deepEqual(passedAt(held, others, { x: 2, y: 60 }), { spot: { x: 0, y: 60, w: 6, h: 16 }, moved: [{ ...tall, y: 20 }] })
+  // over its upper half, or over the card beside: nothing passed, the board does as it always did
+  assert.equal(passedAt(held, others, { x: 2, y: 40 }), null)
+  assert.equal(passedAt(held, others, { x: 8, y: 60 }), null)
+  // over the upper half of the card above: it goes down, the held card goes above it
+  assert.deepEqual(passedAt(held, others, { x: 2, y: 4 }), { spot: { x: 0, y: 0, w: 6, h: 16 }, moved: [{ ...top, y: 16 }] })
+  // a card that spans both columns cannot rise past the card beside: nothing moves
+  const wide = { id: 'wide', x: 0, y: 36, w: 12, h: 20 }
+  assert.equal(passedAt(held, [top, wide, { id: 'right', x: 6, y: 0, w: 6, h: 36 }], { x: 2, y: 50 }), null)
+})
+
+test('a card resized: the cards in its way get smaller to make room, and are never pushed', () => {
+  // a top card, the resized card under it, a card under that; one card on the right
+  const top = { id: 'top', x: 0, y: 0, w: 6, h: 32 }
+  const under = { id: 'under', x: 0, y: 52, w: 6, h: 30 }
+  const right = { id: 'right', x: 6, y: 0, w: 6, h: 82 }
+  const card = { x: 0, y: 32, w: 6, h: 20 }
+  const others = [top, under, right]
+  // its top edge pulled up: the card above gets shorter, its top stays
+  assert.deepEqual(resizedTo(card, { x: 0, y: 22, w: 6, h: 30 }, others), { spot: { x: 0, y: 22, w: 6, h: 30 }, given: [{ ...top, h: 22 }] })
+  // its bottom edge pulled down: the card below gets shorter, its bottom stays
+  assert.deepEqual(resizedTo(card, { x: 0, y: 32, w: 6, h: 30 }, others), { spot: { x: 0, y: 32, w: 6, h: 30 }, given: [{ ...under, y: 62, h: 20 }] })
+  // its right edge pulled over the card beside: that one gets narrower
+  assert.deepEqual(resizedTo(card, { x: 0, y: 32, w: 8, h: 20 }, others), { spot: { x: 0, y: 32, w: 8, h: 20 }, given: [{ ...right, x: 8, w: 4 }] })
+  // pulled past where the card above is at its smallest (16 rows): it stops there
+  assert.deepEqual(resizedTo(card, { x: 0, y: 4, w: 6, h: 48 }, others), { spot: { x: 0, y: 16, w: 6, h: 36 }, given: [{ ...top, h: 16 }] })
+  // into empty space: nothing else changes
+  assert.deepEqual(resizedTo(card, { x: 0, y: 32, w: 6, h: 20 }, [right]), { spot: card, given: [] })
+})
+
+test('an empty strip across the board: found where no card covers a row, closed by moving the cards below up', () => {
+  // two cards side by side, an empty strip of 4 rows, two more cards under them
+  const nodes = [{ id: 'a', x: 0, y: 0, w: 6, h: 32 }, { id: 'b', x: 6, y: 0, w: 6, h: 30 }, { id: 'c', x: 0, y: 36, w: 6, h: 20 }, { id: 'd', x: 6, y: 36, w: 6, h: 20 }]
+  assert.deepEqual(stripAt(nodes, 33), { y: 32, h: 4 })
+  // a row a card covers on one side only is no strip, nor a row below every card
+  assert.equal(stripAt(nodes, 31), null)
+  assert.equal(stripAt(nodes, 60), null)
+  // closed: the cards below move up by its height, the ones above stay, and none changes size
+  assert.deepEqual(closedStrip(nodes, { y: 32, h: 4 }).map(({ node, y }) => [node.id, y]), [['c', 32], ['d', 32]])
 })

@@ -443,6 +443,11 @@ body.is-resizing * {
   user-select: none;
 }
 
+/* a card that grows moves the cards below it: the browser must not scroll the page to follow them */
+body.is-resizing {
+  overflow-anchor: none;
+}
+
 .taskbar > *,
 .content {
   zoom: var(--ui-scale);
@@ -10428,8 +10433,68 @@ body.side-off .sidebar {
   background: color-mix(in srgb, var(--accent) 14%, transparent);
 }
 
-.grid-gap.is-target .grid-gap-add {
+.grid-gap.is-target .grid-gap-add,
+.grid-gap.is-hint .grid-gap-add {
   display: none;
+}
+
+/* a card held over an empty space without Shift: it lands at its size, and a label just above the
+   pointer, over the card, says how to fill the space */
+.grid-gap-hint {
+  position: fixed;
+  z-index: 10001;
+  transform: translate(-50%, calc(-100% - 14px));
+  pointer-events: none;
+  white-space: nowrap;
+  padding: 6px 12px;
+  border-radius: 999px;
+  font: 600 13px/1.2 var(--sans);
+  color: var(--pill-ink);
+  background: var(--pill-work);
+  box-shadow: var(--pill-shadow);
+  text-align: center;
+}
+
+.grid-gap-hint[hidden] {
+  display: none;
+}
+
+/* an empty strip across the whole board, under the pointer: a − in it closes it */
+.grid-strip {
+  position: absolute;
+  z-index: 1;
+  left: 6px;
+  right: 6px;
+  border-top: 2px dashed color-mix(in srgb, var(--accent) 45%, transparent);
+  border-bottom: 2px dashed color-mix(in srgb, var(--accent) 45%, transparent);
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
+  pointer-events: none;
+}
+
+.grid-strip[hidden] {
+  display: none;
+}
+
+.grid-strip-close {
+  position: absolute;
+  top: 50%;
+  width: 28px;
+  height: 28px;
+  border: none;
+  border-radius: 50%;
+  font: 800 20px/1 var(--sans);
+  color: var(--pill-ink);
+  /* the theme's amber, unlike the green + beside it */
+  background: var(--pill-wait);
+  box-shadow: var(--pill-shadow), 0 4px 14px rgba(0, 0, 0, 0.2);
+  cursor: pointer;
+  pointer-events: auto;
+  transform: translate(-50%, -50%);
+  transition: transform 0.12s ease;
+}
+
+.grid-strip-close:hover {
+  transform: translate(-50%, -50%) scale(1.1);
 }
 
 /* the grid's outer margin lines the cards up with the board's edges, as before */
@@ -10473,6 +10538,7 @@ body.side-off .sidebar {
   border-radius: 4px;
 }
 
+.grid-stack-item > .ui-resizable-n:hover,
 .grid-stack-item > .ui-resizable-e:hover,
 .grid-stack-item > .ui-resizable-w:hover,
 .grid-stack-item > .ui-resizable-s:hover {
@@ -10488,6 +10554,13 @@ body.side-off .sidebar {
 
 .grid-stack-item > .ui-resizable-s {
   height: 8px;
+}
+
+/* the top edge a thin strip, so the header under it still moves the card */
+.grid-stack-item > .ui-resizable-n {
+  height: 6px;
+  left: 12px;
+  right: 12px;
 }
 
 /* the top corners small, clear of the header's buttons */
