@@ -120,56 +120,68 @@ export function followWheel(state, { now, shiftKey, delta }) {
   return { state: { at: now, mode, isDropping, size }, drop: isDropping }
 }
 
-/** Shift (or the scroll button) pressed or let go: a movement still going stops right there. */
+/** A scroll button pressed or let go: a movement still going stops right there. */
 export function shiftChanged(state, now) {
   return state.mode && now - state.at <= WHEEL_GAP_MS ? { ...state, isDropping: true } : state
 }
 
 /**
- * Whether the wheel moves the board itself: a scroll button held, with shift-scrolling on or off,
- * or Shift held with shift-scrolling on.
+ * What one turn of the wheel does with shift-scrolling on: 'page' moves the board (a scroll button
+ * held, Shift unless it was removed), 'inside' leaves it to the box under the pointer that can still
+ * move that way, 'card' scrolls the chat or terminal the pointer is over (on its header or write box),
+ * 'nothing' over the background. The board itself never moves without a scroll button. Windows over
+ * the board are left alone.
  */
-export function movesBoard({ isOn, shiftKey, buttonHeld }) {
-  return Boolean(buttonHeld || (isOn && shiftKey))
-}
-
-/**
- * What one turn of the wheel does: 'page' moves the board (a scroll button held, or Shift with
- * shift-scrolling on), 'default' scrolls as on any web page (shift-scrolling off), and with
- * shift-scrolling on 'inside' leaves it to the box under the pointer that can still move that way,
- * 'card' scrolls the chat or terminal the pointer is over (on its header or write box), 'nothing'
- * over the background. Windows over the board, and pinch-to-zoom, are left alone.
- */
-export function wheelGoes({ isOn, shiftKey, buttonHeld, ctrlKey, inWindow, canScrollInside, inCard }) {
-  if (ctrlKey || inWindow) return 'default'
-  if (movesBoard({ isOn, shiftKey, buttonHeld })) return 'page'
-  if (!isOn) return 'default'
+export function wheelGoes({ isOn, buttonHeld, ctrlKey, inWindow, canScrollInside, inCard }) {
+  if (!isOn || ctrlKey || inWindow) return 'default'
+  if (buttonHeld) return 'page'
   if (canScrollInside) return 'inside'
   return inCard ? 'card' : 'nothing'
 }
 
-// the scroll buttons: mouse buttons or keys that, held with the wheel, move the board, with or without
-// shift-scrolling. Each kept as 'mouse:<event.button>' or 'key:<event.code>' (its event.key when it has
-// no code, as keys sent by a mouse's own app can have).
+// the scroll buttons: with shift-scrolling on, holding one of them with the wheel moves the board.
+// Shift is one from the start, either side of it; more can be added and any of them removed. Each kept
+// as 'mouse:<event.button>' or 'key:<event.code>' (its event.key when it has no code, as keys sent by a
+// mouse's own app can have).
+export const SHIFT_BUTTON = 'key:Shift'
 export const MAX_SCROLL_BUTTONS = 8
 const MOUSE_ID = /^mouse:(\d{1,2})$/
 const KEY_ID = /^key:([A-Za-z0-9]{1,32})$/
 // the left button clicks and the right one opens menus
 const TAKEN_BUTTONS = [0, 2]
-// Shift already moves the board, Control with the wheel zooms, Escape stops the picking, and a key
-// the browser cannot tell apart from others has no name of its own
-const TAKEN_KEYS = /^(Shift|Control|Escape|Unidentified)/
+// one side of Shift (Shift is kept as one button), Control with the wheel zooms, Escape stops the
+// picking, and a key the browser cannot tell apart from others has no name of its own
+const TAKEN_KEYS = /^(Shift.|Control|Escape|Unidentified)/
 const MOUSE_NAMES = { 1: 'Middle mouse button', 3: 'Mouse button 4 (back)', 4: 'Mouse button 5 (forward)' }
 const KEY_NAMES = { AltLeft: 'Left Option', AltRight: 'Right Option', MetaLeft: 'Left Command', MetaRight: 'Right Command', Alt: 'Option', Meta: 'Command' }
 
 /** The scroll button a press is, from { kind: 'mouse', button } or { kind: 'key', code, key }. */
 export function scrollButtonOf(press) {
-  return press.kind === 'mouse' ? `mouse:${press.button}` : `key:${press.code || press.key || ''}`
+  if (press.kind === 'mouse') return `mouse:${press.button}`
+  if (press.key === 'Shift' || /^Shift/.test(press.code ?? '')) return SHIFT_BUTTON
+  return `key:${press.code || press.key || ''}`
 }
 
-/** The scroll buttons as kept, without broken ones or the same one twice. */
+/**
+ * Whether one of the scroll `buttons` is held while the wheel turns: one of those `held` down, or
+ * Shift, which the wheel event itself tells best.
+ */
+export function scrollButtonHeld(buttons, { held, shiftKey }) {
+  return [...held].some(id => buttons.includes(id)) || Boolean(shiftKey && buttons.includes(SHIFT_BUTTON))
+}
+
+/**
+ * Shift-scrolling turned on or off, as a change to the settings. Turned on with every scroll button
+ * removed, Shift comes back, so the board can always be moved. (Removing the last one turns it off:
+ * see `normalizeSettings`.)
+ */
+export function switchShiftScroll(settings, isOn) {
+  return isOn && settings.scrollButtons.length === 0 ? { shiftScroll: true, scrollButtons: [SHIFT_BUTTON] } : { shiftScroll: isOn }
+}
+
+/** The scroll buttons as kept, without broken ones or the same one twice; Shift alone when none were kept. */
 export function normalizeScrollButtons(value) {
-  return Array.isArray(value) ? [...new Set(value.filter(isScrollButton))].slice(0, MAX_SCROLL_BUTTONS) : []
+  return Array.isArray(value) ? [...new Set(value.filter(isScrollButton))].slice(0, MAX_SCROLL_BUTTONS) : [SHIFT_BUTTON]
 }
 
 /** Whether a kept value is a scroll button that can be used. */
@@ -193,7 +205,6 @@ export function scrollButtonPress(press, picked = []) {
   if (picked.includes(id)) return { refuse: `${scrollButtonName(id)} is already added.` }
   if (isScrollButton(id)) return { pick: id }
   if (press.kind === 'mouse') return { refuse: 'The right button opens menus.' }
-  if (id.startsWith('key:Shift')) return { refuse: 'Shift already moves the board.' }
   if (id.startsWith('key:Control')) return { refuse: 'Control with the wheel zooms.' }
   return { refuse: 'That key cannot be used.' }
 }
@@ -1141,6 +1152,7 @@ export const CARD_SIZES = ['compact', 'large']
 /** Settings as stored, with anything missing or broken put back to its default. */
 export function normalizeSettings(raw) {
   const value = raw && typeof raw === 'object' ? raw : {}
+  const scrollButtons = normalizeScrollButtons(value.scrollButtons)
   return {
     theme: THEME_IDS.includes(value.theme) ? value.theme : 'clean',
     animations: typeof value.animations === 'boolean' ? value.animations : true,
@@ -1152,10 +1164,11 @@ export function normalizeSettings(raw) {
     statusBar: typeof value.statusBar === 'boolean' ? value.statusBar : true,
     // the column at the right (the radar, the tool mix, the notes), on unless the person turns it off
     sidePanel: typeof value.sidePanel === 'boolean' ? value.sidePanel : true,
-    // the wheel moves only what is under the pointer, and Shift with the wheel moves the board; off unless turned on
-    shiftScroll: typeof value.shiftScroll === 'boolean' ? value.shiftScroll : false,
-    // mouse buttons or keys that, held, move the board with the wheel, shift-scrolling on or off; none unless added
-    scrollButtons: normalizeScrollButtons(value.scrollButtons),
+    // the wheel moves only what is under the pointer, and a scroll button with the wheel moves the board; off
+    // unless turned on, and off with no scroll buttons left, since then nothing could move the board
+    shiftScroll: value.shiftScroll === true && scrollButtons.length > 0,
+    // with shift-scrolling on, the buttons that move the board while held: Shift unless the person changes them
+    scrollButtons,
     // Claude's short notes between steps, shown as the Claude app shows them, unless the person hides them
     showNotes: typeof value.showNotes === 'boolean' ? value.showNotes : true,
     // the app CCC opens terminal windows in: iTerm when this Mac has it, unless the person picks one
