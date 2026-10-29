@@ -126,7 +126,7 @@ export function shiftChanged(state, now) {
 }
 
 /**
- * What one turn of the wheel does with shift-scrolling on: 'page' moves the board (a scroll button
+ * What one turn of the wheel does with hold-to-scroll on: 'page' moves the board (a scroll button
  * held, Shift unless it was removed), 'inside' leaves it to the box under the pointer that can still
  * move that way, 'card' scrolls the chat or terminal the pointer is over (on its header or write box),
  * 'nothing' over the background. The board itself never moves without a scroll button. Windows over
@@ -139,8 +139,8 @@ export function wheelGoes({ isOn, buttonHeld, ctrlKey, inWindow, canScrollInside
   return inCard ? 'card' : 'nothing'
 }
 
-// the scroll buttons: with shift-scrolling on, holding one of them with the wheel moves the board.
-// Shift is one from the start, either side of it; more can be added and any of them removed. Each kept
+// the scroll buttons: with hold-to-scroll on, holding one of them with the wheel moves the board.
+// Shift is one from the start, either side of it; more can be added, and any removed while one is left. Each kept
 // as 'mouse:<event.button>' or 'key:<event.code>' (its event.key when it has no code, as keys sent by a
 // mouse's own app can have).
 export const SHIFT_BUTTON = 'key:Shift'
@@ -171,17 +171,12 @@ export function scrollButtonHeld(buttons, { held, shiftKey }) {
 }
 
 /**
- * Shift-scrolling turned on or off, as a change to the settings. Turned on with every scroll button
- * removed, Shift comes back, so the board can always be moved. (Removing the last one turns it off:
- * see `normalizeSettings`.)
+ * The scroll buttons as kept, without broken ones or the same one twice. There is always at least one,
+ * so the board can always be moved: Shift when none is left.
  */
-export function switchShiftScroll(settings, isOn) {
-  return isOn && settings.scrollButtons.length === 0 ? { shiftScroll: true, scrollButtons: [SHIFT_BUTTON] } : { shiftScroll: isOn }
-}
-
-/** The scroll buttons as kept, without broken ones or the same one twice; Shift alone when none were kept. */
 export function normalizeScrollButtons(value) {
-  return Array.isArray(value) ? [...new Set(value.filter(isScrollButton))].slice(0, MAX_SCROLL_BUTTONS) : [SHIFT_BUTTON]
+  const kept = Array.isArray(value) ? [...new Set(value.filter(isScrollButton))].slice(0, MAX_SCROLL_BUTTONS) : []
+  return kept.length ? kept : [SHIFT_BUTTON]
 }
 
 /** Whether a kept value is a scroll button that can be used. */
@@ -1164,10 +1159,11 @@ export function normalizeSettings(raw) {
     statusBar: typeof value.statusBar === 'boolean' ? value.statusBar : true,
     // the column at the right (the radar, the tool mix, the notes), on unless the person turns it off
     sidePanel: typeof value.sidePanel === 'boolean' ? value.sidePanel : true,
-    // the wheel moves only what is under the pointer, and a scroll button with the wheel moves the board; off
-    // unless turned on, and off with no scroll buttons left, since then nothing could move the board
-    shiftScroll: value.shiftScroll === true && scrollButtons.length > 0,
-    // with shift-scrolling on, the buttons that move the board while held: Shift unless the person changes them
+    // hold-to-scroll: the wheel moves only what is under the pointer, and a scroll button held with the
+    // wheel moves the board; off unless turned on. (Named after its first button, Shift; the name stays
+    // so the choice people saved still holds.)
+    shiftScroll: value.shiftScroll === true,
+    // with hold-to-scroll on, the buttons that move the board while held: Shift unless the person changes them
     scrollButtons,
     // Claude's short notes between steps, shown as the Claude app shows them, unless the person hides them
     showNotes: typeof value.showNotes === 'boolean' ? value.showNotes : true,

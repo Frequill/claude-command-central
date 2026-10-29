@@ -2797,7 +2797,7 @@ body.theme-neon .source-vscode {
   transform: none;
 }
 
-/* with shift-scrolling on, a chat's facts scroll under the pointer without a click first */
+/* with hold-to-scroll on, a chat's facts scroll under the pointer without a click first */
 body.shift-scroll .chat-side {
   overflow-y: auto;
   overscroll-behavior: contain;

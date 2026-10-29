@@ -795,7 +795,7 @@ function cardScroller(target) {
 }
 
 /**
- * Shift-scrolling (a setting): the wheel moves what is under the pointer and never the board, so a
+ * Hold-to-scroll (a setting): the wheel moves what is under the pointer and never the board, so a
  * board full of chats and terminals stays put while you read; a scroll button held with the wheel
  * moves the board. Shift is one from the start, and the person can add others (an extra mouse button,
  * a key) or remove any. A window over the board (settings, the start window) scrolls as always.
