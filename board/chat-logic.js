@@ -342,6 +342,29 @@ export function matchCommands(commands, typed) {
   return [...starts, ...holds]
 }
 
+/**
+ * The "@" being typed where the cursor is, as the Claude app's prompt box takes one: at the start of
+ * the box or after a space, up to the cursor. Where it starts and what follows it, else null.
+ */
+export function mentionTyped(text, caret) {
+  const before = String(text ?? '').slice(0, caret)
+  const match = /(^|\s)@([^\s@"]*)$/.exec(before)
+  return match ? { start: before.length - match[2].length - 1, typed: match[2] } : null
+}
+
+/**
+ * The box with a picked path in place of the "@" being typed: a file with a space after it, a folder
+ * with none, so its own files can be picked next. A path with a space in it goes in quotes, as Claude
+ * Code reads it. The new text and where the cursor goes.
+ */
+export function withMention(text, mention, caret, path) {
+  const value = String(text ?? '')
+  const isFolder = path.endsWith('/')
+  const put = /\s/.test(path) ? `@"${path}"` : `@${path}`
+  const added = isFolder && !put.endsWith('"') ? put : `${put} `
+  return { value: value.slice(0, mention.start) + added + value.slice(caret), caret: mention.start + added.length }
+}
+
 /** The tag beside a command in the menu: a skill or command of a plugin, the user's own, or built in. */
 export function commandKind(command) {
   return { builtin: 'built-in', plugin: 'plugin', user: 'yours', mcp: 'MCP' }[command?.source] ?? ''

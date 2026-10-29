@@ -1525,3 +1525,23 @@ test("a terminal card reads the shell's folder from its window title, with ~ as 
   // ~ cannot be told without a known home
   assert.equal(L.titleFolder('~/code', '/opt/x'), undefined)
 })
+
+test('an "@" being typed at the cursor opens the file menu, as in the Claude app', () => {
+  assert.deepEqual(C.mentionTyped('@Push', 5), { start: 0, typed: 'Push' })
+  assert.deepEqual(C.mentionTyped('look at @src/ma', 15), { start: 8, typed: 'src/ma' })
+  assert.deepEqual(C.mentionTyped('look at @', 9), { start: 8, typed: '' })
+  // not inside a word, as in an email address, and not once a space follows
+  assert.equal(C.mentionTyped('me@example.com', 14), null)
+  assert.equal(C.mentionTyped('@src/main.kt and', 16), null)
+  // only up to the cursor
+  assert.deepEqual(C.mentionTyped('@Push and more', 5), { start: 0, typed: 'Push' })
+})
+
+test('a picked file takes the place of the "@" typed; a folder leaves the menu on what is in it', () => {
+  const text = 'look at @Pus please'
+  const mention = C.mentionTyped(text, 12)
+  assert.deepEqual(C.withMention(text, mention, 12, 'src/PushTalkService.kt'), { value: 'look at @src/PushTalkService.kt  please', caret: 32 })
+  assert.deepEqual(C.withMention('@sr', C.mentionTyped('@sr', 3), 3, 'src/'), { value: '@src/', caret: 5 })
+  // a path with a space goes in quotes
+  assert.deepEqual(C.withMention('@my', C.mentionTyped('@my', 3), 3, 'My Notes/plan.md'), { value: '@"My Notes/plan.md" ', caret: 20 })
+})

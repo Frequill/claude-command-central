@@ -146,13 +146,14 @@ function buildCard(sessionId) {
   const note = el('span', { class: 'compose-note', role: 'status' })
   // a box Claude waits on sits over the compose row, as in the app, where the side panel never covers it
   const dock = el('div', { class: 'chat-dock', 'aria-live': 'polite' })
-  // the "/" menu: the session's own slash commands and skills, as the app's prompt box offers them
+  // the "/" menu: the session's own slash commands and skills, as the app's prompt box offers them; the
+  // same menu lists the session's files after an "@"
   const menu = el('div', { class: 'slash-menu', role: 'listbox', 'aria-label': 'Commands and skills', hidden: true })
   const form = el('form', { class: 'chat-compose' }, dock, menu, emojiPanel, thumbs, el('div', { class: 'compose-row' }, el('div', { class: 'compose-tools' }, emoji, attach), text, suggestKey, stop, el('div', { class: 'compose-buttons' }, send)), el('div', { class: 'compose-bar' }, note), picker)
   const side = el('aside', { class: 'chat-side', 'aria-label': 'What the card tells' })
   const body = el('div', { class: 'chat-body' }, el('div', { class: 'chat-main' }, scroll, form), side)
   const root = el('article', { class: `glass tile expanded-tile${context.isSideHidden(sessionId) ? ' side-hidden' : ''}`, 'data-session': sessionId, 'data-ghost': 'light' }, head, body, el('span', { class: 'grip grip-x', 'data-axis': 'x', 'aria-hidden': 'true' }), el('span', { class: 'grip grip-y', 'data-axis': 'y', 'aria-hidden': 'true' }), el('span', { class: 'grip', 'aria-hidden': 'true' }), el('span', { class: 'grip grip-bl', 'data-axis': 'corner-bl', 'aria-hidden': 'true' }), el('span', { class: 'grip grip-tr', 'data-axis': 'corner-tr', 'aria-hidden': 'true' }), el('span', { class: 'grip grip-tl', 'data-axis': 'corner-tl', 'aria-hidden': 'true' }))
-  const chat = { id: sessionId, root, head, log, live, dock, scroll, thumbs, text, queue, send, stop, note, side, form, menu, emojiPicker: emojiPanel, suggestKey, suggestion: '', slash: { list: null, at: 0, shown: [], index: 0 }, images: [], files: [], items: [], signature: '', timer: 0, isSending: false, isFollowing: true, canSend: false, problem: '', openSteps: new Set(), openGroups: new Set(), openPrompts: new Set(), steps: new Map(), drafts: new Map(), approvals: new Map() }
+  const chat = { id: sessionId, root, head, log, live, dock, scroll, thumbs, text, queue, send, stop, note, side, form, menu, emojiPicker: emojiPanel, suggestKey, suggestion: '', slash: { list: null, at: 0, shown: [], index: 0 }, mention: { shown: [], index: 0, asked: 0, timer: 0 }, menuFor: '', images: [], files: [], items: [], signature: '', timer: 0, isSending: false, isFollowing: true, canSend: false, problem: '', openSteps: new Set(), openGroups: new Set(), openPrompts: new Set(), steps: new Map(), drafts: new Map(), approvals: new Map() }
 
   // hovering the panel leaves the wheel to the page; a click in it lets the wheel scroll the panel,
   // until a click somewhere else or Esc
@@ -173,12 +174,13 @@ function buildCard(sessionId) {
     saveDraftSoon(chat)
     grow(text)
     showSlashMenu(chat)
+    askForFiles(chat)
     showSuggestion(chat)
   })
   emoji.addEventListener('click', () => toggleEmojiPicker(chat))
   text.addEventListener('blur', () => setTimeout(() => hideSlashMenu(chat), 150))
   text.addEventListener('keydown', event => {
-    if (slashKey(chat, event)) return
+    if (chat.menuFor === 'mention' ? mentionKey(chat, event) : slashKey(chat, event)) return
     if (takeSuggestion(chat, event)) return
     if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
       event.preventDefault()
@@ -533,7 +535,11 @@ async function sessionCommands(chat) {
 /** Opens the menu while the first word typed starts with "/", narrowed to what matches it. */
 async function showSlashMenu(chat) {
   const typed = C.slashTyped(chat.text.value)
-  if (typed === null) return hideSlashMenu(chat)
+  if (typed === null) {
+    if (chat.menuFor === 'slash') hideSlashMenu(chat)
+    return
+  }
+  chat.menuFor = 'slash'
   const { commands } = await sessionCommands(chat)
   if (C.slashTyped(chat.text.value) !== typed) return
   chat.slash.shown = C.matchCommands(commands, typed).slice(0, SLASH_SHOWN)
@@ -565,7 +571,9 @@ async function showSlashMenu(chat) {
 
 function hideSlashMenu(chat) {
   chat.menu.hidden = true
+  chat.menuFor = ''
   chat.slash.index = 0
+  chat.mention.index = 0
 }
 
 /** Puts the picked command in the box, ready for what goes after it. */
@@ -597,6 +605,104 @@ function slashKey(chat, event) {
   if ((event.key === 'Enter' && !event.shiftKey) || event.key === 'Tab') {
     event.preventDefault()
     pickCommand(chat, chat.slash.shown[chat.slash.index])
+    return true
+  }
+  return false
+}
+
+// a short wait after a key, so a word typed quickly asks the server once
+const FILES_WAIT_MS = 80
+
+/** While an "@" is being typed, asks the board's server for the session's files that match it. */
+function askForFiles(chat) {
+  clearTimeout(chat.mention.timer)
+  const mention = C.mentionTyped(chat.text.value, chat.text.selectionStart)
+  if (!mention) {
+    if (chat.menuFor === 'mention') hideSlashMenu(chat)
+    return
+  }
+  chat.mention.timer = setTimeout(async () => {
+    const asked = ++chat.mention.asked
+    let found = { paths: [], problem: 'Could not ask the board for files. Is it still running?' }
+    try {
+      const response = await fetch(`/api/files?session=${encodeURIComponent(chat.id)}&q=${encodeURIComponent(mention.typed)}`, { cache: 'no-store' })
+      if (response.ok) found = await response.json()
+    } catch {
+      // the board went away for a moment: the menu says so
+    }
+    // a later key asked again, or the "@" is gone
+    if (asked !== chat.mention.asked || !C.mentionTyped(chat.text.value, chat.text.selectionStart)) return
+    showFiles(chat, Array.isArray(found.paths) ? found.paths : [], found.problem)
+  }, FILES_WAIT_MS)
+}
+
+/** The "@" menu: the files that match, a folder's name ending in "/", its path beside it. */
+function showFiles(chat, paths, problem) {
+  chat.menuFor = 'mention'
+  chat.mention.shown = paths
+  chat.mention.index = Math.min(chat.mention.index, Math.max(0, paths.length - 1))
+  if (!paths.length) {
+    chat.menu.replaceChildren(el('div', { class: 'slash-empty' }, problem || 'No file by that name in this session’s folder'))
+    chat.menu.hidden = false
+    return
+  }
+  chat.menu.replaceChildren(
+    ...paths.map((path, index) => {
+      const name = path.endsWith('/') ? `${path.slice(0, -1).split('/').pop()}/` : path.split('/').pop()
+      const row = el(
+        'div',
+        { class: `slash-item mention-item${index === chat.mention.index ? ' active' : ''}`, role: 'option', 'aria-selected': String(index === chat.mention.index) },
+        el('span', { class: 'slash-name' }, name),
+        el('span', { class: 'slash-about' }, path),
+        el('span', { class: 'slash-source' }, path.endsWith('/') ? 'folder' : 'file'),
+      )
+      row.addEventListener('mousedown', event => {
+        event.preventDefault()
+        pickFile(chat, path)
+      })
+      return row
+    }),
+  )
+  chat.menu.hidden = false
+  chat.menu.querySelector('.active')?.scrollIntoView({ block: 'nearest' })
+}
+
+/** Puts the picked path where the "@" is being typed; a folder keeps the menu open on what is in it. */
+function pickFile(chat, path) {
+  const caret = chat.text.selectionStart
+  const mention = C.mentionTyped(chat.text.value, caret)
+  if (!mention) return hideSlashMenu(chat)
+  const put = C.withMention(chat.text.value, mention, caret, path)
+  chat.text.value = put.value
+  chat.text.focus()
+  chat.text.setSelectionRange(put.caret, put.caret)
+  saveDraftSoon(chat)
+  grow(chat.text)
+  chat.mention.index = 0
+  if (path.endsWith('/')) askForFiles(chat)
+  else hideSlashMenu(chat)
+}
+
+/** Arrows move through the "@" menu, Enter or Tab picks, Esc closes it; true when the key was the menu's. */
+function mentionKey(chat, event) {
+  if (chat.menu.hidden || event.isComposing) return false
+  const count = chat.mention.shown.length
+  if (event.key === 'Escape') {
+    event.preventDefault()
+    event.stopPropagation()
+    hideSlashMenu(chat)
+    return true
+  }
+  if (!count) return false
+  if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+    event.preventDefault()
+    chat.mention.index = (chat.mention.index + (event.key === 'ArrowDown' ? 1 : count - 1)) % count
+    showFiles(chat, chat.mention.shown)
+    return true
+  }
+  if ((event.key === 'Enter' && !event.shiftKey) || event.key === 'Tab') {
+    event.preventDefault()
+    pickFile(chat, chat.mention.shown[chat.mention.index])
     return true
   }
   return false

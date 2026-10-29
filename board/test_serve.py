@@ -14,6 +14,7 @@ import answer_from_ccc
 import approve_from_ccc
 import prompt_seen
 import editors
+import mentions
 import serve
 import terminals
 
@@ -1895,6 +1896,59 @@ class TerminalTest(unittest.TestCase):
         self.assertEqual(opened, {"ok": True})
         self.assertEqual(asked[0][-1], f"cd {self.folder}" if " " not in self.folder else asked[0][-1])
 
+
+
+class MentionTest(unittest.TestCase):
+    """The "@" menu of a write box: a session's files that match what was typed."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.folder = os.path.realpath(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def touch(self, *paths):
+        for path in paths:
+            full = Path(self.folder) / path
+            full.parent.mkdir(parents=True, exist_ok=True)
+            full.write_text("x")
+
+    def test_the_best_match_comes_first_and_folders_are_offered_too(self):
+        paths = mentions.with_folders(["README.md", "src/PushTalkService.kt", "src/push/PushTalkServiceTest.kt", "docs/talk.md", "src/main.kt"])
+        self.assertEqual(paths[:3], ["docs/", "src/", "src/push/"])
+        self.assertEqual(mentions.matches(paths, "PushTalkService")[:2], ["src/PushTalkService.kt", "src/push/PushTalkServiceTest.kt"])
+        self.assertEqual(mentions.matches(paths, "push/"), ["src/push/", "src/push/PushTalkServiceTest.kt"])
+        # its letters in order, when nothing holds it whole
+        self.assertEqual(mentions.matches(paths, "ptsk"), ["src/PushTalkService.kt", "src/push/PushTalkServiceTest.kt"])
+        # nothing typed: what lies at the top, folders first
+        self.assertEqual(mentions.matches(paths, ""), ["docs/", "src/", "README.md"])
+        self.assertEqual(mentions.matches(paths, "nothing-like-it"), [])
+
+    def test_a_folder_outside_git_is_walked_without_packages_and_hidden_folders(self):
+        self.touch("a.txt", "src/b.py", "node_modules/x/index.js", ".git/config", ".hidden/c.txt")
+        self.assertIsNone(mentions.git_files(self.folder))
+        self.assertEqual(mentions.walked_files(self.folder), ["a.txt", "src/b.py"])
+
+    def test_in_a_repository_git_says_which_files_count(self):
+        self.touch("kept.txt", "ignored.log", "new.txt")
+        subprocess.run(["git", "init", "-q", self.folder], check=True)
+        (Path(self.folder) / ".gitignore").write_text("*.log\n")
+        subprocess.run(["git", "-C", self.folder, "add", "kept.txt"], check=True)
+        self.assertEqual(sorted(mentions.git_files(self.folder)), [".gitignore", "kept.txt", "new.txt"])
+        lists = mentions.FileLists(clock=lambda: 100)
+        self.assertEqual(sorted(lists.files(self.folder)), [".gitignore", "kept.txt", "new.txt"])
+
+    def test_a_session_gives_the_files_of_its_own_folder(self):
+        self.touch("notes/todo.md")
+        projects = Path(self.folder) / "projects"
+        (projects / "p").mkdir(parents=True)
+        (projects / "p" / "s1.jsonl").write_text(json.dumps({"type": "user", "cwd": self.folder, "message": {"content": "hi"}}) + "\n")
+        transcripts = serve.Transcripts(projects)
+        found = serve.session_files("s1", "todo", transcripts, mentions.FileLists())
+        self.assertEqual((found["folder"], found["paths"]), (self.folder, ["notes/todo.md"]))
+        self.assertEqual(serve.session_files("../etc", "x", transcripts, mentions.FileLists())["paths"], [])
+        self.assertEqual(serve.session_files("nobody", "x", transcripts, mentions.FileLists())["paths"], [])
 
 if __name__ == "__main__":
     unittest.main()

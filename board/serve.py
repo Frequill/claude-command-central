@@ -19,6 +19,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, quote, urlsplit
 
 import editors
+import mentions
 import terminals
 
 HOST = "127.0.0.1"
@@ -1503,6 +1504,16 @@ def read_send_request(body: bytes):
     return (session_id, text, decoded, mode, attached), ""
 
 
+def session_files(session_id: str, typed: str, transcripts, lists) -> dict:
+    """The files of a session's folder that match what was typed after "@", for its write box's menu.
+    The folder is the one its transcript names; nothing when that cannot be told."""
+    path = transcripts.find(session_id) if isinstance(session_id, str) and SAFE_ID.match(session_id) else None
+    folder = folder_of(path) if path else None
+    if not folder or not os.path.isdir(folder):
+        return {"paths": [], "problem": "Its folder is not known yet."}
+    return {"folder": folder, "paths": mentions.matches(mentions.with_folders(lists.files(folder)), typed[:200])}
+
+
 def read_commands(commands_dir: Path, session_id: str) -> dict:
     """A session's slash commands and the models /model takes, as its mod last wrote them; empty
     lists for a session whose mod has not written them (an older CCC, or not started yet)."""
@@ -1996,6 +2007,7 @@ class Notes:
 
 
 TRANSCRIPTS = Transcripts(PROJECTS_DIR)
+FILE_LISTS = mentions.FileLists()
 APP_SESSIONS = AppSessions(APP_SESSIONS_DIR)
 TOKENS = UsageLedger(PROJECTS_DIR)
 INBOX = Inbox(INBOX_DIR, UPLOADS_DIR)
@@ -2199,6 +2211,9 @@ class Handler(SimpleHTTPRequestHandler):
         if route == "/api/commands":
             session_id = parse_qs(urlsplit(self.path).query).get("session", [""])[0]
             return self.send_json(read_commands(COMMANDS_DIR, session_id))
+        if route == "/api/files":
+            query = parse_qs(urlsplit(self.path).query)
+            return self.send_json(session_files(query.get("session", [""])[0], query.get("q", [""])[0], TRANSCRIPTS, FILE_LISTS))
         if route == "/api/chat":
             session_id = parse_qs(urlsplit(self.path).query).get("session", [""])[0]
             return self.send_json(chat_payload(session_id, TRANSCRIPTS, INBOX))
