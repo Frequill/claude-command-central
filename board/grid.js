@@ -286,9 +286,11 @@ export function makeGrid(box, { onStart, onEnd, oldPlace, wobbles, animates, onA
   const aim = (pointer = scroller.pointer()) => {
     if (!held || !document.body.classList.contains('is-dragging')) return
     const cell = gaps.cellAt(pointer)
-    const inOwnPlace = cell && cell.x >= held.from.x && cell.x < held.from.x + held.from.w && cell.y >= held.from.y && cell.y < held.from.y + held.from.h
-    const gap = cell && !inOwnPlace ? gapAt(held.before, cell) : null
-    const space = isRoomForCard(gap) ? gap : null
+    // the room the card was taken from is empty too, so a card held over the space next to it counts
+    // at once; only that room alone is no space to fill
+    const gap = cell ? gapAt(held.before, cell) : null
+    const isOnlyOwnRoom = gap && overlaps(gap, held.from) && gap.w * gap.h <= held.from.w * held.from.h
+    const space = isRoomForCard(gap) && !isOnlyOwnRoom ? gap : null
     held.gap = held.isShift ? space : null
     gaps.target(space, { isFilled: held.isShift, pointer })
   }
