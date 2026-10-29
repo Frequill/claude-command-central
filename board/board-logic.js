@@ -54,8 +54,8 @@ export function mayReloadNow({ isWriting, isWindowOpen, isInteracting }) {
   return !isWriting && !isWindowOpen && !isInteracting
 }
 
-/** Where a session started from CCC runs: the Claude app (the default) or a Terminal window. */
-export const START_PLACES = ['app', 'terminal']
+/** Where a session started from CCC runs: in the background, run by CCC itself (the default), the Claude app, or a Terminal window. */
+export const START_PLACES = ['background', 'app', 'terminal']
 
 /** A folder as the start window lists it: its own name, and the folder it sits in. */
 export function folderLabel(path) {
@@ -67,13 +67,61 @@ export function folderLabel(path) {
 }
 
 /** Whether a session can be started with what the start window holds, and what it says about it. */
-export function startState({ folder, where, isStarting, appName = 'Terminal' }) {
-  const place = START_PLACES.includes(where) ? where : 'app'
-  const note =
-    place === 'app'
-      ? 'Opens a new session in the Claude app, in this folder, with your first message already written in it. Press Enter there to send it, and it shows up here. (The app never sends a message by itself.)'
-      : `Opens ${appName} in this folder and starts claude with your first message. It shows up here as soon as Claude has it.`
-  return { where: place, canStart: Boolean(folder) && !isStarting, note }
+export function startState({ folder, where, isStarting, appName = 'Terminal', prompt = '', mode = 'new' }) {
+  const place = START_PLACES.includes(where) ? where : 'background'
+  const notes = {
+    app: 'Opens a new session in the Claude app, in this folder, with your first message already written in it. Press Enter there to send it, and it shows up here. (The app never sends a message by itself.)',
+    terminal: `Opens ${appName} in this folder and starts claude with your first message. It shows up here as soon as Claude has it.`,
+    background:
+      'CCC runs claude itself, with your first message, and nothing opens: it shows up here and keeps working when you close the app, your terminals or CCC. Its card can show its terminal. In a folder Claude was never told to trust, it asks first: its terminal then comes onto the board for your answer.',
+  }
+  // in the background Claude starts only with a message, and nobody is there to type one
+  const needsPrompt = mode === 'new' && place === 'background' && !String(prompt ?? '').trim()
+  return { where: place, canStart: Boolean(folder) && !isStarting && !needsPrompt, note: notes[place], needsPrompt }
+}
+
+/**
+ * What runs in CCC's keeper, as Settings lists it: the Claude sessions started in the background
+ * first, then the shells, each with what to call it. Only what still runs. `titleOf` names a
+ * session as its card does.
+ */
+export function runningRows(terminals, isOnBoard = () => false, titleOf = () => undefined) {
+  const live = (Array.isArray(terminals) ? terminals : []).filter(card => card && typeof card.id === 'string' && !card.endedAt)
+  const rows = live.map(card => {
+    const place = folderLabel(card.where || card.folder)
+    if (card.kind !== 'claude') return { id: card.id, kind: 'shell', title: place.name, folder: card.where || card.folder }
+    const isCard = isOnBoard(card.sessionId)
+    // the server names it after its conversation; with none yet, Claude is still starting, or asks
+    // something on its screen
+    const named = (isCard && titleOf(card.sessionId)) || (typeof card.title === 'string' && card.title) || ''
+    return {
+      id: card.id,
+      kind: 'claude',
+      sessionId: card.sessionId,
+      title: named || (isCard ? place.name : 'Starting, or waiting on its screen'),
+      folder: card.folder,
+      isOnBoard: isCard,
+      // its card was closed from CCC, and Claude works on
+      isClosed: card.closed === true && !isCard,
+      isHidden: card.hidden === true,
+    }
+  })
+  return [...rows.filter(row => row.kind === 'claude'), ...rows.filter(row => row.kind === 'shell')]
+}
+
+/** The line over that list: whether the keeper runs, and what runs in it. */
+export function keeperLine(keeper, rows) {
+  if (!keeper?.running && rows.length === 0) return 'CCC\u2019s keeper is not running. It starts with your first terminal or background session.'
+  const count = (n, one, many) => `${n} ${n === 1 ? one : many}`
+  const claude = rows.filter(row => row.kind === 'claude').length
+  const shells = rows.length - claude
+  if (rows.length === 0) return 'CCC\u2019s keeper is running, with nothing in it. It ends by itself after 15 minutes.'
+  return `CCC\u2019s keeper is running: ${[claude && count(claude, 'background session', 'background sessions'), shells && count(shells, 'shell', 'shells')].filter(Boolean).join(' and ')}.`
+}
+
+/** The terminal a session runs in when CCC started it in the background, or null. */
+export function backgroundTerminal(terminals, sessionId) {
+  return (Array.isArray(terminals) ? terminals : []).find(card => card?.kind === 'claude' && card.sessionId === sessionId && !card.endedAt) ?? null
 }
 
 export const TERMINAL_APPS = ['auto', 'iterm', 'terminal']
@@ -92,7 +140,7 @@ export function editorChoice(setting, apps) {
   return named ?? { id: 'auto', name: known.length === 1 ? known[0].name : 'your editor' }
 }
 
-export const SETTINGS_TABS = ['look', 'board', 'behaviour', 'terminal']
+export const SETTINGS_TABS = ['look', 'board', 'behaviour', 'terminal', 'background']
 
 // wheel events closer together than this are one movement: a push of the wheel and the glide a Mac adds after it
 export const WHEEL_GAP_MS = 120
@@ -314,6 +362,7 @@ export const RUN_LABEL = {
   running: 'working',
   done: 'done',
   failed: 'failed',
+  stopped: 'stopped',
   started: 'started',
   proposed: 'proposed',
 }

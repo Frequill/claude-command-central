@@ -9,7 +9,7 @@ import { setupNotes } from './notes.js'
 import { loadSettings, setupSettings } from './settings.js'
 import { startScene } from './themes.js'
 import { makeGrid } from './grid.js'
-import { closeTerminal, dropTerminal, focusTerminal, isTerminal, setupTerminals, startTerminal, terminalCard, themeTerminals, updateTerminal } from './terminal.js'
+import { closeTerminal, dropTerminal, focusTerminal, isTerminal, setupTerminals, startTerminal, stopKeeper, terminalCard, themeTerminals, toggleTerminal, updateTerminal } from './terminal.js'
 
 const POLL_MS = 1000
 const TOKENS_POLL_MS = 15_000
@@ -27,7 +27,9 @@ const REPLY_NOTES = {
   thinking: 'Claude is working on it…',
   empty: 'Nothing written yet.',
 }
-const RUN_MARK = { running: '●', done: '✓', failed: '✗', started: '◌', proposed: '◌' }
+const RUN_MARK = { running: '●', done: '✓', failed: '✗', stopped: '■', started: '◌', proposed: '◌' }
+// how long a Stop on the agent map waits for its second click
+const STOP_ARMED_MS = 4000
 const LOG_MARK = { running: '…', ok: '✓', error: '✗' }
 const MAP = { rowH: 72, agentH: 62, sessionH: 50, groupGap: 20, edgeW: 120 }
 const SMALL_RING = { size: 52, radius: 20, width: 7 }
@@ -441,6 +443,8 @@ function setupTokenChart() {
 // ---------- starting a Claude Code session ----------
 
 const START_PLACE_KEY = 'ccc.startIn'
+// set once "In the background" has been explained, so its popup opens by itself only the first time
+const BACKGROUND_EXPLAINED_KEY = 'ccc.backgroundExplained'
 const START_MODE_KEY = 'ccc.startMode'
 // how long after a start from "+" a new card still counts as that session's, for going to it
 const STARTED_WAIT_MS = 3 * 60_000
@@ -515,14 +519,24 @@ function setupStart() {
   if (perm.selectedIndex < 0) perm.value = ''
   perm.addEventListener('change', () => writeStored(START_MODE_KEY, perm.value))
   document.querySelector('#start-go').addEventListener('click', () => startSession(dialog))
+  document.querySelector('#start-background-info').addEventListener('click', explainBackground)
+  // in the background the first message is needed: Start waits for one
+  prompt.addEventListener('input', () => drawStart())
   prompt.addEventListener('keydown', event => {
     if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) startSession(dialog)
   })
 }
 
+/** What "In the background" means, in a popup over the start window. */
+function explainBackground() {
+  writeStored(BACKGROUND_EXPLAINED_KEY, '1')
+  const info = document.querySelector('#background-info')
+  if (!info.open) info.showModal()
+}
+
 function drawStart() {
   const start = view.start
-  const state = L.startState({ ...start, appName: chosenApp().name })
+  const state = L.startState({ ...start, appName: chosenApp().name, prompt: document.querySelector('#start-prompt').value })
   document.querySelector('#start-folders').replaceChildren(
     ...(start.folders.length
       ? start.folders.map(folder => {
@@ -544,27 +558,34 @@ function drawStart() {
   for (const part of document.querySelectorAll('#start-dialog .start-new')) part.hidden = isExisting
   document.querySelector('#start-existing').hidden = !isExisting
   document.querySelector('#start-in').hidden = isExisting || isShell
+  document.querySelector('#start-background-info').hidden = state.where !== 'background'
+  // the first time it is the choice, with the start window open, it is explained
+  if (state.where === 'background' && start.mode === 'new' && document.querySelector('#start-dialog').open && !readStored(BACKGROUND_EXPLAINED_KEY)) explainBackground()
   document.querySelector('#start-shell-note').hidden = !isShell
   setText('#start-title', isShell ? 'NEW TERMINAL' : 'ADD A SESSION')
   setText('#start-app-name', appName)
   for (const button of document.querySelectorAll('#start-where [data-where]')) button.setAttribute('aria-checked', String(button.dataset.where === state.where))
   setText('#start-note', state.note)
-  // only claude in a terminal takes a mode as it starts; the app's link has no way to give one
+  // only claude run in a terminal or in the background takes a mode as it starts; the app's link has no way to give one
   const isApp = state.where === 'app'
+  const isBackground = state.where === 'background'
   document.querySelector('#start-perm').disabled = isApp
   document.querySelector('.start-perm').classList.toggle('is-off', isApp)
   setText(
     '#start-perm-note',
     isApp
       ? 'The Claude app starts every session in its own default mode: its link to start a session has no way to give one. Pick the mode in the app, or set a default in Claude Code\u2019s settings (permissions.defaultMode).'
-      : `claude starts in ${appName} in this mode.`,
+      : isBackground
+        ? 'claude starts in the background in this mode. With nobody watching it, Auto lets it work on without stopping to ask; it still asks here on its card when it must.'
+        : `claude starts in ${appName} in this mode.`,
   )
   // the first message goes with either: typed into the app's new session, or given to claude in the terminal
   document.querySelector('#start-prompt').hidden = isShell
+  document.querySelector('#start-prompt').placeholder = state.where === 'background' ? 'First message to Claude (needed: in the background, Claude starts with it)' : 'First message to Claude (optional)'
   const go = document.querySelector('#start-go')
   go.hidden = isExisting
   go.disabled = !state.canStart
-  go.textContent = start.isStarting ? 'Starting…' : isShell ? 'Open terminal' : state.where === 'app' ? 'Open in the Claude app' : `Start in ${appName}`
+  go.textContent = start.isStarting ? 'Starting…' : isShell ? 'Open terminal' : state.where === 'app' ? 'Open in the Claude app' : isBackground ? 'Start in the background' : `Start in ${appName}`
 }
 
 // ---------- adding a conversation from Claude's history ----------
@@ -677,7 +698,7 @@ async function pickFolder() {
 
 async function startSession(dialog) {
   const start = view.start
-  if (!L.startState(start).canStart) return
+  if (!L.startState({ ...start, prompt: document.querySelector('#start-prompt').value }).canStart) return
   if (start.mode === 'terminal') return openTerminal(dialog)
   start.isStarting = true
   drawStart()
@@ -692,8 +713,11 @@ async function startSession(dialog) {
     if (data.ok) {
       start.didStart = true
       dialog.close()
-      // the board goes to the session's card once it shows up
+      // the board goes to the session's card once it shows up; to its terminal, when Claude asks
+      // something there first
       view.startedAt = Date.now()
+      if (data.shown && typeof data.terminalId === 'string') view.awaited = data.terminalId
+      await poll()
     }
     else problem.textContent = data.problem || 'Could not start it.'
   } catch {
@@ -725,6 +749,158 @@ async function openTerminal(dialog) {
 /** The terminal app picked in the settings, as this Mac has it. */
 function chosenApp() {
   return L.terminalApp(view.settings.terminalApp, view.terminalApps)
+}
+
+// ---------- what runs in CCC's keeper, in Settings ----------
+
+/**
+ * The Background tab in Settings: every background session and shell, with Show and End, and the
+ * background sessions that stopped without being ended, to resume.
+ */
+function drawRunning() {
+  const rows = L.runningRows(view.terminals, id => view.byId.has(id), id => view.tags.get(id))
+  const keeper = view.keeper ?? { running: false, outdated: false }
+  const stopped = view.stopped ?? []
+  const signature = JSON.stringify([rows, keeper, stopped])
+  if (signature === view.runningSignature) return
+  view.runningSignature = signature
+  // the tab is always there; with nothing running, its line says so and there is nothing to end
+  document.querySelector('#running-now').hidden = rows.length === 0
+  drawStopped(stopped)
+  setText('#running-status', L.keeperLine(keeper, rows))
+  const isOutdated = Boolean(keeper.outdated && rows.length)
+  document.querySelector('#running-outdated').hidden = !isOutdated
+  document.querySelector('#running-restart').hidden = !isOutdated
+  document.querySelector('#running-list').replaceChildren(
+    ...rows.map(row => {
+      const show = el('button', { type: 'button', class: 'secondary existing-open' }, 'Show')
+      show.addEventListener('click', () => showRunning(row))
+      const end = el('button', { type: 'button', class: 'secondary existing-open' }, 'End')
+      end.addEventListener('click', () => endRunning(row))
+      const label = L.folderLabel(row.folder)
+      const kind = row.kind === 'claude' ? (row.isClosed ? 'Background session · card closed' : row.isHidden ? 'Background session · terminal hidden' : 'Background session') : 'Shell'
+      return el(
+        'div',
+        { class: 'existing-row', role: 'listitem' },
+        el(
+          'div',
+          { class: 'existing-main' },
+          el('span', { class: 'existing-title', title: row.title }, row.title),
+          el('span', { class: 'existing-meta', title: row.folder }, `${kind} · ${label.parent}/${label.name}`.replace('//', '/')),
+        ),
+        el('div', { class: 'existing-actions' }, show, end),
+      )
+    }),
+  )
+}
+
+/** The background sessions that stopped: each with Resume and Forget, and Resume all. */
+function drawStopped(stopped) {
+  document.querySelector('#stopped-none').hidden = stopped.length > 0
+  document.querySelector('#resume-field').hidden = stopped.length === 0
+  document.querySelector('#stopped-resume-all').hidden = stopped.length < 2
+  document.querySelector('#stopped-list').replaceChildren(
+    ...stopped.map(one => {
+      const resume = el('button', { type: 'button', class: 'primary existing-open' }, 'Resume')
+      resume.addEventListener('click', () => resumeStopped([one], resume))
+      const forget = el('button', { type: 'button', class: 'secondary existing-open', title: 'Takes it off this list. Its conversation stays in Claude\u2019s history.' }, 'Forget')
+      forget.addEventListener('click', async () => {
+        forget.disabled = true
+        await fetch('/api/background/forget', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-CCC-Action': 'background-forget' }, body: JSON.stringify({ sessionId: one.sessionId }) }).catch(() => {})
+        await poll()
+      })
+      const label = L.folderLabel(one.folder)
+      return el(
+        'div',
+        { class: 'existing-row', role: 'listitem' },
+        el(
+          'div',
+          { class: 'existing-main' },
+          el('span', { class: 'existing-title', title: one.title }, one.title),
+          el('span', { class: 'existing-meta', title: one.folder }, [`${label.parent}/${label.name}`.replace('//', '/'), Number.isFinite(one.at) ? `started ${L.timeAgo(one.at, Date.now())}` : ''].filter(Boolean).join(' · ')),
+        ),
+        el('div', { class: 'existing-actions' }, resume, forget),
+      )
+    }),
+  )
+}
+
+/** Resumes a stopped background session: '' when it is on its way, else what went wrong. */
+async function resumeBackground(sessionId, text) {
+  try {
+    const response = await fetch('/api/background/resume', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-CCC-Action': 'background-resume' }, body: JSON.stringify({ sessionId, text }) })
+    const data = response.ok ? await response.json() : { problem: 'Could not resume it. Is the board still running?' }
+    if (!data.ok) return data.problem || 'Could not resume it.'
+    if (data.shown && typeof data.terminalId === 'string') view.awaited = data.terminalId
+    return ''
+  } catch {
+    return 'Could not resume it. Is the board still running?'
+  } finally {
+    await poll()
+  }
+}
+
+/** Resume (or Resume all): each with the message in the box, one after another. */
+async function resumeStopped(list, button) {
+  if (button) button.disabled = true
+  const text = document.querySelector('#resume-text').value
+  const problems = []
+  for (const one of list) {
+    const problem = await resumeBackground(one.sessionId, text)
+    if (problem) problems.push(`${one.title}: ${problem}`)
+  }
+  if (button) button.disabled = false
+  setText('#running-status', problems.join(' ') || (list.length === 1 ? 'Resuming it in the background.' : `Resuming ${list.length} sessions in the background.`))
+  document.querySelector('#running-status').hidden = false
+}
+
+/** Show: the settings close and the board goes to it; a background session to its card, else to its terminal. */
+async function showRunning(row) {
+  document.querySelector('#settings').close()
+  // its card was closed from CCC: it comes back onto the board, as one added from the history does
+  if (row.kind === 'claude' && row.isClosed) {
+    await fetch('/api/add', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-CCC-Action': 'add' }, body: JSON.stringify({ sessionId: row.sessionId }) }).catch(() => {})
+    await poll()
+    return window.dispatchEvent(new CustomEvent('ccc:show-session', { detail: { sessionId: row.sessionId } }))
+  }
+  if (row.kind === 'claude' && row.isOnBoard) return window.dispatchEvent(new CustomEvent('ccc:show-session', { detail: { sessionId: row.sessionId } }))
+  if (row.kind === 'claude' && row.isHidden) return showTerminal(row.id, false)
+  window.dispatchEvent(new CustomEvent('ccc:show-session', { detail: { sessionId: row.id } }))
+}
+
+/** End: as from its own card, asked first. A background session ends with its card; one with no card yet, and a shell, with their terminal. */
+function endRunning(row) {
+  if (row.kind === 'claude' && (row.isOnBoard || row.isClosed)) return askToRemove(row.sessionId, row.title, { isClosed: row.isClosed })
+  askToCloseTerminal(row.id, row.title, false)
+}
+
+/** End everything (or Restart keeper, which is the same): asked first, then the keeper ends with all in it. */
+function setupRunning() {
+  const dialog = document.querySelector('#keeper-stop-dialog')
+  const ask = () => {
+    const rows = L.runningRows(view.terminals, id => view.byId.has(id), id => view.tags.get(id))
+    setText('#keeper-stop-what', rows.length ? L.keeperLine(view.keeper, rows).replace(/^.*running: /, '').replace(/\.$/, '') : 'CCC\u2019s keeper')
+    dialog.returnValue = ''
+    dialog.showModal()
+    document.querySelector('#keeper-stop-confirm').focus()
+  }
+  dialog.addEventListener('close', async () => {
+    if (dialog.returnValue !== 'stop') return
+    const status = document.querySelector('#running-status')
+    if (!(await stopKeeper())) status.textContent = 'Could not end them. Is the board still running?'
+    await poll()
+  })
+  document.querySelector('#running-stop').addEventListener('click', ask)
+  document.querySelector('#running-restart').addEventListener('click', ask)
+  document.querySelector('#stopped-resume-all').addEventListener('click', event => resumeStopped(view.stopped ?? [], event.currentTarget))
+}
+
+/** Puts a background session's terminal on the board, or takes it off; Claude runs on in it either way. */
+async function showTerminal(terminalId, isHidden) {
+  if (!isHidden) view.awaited = terminalId
+  const ok = await toggleTerminal(terminalId, isHidden)
+  if (!ok) view.awaited = null
+  await poll()
 }
 
 /** The × on a terminal: an ended one goes at once; a running one asks first, since its shell stops. */
@@ -1217,7 +1393,7 @@ function renderTiles(sessions, now, day, tags) {
     seen.add(id)
   })
   // the terminals come after the sessions, each a card made once and kept, like a chat
-  const shells = view.terminals.filter(card => !view.removing.has(card.id))
+  const shells = view.terminals.filter(card => !card.hidden && !view.removing.has(card.id))
   shells.forEach((card, offset) => {
     const index = arranged.length + offset
     let tile = view.tiles.get(card.id)
@@ -1240,14 +1416,18 @@ function renderTiles(sessions, now, day, tags) {
   }
   document.querySelector('#sessions-empty').hidden = sessions.length + shells.length > 0
   view.order = [...arranged.map(session => session.sessionId), ...shells.map(card => card.id)]
+  drawRunning()
   view.onBoard = seen
   if (view.settings.animations) for (const id of arriving) welcome(view.tiles.get(id)?.node, view.settings.theme)
   // a card that comes onto the board while it is open (a new session, a terminal, one added from
   // history) is shown: the board glides to it. Not while the person is typing in another card, unless
   // they started it from "+", which comes in a little later.
-  const started = [...arriving].find(id => !id.startsWith('t'))
-  const isOwnStart = Boolean(started && view.startedAt && Date.now() - view.startedAt < STARTED_WAIT_MS)
-  if (isOwnStart) view.startedAt = 0
+  // a terminal the person asked to see (a background session's) is gone to as it comes
+  const awaited = view.awaited && arriving.has(view.awaited) ? view.awaited : null
+  if (awaited) view.awaited = null
+  const started = awaited ?? [...arriving].find(id => !id.startsWith('t'))
+  const isOwnStart = Boolean(awaited || (started && view.startedAt && Date.now() - view.startedAt < STARTED_WAIT_MS))
+  if (isOwnStart && !awaited) view.startedAt = 0
   const newest = isOwnStart ? started : [...arriving].at(-1)
   if (newest && (isOwnStart || Date.now() - view.typedAt > TYPING_MS)) {
     setTimeout(() => window.dispatchEvent(new CustomEvent('ccc:show-session', { detail: { sessionId: newest } })), 300)
@@ -1419,9 +1599,21 @@ function removeButton(sessionId, title) {
  * Asks what to do: close it from CCC alone (it goes on where it runs), or clear its context too.
  * On either the card leaves at once and the server remembers it is off the board.
  */
-function askToRemove(sessionId, title) {
+function askToRemove(sessionId, title, { isClosed = false } = {}) {
   const dialog = document.querySelector('#remove-dialog')
   setText('#remove-name', title)
+  // a session CCC runs in the background: closed from CCC it works on there, and End it stops it.
+  // Clearing its context is not offered: /clear gives it a new id, and no card would follow it
+  const isBackground = Boolean(L.backgroundTerminal(view.terminals, sessionId))
+  document.querySelector('#remove-confirm').hidden = isClosed
+  document.querySelector('#remove-quit').hidden = !isBackground
+  document.querySelector('#remove-end').hidden = isBackground
+  setText(
+    '#remove-confirm-note',
+    isBackground
+      ? 'Only CCC lets go of it: Claude keeps working in the background. Settings \u2192 Background sessions lists it, and Show there puts this card back. It also comes back by itself when a new turn starts in it.'
+      : 'Only CCC lets go of it. The conversation goes on where it runs, stays in Claude\u2019s history, and comes back here as soon as you write in it again.',
+  )
   const end = document.querySelector('#remove-end')
   const why = L.endProblem(view.byId.get(sessionId))
   end.disabled = Boolean(why)
@@ -1429,7 +1621,7 @@ function askToRemove(sessionId, title) {
   dialog.returnValue = ''
   dialog.onclose = async () => {
     const choice = dialog.returnValue
-    if (choice !== 'remove' && choice !== 'end') return
+    if (choice !== 'remove' && choice !== 'end' && choice !== 'quit') return
     const node = view.tiles.get(sessionId)?.node
     if (view.settings.theme === 'inferno' && view.settings.animations) carryAway(node)
     else node?.classList.add('leaving')
@@ -1438,7 +1630,8 @@ function askToRemove(sessionId, title) {
       const response = await fetch(choice === 'end' ? '/api/end' : '/api/remove', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-CCC-Action': choice === 'end' ? 'end' : 'remove' },
-        body: JSON.stringify({ sessionId }),
+        // End it, for a session in the background: closed, and Claude there stops too
+        body: JSON.stringify(choice === 'quit' ? { sessionId, end: true } : { sessionId }),
       })
       if (!response.ok) throw new Error(`HTTP ${response.status}`)
     } catch {
@@ -1836,6 +2029,11 @@ function agentNode({ run, depth, status, agents, working }, top, sessionId, widt
     box,
     isGraph ? stepGraph(graph, status === 'running') : null,
   )
+  const stop = stopButton(run, status, sessionId)
+  if (stop) {
+    box.classList.add('has-stop')
+    box.append(stop)
+  }
   if (canOpen) {
     row.addEventListener('click', () => openSteps(sessionId, run.id))
     row.addEventListener('keydown', event => {
@@ -1845,6 +2043,47 @@ function agentNode({ run, depth, status, agents, working }, top, sessionId, widt
     })
   }
   return row
+}
+
+/**
+ * Stop on a working agent or background command, while its session can take a word from CCC:
+ * a first click asks again, a second one within a few seconds ends it (and only it: the session's
+ * turn goes on).
+ */
+function stopButton(run, status, sessionId) {
+  const session = view.byId.get(sessionId)
+  if (status !== 'running' || !['agent', 'command'].includes(run.kind) || !session?.takesMessages || session.endedAt !== undefined) return null
+  const what = run.kind === 'agent' ? 'agent' : 'command'
+  const button = el('button', { type: 'button', class: 'map-stop', title: `Stop this ${what}: it ends, and the session goes on` }, 'Stop')
+  let armedAt = 0
+  button.addEventListener('click', async event => {
+    // the row opens the agent's steps: this click is for the button alone
+    event.stopPropagation()
+    if (Date.now() - armedAt > STOP_ARMED_MS) {
+      armedAt = Date.now()
+      button.textContent = 'Stop it?'
+      button.classList.add('is-armed')
+      setTimeout(() => {
+        if (!button.disabled) {
+          button.textContent = 'Stop'
+          button.classList.remove('is-armed')
+        }
+      }, STOP_ARMED_MS)
+      return
+    }
+    button.disabled = true
+    button.textContent = 'Stopping…'
+    try {
+      const response = await fetch('/api/stop-run', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-CCC-Action': 'stop-run' }, body: JSON.stringify({ sessionId, runId: run.id }) })
+      if (!response.ok) throw new Error(`HTTP ${response.status}`)
+    } catch {
+      button.disabled = false
+      button.textContent = 'Stop'
+      button.classList.remove('is-armed')
+    }
+  })
+  button.addEventListener('keydown', event => event.stopPropagation())
+  return button
 }
 
 /** An agent's steps as small boxes in a line, each joined to the one before; a chip says how many more there are. */
@@ -2108,7 +2347,9 @@ async function poll() {
   try {
     const response = await fetch('/api/sessions', { cache: 'no-store' })
     if (!response.ok) throw new Error(`HTTP ${response.status}`)
-    const { sessions, hidden, boardVersion, terminals, terminalApps, editorApps, caveman } = await response.json()
+    const { sessions, hidden, boardVersion, terminals, keeper, stopped, terminalApps, editorApps, caveman } = await response.json()
+    view.stopped = Array.isArray(stopped) ? stopped.filter(one => one && typeof one.sessionId === 'string') : []
+    view.keeper = keeper && typeof keeper === 'object' ? keeper : { running: false, outdated: false }
     view.hidden = Array.isArray(hidden) ? hidden : []
     view.terminals = Array.isArray(terminals) ? terminals.filter(card => card && typeof card.id === 'string' && typeof card.folder === 'string') : []
     view.terminalApps = Array.isArray(terminalApps) ? terminalApps : []
@@ -2143,6 +2384,7 @@ setupSettings(view.settings, { onChange: applySettings, onResetLayout: resetLayo
 setupLayout()
 setupNotes()
 setupCaveman()
+setupRunning()
 document.querySelector('#map-clear').addEventListener('click', clearFinishedRuns)
 setupChat({
   sessionOf: id => view.byId.get(id),
@@ -2155,6 +2397,11 @@ setupChat({
   colorOf: id => L.identityColor(view.slots, id),
   statsOf: id => chatStats(view.byId.get(id), Date.now()),
   onRemove: (id, title) => askToRemove(id, title),
+  terminalOf: id => L.backgroundTerminal(view.terminals, id),
+  onShowTerminal: showTerminal,
+  isResumable: id => (view.stopped ?? []).some(one => one.sessionId === id),
+  // the message was just sent, so it waits in the inbox and goes in first
+  onResume: id => resumeBackground(id, ''),
   // the facts panel starts folded away, as every session now opens into its chat; opened, it stays open
   isSideHidden: id => !view.layout.chats?.[id]?.showSide,
   onSide: (id, isHidden) => {
@@ -2167,7 +2414,9 @@ setupTerminals({
   appName: () => chosenApp().name,
   appId: () => view.settings.terminalApp,
   themeId: () => view.settings.theme,
+  isOnBoard: sessionId => view.byId.has(sessionId),
   onClose: askToCloseTerminal,
+  onHide: id => showTerminal(id, true),
   onRestarted: moveTerminalPlace,
 })
 // how far under the pinned top bar and live feed a chat's header lands when the board scrolls to it

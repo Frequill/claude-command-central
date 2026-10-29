@@ -1,8 +1,15 @@
-"""Terminals on the board: a real shell per card, run by the board's server on this Mac only.
+"""Terminals on the board: a real shell per card, on this Mac only.
 
 Each terminal is the person's own login shell in a pseudo-terminal, so colours, Tab, vim and Ctrl+C
 work as they do in iTerm. The board reads what the shells print through one long request (so many
 terminals never use up the browser's few connections) and sends key presses with small POSTs.
+
+The terminals live in CCC's keeper (keeper.py), a small program of its own, so they keep running
+when the board's server stops. A terminal can also run Claude in the background instead of a
+shell: hidden from the board until the person asks to see it.
+
+What differs between systems is kept in the functions at the bottom (spawn_shell, set_size,
+hang_up, folder_of): a Windows version would swap those for its own terminals (ConPTY).
 """
 
 import base64
@@ -24,7 +31,7 @@ from pathlib import Path
 # the child of pty.fork only becomes the shell, which is safe with the server's other threads
 warnings.filterwarnings("ignore", message=".*fork.*", category=DeprecationWarning)
 
-MAX_TERMINALS = 12
+MAX_TERMINALS = 24
 # what a card shows again after the board reloads: the last stretch of what its shell printed
 KEEP_BYTES = 512 * 1024
 READ_BYTES = 64 * 1024
@@ -37,6 +44,15 @@ ENDED_KEPT_S = 24 * 3600
 WHERE_EVERY_S = 2
 COLS = (2, 1000)
 ROWS = (1, 500)
+# what Claude asks before it starts in a folder nobody said to trust yet; letters only, as the
+# screen puts cursor moves between its words
+TRUST_QUESTION = b"Itrustthisfolder"
+TRUST_LOOK_BYTES = 256 * 1024
+ESCAPES = re.compile(rb"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[()][0-9A-Za-z]|\x1b[=>78]|\s")
+# what a Claude session puts in the surroundings of what it runs: a shell or a Claude started from
+# here is not part of that session, so these never reach them (a claude that sees them would think
+# it is that session's helper and keep no transcript)
+SESSION_VARS = re.compile(r"^(CCC_|CLAUDECODE$|CLAUDE_CODE_|CLAUDE_AGENT_SDK_|CLAUDE_PID$|CLAUDE_EFFORT$|CLAUDE_PREVIEW_|MCP_|ENABLE_BETA_TRACING)")
 
 
 def clamp(value, low_high):
@@ -51,8 +67,9 @@ def shell_of(environ) -> str:
 
 
 def shell_env(environ) -> dict:
-    """The shell's surroundings: the server's own, told it is a colour terminal that reads UTF-8."""
-    env = {key: value for key, value in environ.items() if not key.startswith("CCC_")}
+    """The shell's surroundings: the server's own, without what a Claude session put there, told it is
+    a colour terminal that reads UTF-8."""
+    env = {key: value for key, value in environ.items() if not SESSION_VARS.match(key)}
     env["TERM"] = "xterm-256color"
     env["COLORTERM"] = "truecolor"
     env["TERM_PROGRAM"] = "CCC"
@@ -62,9 +79,10 @@ def shell_env(environ) -> dict:
 
 
 class Terminal:
-    """One shell and what it has printed lately. `seq` counts every byte it ever printed."""
+    """One shell, or one Claude run in the background, and what it has printed lately. `seq` counts
+    every byte it ever printed. A hidden one is left off the board until the person shows it."""
 
-    def __init__(self, terminal_id: str, folder: str, pid: int, fd: int, now_ms: int):
+    def __init__(self, terminal_id: str, folder: str, pid: int, fd: int, now_ms: int, session_id=None, is_hidden=False):
         self.id = terminal_id
         self.folder = folder
         self.pid = pid
@@ -78,8 +96,12 @@ class Terminal:
         self.where = folder
         self.where_seq = 0
         self.where_at = 0.0
+        # the Claude session it runs, when it runs one instead of a shell
+        self.session_id = session_id
+        self.is_hidden = is_hidden
 
     def card(self) -> dict:
+        claude = {"kind": "claude", "sessionId": self.session_id, "hidden": self.is_hidden} if self.session_id else {}
         return {
             "id": self.id,
             "folder": self.folder,
@@ -87,11 +109,12 @@ class Terminal:
             "startedAt": self.started_at,
             "endedAt": self.ended_at,
             "exitCode": self.exit_code,
+            **claude,
         }
 
 
 class Terminals:
-    """Every terminal this server runs. Shells end when the server stops."""
+    """Every terminal the keeper runs. Shells end when the keeper stops."""
 
     def __init__(self, environ=None, spawn=None, clock=time.time):
         self.environ = dict(os.environ if environ is None else environ)
@@ -123,8 +146,9 @@ class Terminals:
         for terminal_id in [t.id for t in self.terminals.values() if t.ended_at and t.ended_at < cutoff]:
             del self.terminals[terminal_id]
 
-    def start(self, folder: str, cols: int = 80, rows: int = 24):
-        """(the new terminal's id, '') or (None, what is wrong)."""
+    def start(self, folder: str, cols: int = 80, rows: int = 24, command=None, session_id=None, is_hidden=False):
+        """(the new terminal's id, '') or (None, what is wrong). With `command` (a program and its
+        arguments) the terminal runs that instead of a shell: Claude, for `session_id`."""
         if not folder.startswith("/") or not os.path.isdir(folder):
             return None, "That folder is not on this Mac."
         with self.changed:
@@ -132,11 +156,11 @@ class Terminals:
             if len(live) >= MAX_TERMINALS:
                 return None, f"There are {MAX_TERMINALS} terminals open already. Close one first."
         try:
-            pid, fd = self.spawn(shell_of(self.environ), os.path.realpath(folder), shell_env(self.environ))
+            pid, fd = self.spawn(shell_of(self.environ), os.path.realpath(folder), shell_env(self.environ), command)
         except OSError as error:
-            return None, f"Could not start the shell. {error.strerror or error}"
+            return None, f"Could not start {'Claude' if command else 'the shell'}. {error.strerror or error}"
         set_size(fd, clamp(cols, COLS), clamp(rows, ROWS))
-        terminal = Terminal("t" + secrets.token_hex(6), os.path.realpath(folder), pid, fd, self.now_ms())
+        terminal = Terminal("t" + secrets.token_hex(6), os.path.realpath(folder), pid, fd, self.now_ms(), session_id, bool(command) and is_hidden)
         with self.changed:
             self.terminals[terminal.id] = terminal
             self.changed.notify_all()
@@ -157,6 +181,9 @@ class Terminals:
                 if len(terminal.kept) > KEEP_BYTES:
                     del terminal.kept[: len(terminal.kept) - KEEP_BYTES]
                 terminal.seq += len(chunk)
+                # Claude asks whether to trust the folder, which only the person can answer
+                if terminal.is_hidden and terminal.seq <= TRUST_LOOK_BYTES and asks_trust(terminal.kept):
+                    terminal.is_hidden = False
                 self.changed.notify_all()
         try:
             _, status = os.waitpid(terminal.pid, 0)
@@ -194,6 +221,21 @@ class Terminals:
         set_size(terminal.fd, clamp(cols, COLS), clamp(rows, ROWS))
         return True
 
+    def show(self, terminal_id, is_hidden) -> bool:
+        """Puts a Claude run in the background on the board, or takes it off again; it keeps running."""
+        terminal = self.get(terminal_id)
+        if terminal is None or not terminal.session_id or not isinstance(is_hidden, bool):
+            return False
+        with self.changed:
+            terminal.is_hidden = is_hidden
+            self.changed.notify_all()
+        return True
+
+    def live(self) -> int:
+        """How many terminals still run."""
+        with self.changed:
+            return sum(1 for terminal in self.terminals.values() if terminal.ended_at is None)
+
     def close(self, terminal_id) -> bool:
         """Ends the shell and everything it runs, then forgets the terminal."""
         terminal = self.get(terminal_id)
@@ -218,21 +260,28 @@ class Terminals:
                 return where
         return terminal.folder
 
+    def shown(self) -> dict:
+        """The terminals on the board: all but the hidden ones."""
+        return {t.id: t for t in self.terminals.values() if not t.is_hidden}
+
     def frames(self, beat_s: float = BEAT_S, is_open=lambda: True):
-        """What the board's stream sends, one JSON line at a time: first every terminal's kept
-        output in full, then each new piece as it comes, and the end of each shell."""
+        """What the board's stream sends, one JSON line at a time: first every shown terminal's
+        kept output in full, then each new piece as it comes, and the end of each shell. A terminal
+        that is shown later gets its whole output then, as a new one does."""
         sent = {}
         ended = set()
         with self.changed:
-            first = [{"id": t.id, "reset": True, "data": b64(t.kept)} for t in self.terminals.values()]
-            sent.update({t.id: t.seq for t in self.terminals.values()})
+            shown = self.shown()
+            first = [{"id": t.id, "reset": True, "data": b64(t.kept)} for t in shown.values()]
+            sent.update({t.id: t.seq for t in shown.values()})
         # sent with the lock let go, so a slow page never holds up the shells
         for piece in first:
             yield frame(piece)
         while is_open():
             with self.changed:
                 pieces = []
-                for terminal in list(self.terminals.values()):
+                shown = self.shown()
+                for terminal in list(shown.values()):
                     since = sent.get(terminal.id)
                     if since is None:
                         pieces.append({"id": terminal.id, "reset": True, "data": b64(terminal.kept)})
@@ -243,7 +292,7 @@ class Terminals:
                     if terminal.ended_at is not None and terminal.id not in ended:
                         ended.add(terminal.id)
                         pieces.append({"id": terminal.id, "ended": True, "exitCode": terminal.exit_code})
-                for gone in [terminal_id for terminal_id in sent if terminal_id not in self.terminals]:
+                for gone in [terminal_id for terminal_id in sent if terminal_id not in shown]:
                     del sent[gone]
                     ended.discard(gone)
                 if not pieces:
@@ -253,14 +302,20 @@ class Terminals:
                 yield frame(piece)
 
     def anything_new(self, sent, ended) -> bool:
+        shown = self.shown()
         return any(
-            sent.get(t.id) != t.seq or (t.ended_at is not None and t.id not in ended) for t in self.terminals.values()
-        ) or any(terminal_id not in self.terminals for terminal_id in sent)
+            sent.get(t.id) != t.seq or (t.ended_at is not None and t.id not in ended) for t in shown.values()
+        ) or any(terminal_id not in shown for terminal_id in sent)
 
     def stop_all(self):
         for terminal in list(self.terminals.values()):
             if terminal.ended_at is None:
                 hang_up(terminal.pid)
+
+
+def asks_trust(kept) -> bool:
+    """Whether the screen shows Claude's question about trusting the folder."""
+    return TRUST_QUESTION in ESCAPES.sub(b"", bytes(kept[-8192:]))
 
 
 def folder_of(pid: int):
@@ -305,17 +360,19 @@ def hang_up(pid: int):
 RESET_SIGNALS = ("SIGHUP", "SIGINT", "SIGQUIT", "SIGTERM", "SIGPIPE", "SIGXFSZ", "SIGTSTP", "SIGTTIN", "SIGTTOU")
 
 
-def spawn_shell(shell: str, folder: str, env: dict):
+def spawn_shell(shell: str, folder: str, env: dict, command=None):
     """Starts the login shell in a new pseudo-terminal: (its pid, the terminal's file descriptor).
-    The child only resets its signals, changes folder and becomes the shell."""
-    name = "-" + os.path.basename(shell)
+    The child only resets its signals, changes folder and becomes the shell. With `command`, the
+    login shell sets up the person's surroundings (their PATH) and then becomes that program; its
+    arguments go to it as they are, never through the shell's reading of a command line."""
+    argv = [shell, "-l", "-c", 'exec "$0" "$@"', *command] if command else ["-" + os.path.basename(shell)]
     pid, fd = pty.fork()
     if pid == 0:
         try:
             for signal_name in RESET_SIGNALS:
                 signal.signal(getattr(signal, signal_name), signal.SIG_DFL)
             os.chdir(folder)
-            os.execve(shell, [name], env)
+            os.execve(shell, argv, env)
         finally:
             os._exit(127)
     return pid, fd

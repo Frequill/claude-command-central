@@ -7,6 +7,7 @@ import subprocess
 import tempfile
 import time
 import unittest
+import unittest.mock
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -662,7 +663,10 @@ class StartTest(unittest.TestCase):
         self.assertEqual(read({"folder": "/no/such", "where": "app"}), (None, "That folder is not on this Mac."))
         self.assertEqual(read({"folder": "relative", "where": "app"})[1], "That folder is not on this Mac.")
         self.assertEqual(read({"folder": folder + "\u0015", "where": "app"})[1], "That folder is not on this Mac.")
-        self.assertEqual(read({"folder": folder, "where": "vscode"}), (None, "Pick the Claude app or the Terminal."))
+        self.assertEqual(read({"folder": folder, "where": "vscode"}), (None, "Pick the Claude app, the Terminal or the background."))
+        # the background takes a mode too, and its first message goes in as an argument of its own
+        self.assertEqual(read({"folder": folder, "where": "background", "prompt": "tab\there\r", "mode": "auto"}), ((os.path.realpath(folder), "background", "tab\there", usual, "auto"), ""))
+        self.assertIsNone(read({"folder": folder, "where": "background", "prompt": "zero\u0000"})[0])
         self.assertTrue(read({"folder": folder, "where": "terminal", "prompt": 5})[1].startswith("The first message is too long"))
         self.assertTrue(read({"folder": folder, "where": "terminal", "prompt": "x" * (serve.START_PROMPT_MAX + 1)})[1].startswith("The first message is too long"))
         self.assertEqual(read({"folder": 7, "where": "app"})[1], "That folder is not on this Mac.")
@@ -1881,6 +1885,45 @@ class TerminalTest(unittest.TestCase):
         else:
             self.fail("the shell is still running after its card was closed")
 
+    def test_a_background_claude_runs_hidden_and_comes_onto_the_board_when_shown(self):
+        # a stand-in for claude: it says it started, then answers what is typed
+        command = ["/bin/sh", "-c", "echo started.; read line; echo got $line."]
+        terminal_id, problem = self.terms.start(self.folder, 80, 24, command=command, session_id="s1", is_hidden=True)
+        self.assertEqual(problem, "")
+        card = self.terms.list()[0]
+        self.assertEqual((card["kind"], card["sessionId"], card["hidden"]), ("claude", "s1", True))
+        frames = self.terms.frames(beat_s=0.2)
+        time.sleep(0.5)
+        # hidden: the board's stream says nothing of it, only beats
+        self.assertEqual(json.loads(next(frames)), {"beat": True})
+        self.assertTrue(self.terms.show(terminal_id, False))
+        self.read_until(frames, terminal_id, b"started.")
+        self.terms.type(terminal_id, "hello\n")
+        self.read_until(frames, terminal_id, b"got hello.")
+        # only a terminal running Claude is hidden or shown
+        shell, _ = self.terms.start(self.folder)
+        self.assertFalse(self.terms.show(shell, True))
+        self.assertNotIn("hidden", next(one for one in self.terms.list() if one["id"] == shell))
+
+    def test_claude_asking_to_trust_the_folder_brings_its_terminal_onto_the_board(self):
+        # the words as the screen draws them, a cursor move between each
+        question = "printf 'No, exit\\n Yes,\\033[1CI\\033[1Ctrust\\033[1Cthis\\033[1Cfolder\\n'; sleep 5"
+        terminal_id, _ = self.terms.start(self.folder, command=["/bin/sh", "-c", question], session_id="s1", is_hidden=True)
+        deadline = time.time() + 5
+        while time.time() < deadline and self.terms.get(terminal_id).is_hidden:
+            time.sleep(0.05)
+        self.assertFalse(self.terms.get(terminal_id).is_hidden)
+
+    def test_what_a_claude_session_put_in_the_surroundings_never_reaches_a_shell(self):
+        terms = terminals.Terminals(environ={"SHELL": "/bin/sh", "PATH": "/usr/bin:/bin", "HOME": self.folder, "CLAUDECODE": "1", "CLAUDE_CODE_SESSION_ID": "x", "CLAUDE_CONFIG_DIR": "/kept"})
+        try:
+            terminal_id, _ = terms.start(self.folder)
+            frames = terms.frames(beat_s=0.2)
+            terms.type(terminal_id, "echo [$CLAUDECODE$CLAUDE_CODE_SESSION_ID] $CLAUDE_CONFIG_DIR.\n")
+            self.read_until(frames, terminal_id, b"[] /kept.")
+        finally:
+            terms.stop_all()
+
     def test_what_a_start_asks_for_is_checked(self):
         self.assertEqual(self.terms.start("/no/such"), (None, "That folder is not on this Mac."))
         self.assertEqual(serve.terminal_action(self.terms, "terminal-start", {"folder": 5})["ok"], False)
@@ -1896,6 +1939,220 @@ class TerminalTest(unittest.TestCase):
         self.assertEqual(opened, {"ok": True})
         self.assertEqual(asked[0][-1], f"cd {self.folder}" if " " not in self.folder else asked[0][-1])
 
+
+
+class FakeTerms:
+    """Stands in for the keeper's terminals: records what it was asked."""
+
+    def __init__(self, cards=None):
+        self.cards = cards or []
+        self.started, self.shown, self.closed = [], [], []
+
+    def start(self, folder, cols=80, rows=24, command=None, session_id=None, is_hidden=False):
+        self.started.append({"folder": folder, "command": command, "sessionId": session_id, "hidden": is_hidden})
+        return "t000000000001", ""
+
+    def list(self):
+        return self.cards
+
+    def show(self, terminal_id, is_hidden):
+        self.shown.append((terminal_id, is_hidden))
+        return True
+
+    def close(self, terminal_id):
+        self.closed.append(terminal_id)
+        return True
+
+
+class BackgroundTest(unittest.TestCase):
+    """A session CCC starts in the background, run by its keeper."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.home = Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_claude_gets_the_session_id_the_mode_and_the_first_message_as_arguments_of_their_own(self):
+        self.assertEqual(serve.background_command("/bin/claude", "s1", "hi; rm -rf ~", "auto"), ["/bin/claude", "--session-id", "s1", "--permission-mode", "auto", "--", "hi; rm -rf ~"])
+        # a message that looks like an option is still the message
+        self.assertEqual(serve.background_command("/bin/claude", "s1", "--help", ""), ["/bin/claude", "--session-id", "s1", "--", "--help"])
+        self.assertEqual(serve.background_command("/bin/claude", "s1", "", ""), ["/bin/claude", "--session-id", "s1"])
+
+    def test_a_trusted_folder_is_read_from_claudes_own_settings(self):
+        config = self.home / "claude.json"
+        config.write_text(json.dumps({"projects": {"/a": {"hasTrustDialogAccepted": True}, "/b": {"hasTrustDialogAccepted": False}}}))
+        self.assertTrue(serve.is_trusted("/a", config))
+        self.assertFalse(serve.is_trusted("/b", config))
+        # a folder inside a trusted one is asked about again by Claude
+        self.assertFalse(serve.is_trusted("/a/inner", config))
+        self.assertFalse(serve.is_trusted("/a", self.home / "missing.json"))
+        config.write_text("[1]")
+        self.assertFalse(serve.is_trusted("/a", config))
+
+    def test_claude_is_found_in_the_path_or_where_it_installs_itself(self):
+        program = self.home / "claude"
+        program.write_text("#!/bin/sh\n")
+        program.chmod(0o755)
+        self.assertEqual(serve.claude_program({"PATH": str(self.home)}, places=()), str(program))
+        self.assertEqual(serve.claude_program({"PATH": "/nowhere"}, places=(program,)), str(program))
+        self.assertIsNone(serve.claude_program({"PATH": "/nowhere"}, places=(self.home / "missing",)))
+
+    def test_a_start_runs_claude_hidden_unless_the_folder_needs_trusting_first(self):
+        terms = FakeTerms()
+        started, problem = serve.start_background(terms, "/x", "hi", "auto", program="/bin/claude", trusted=lambda folder: True)
+        self.assertEqual(problem, "")
+        asked = terms.started[0]
+        self.assertEqual((asked["folder"], asked["hidden"]), ("/x", True))
+        self.assertEqual(asked["command"], ["/bin/claude", "--session-id", started["sessionId"], "--permission-mode", "auto", "--", "hi"])
+        self.assertEqual(asked["sessionId"], started["sessionId"])
+        self.assertEqual((started["terminalId"], started["shown"]), ("t000000000001", False))
+        # Claude asks first in a folder nobody trusted: its terminal is on the board from the start
+        shown, _ = serve.start_background(terms, "/y", "hi", "", program="/bin/claude", trusted=lambda folder: False)
+        self.assertTrue(shown["shown"])
+        self.assertFalse(terms.started[1]["hidden"])
+        self.assertNotEqual(shown["sessionId"], started["sessionId"])
+        # no first message: nothing starts, as Claude would wait for one on a screen nobody sees
+        self.assertEqual(serve.start_background(terms, "/x", "  ", "", program="/bin/claude", trusted=lambda folder: True), (None, "Write the first message: in the background, Claude starts with it."))
+        self.assertEqual(len(terms.started), 2)
+
+    def test_a_start_without_claude_says_so(self):
+        with unittest.mock.patch.object(serve, "claude_program", return_value=None):
+            started, problem = serve.start_background(FakeTerms(), "/x", "hi", "")
+        self.assertIsNone(started)
+        self.assertIn("not installed", problem)
+
+    def test_a_background_session_that_never_shows_up_has_its_terminal_put_on_the_board(self):
+        sessions = self.home / "sessions"
+        sessions.mkdir()
+        (sessions / "arrived.json").write_text("{}")
+        cards = [
+            {"id": "t1", "kind": "claude", "sessionId": "waiting", "hidden": True, "startedAt": 0, "endedAt": None},
+            {"id": "t2", "kind": "claude", "sessionId": "arrived", "hidden": True, "startedAt": 0, "endedAt": None},
+            {"id": "t3", "kind": "claude", "sessionId": "young", "hidden": True, "startedAt": 50_000, "endedAt": None},
+            {"id": "t4", "kind": "claude", "sessionId": "ended", "hidden": True, "startedAt": 0, "endedAt": 9},
+            {"id": "t5", "folder": "/x", "startedAt": 0, "endedAt": None},
+        ]
+        terms = FakeTerms(cards)
+        shown = serve.reveal_waiting(terms, cards, sessions, now_ms=60_000)
+        self.assertEqual(terms.shown, [("t1", False)])
+        self.assertEqual([card.get("hidden") for card in shown], [False, True, True, True, None])
+
+    def test_closing_a_background_session_ends_claude_there(self):
+        terms = FakeTerms([{"id": "t1", "sessionId": "s1"}, {"id": "t2", "sessionId": "s2"}, {"id": "t3"}])
+        serve.end_background(terms, "s1")
+        self.assertEqual(terms.closed, ["t1"])
+        serve.end_background(terms, "nobody")
+        self.assertEqual(terms.closed, ["t1"])
+
+    def test_ending_everything_closes_the_cards_of_the_background_sessions_too(self):
+        terms = FakeTerms([{"id": "t1", "sessionId": "s1"}, {"id": "t2", "sessionId": "s2", "endedAt": 5}, {"id": "t3"}, {"id": "t4", "sessionId": "../x"}])
+        terms.stop_keeper = lambda: 2
+        closed = []
+        self.assertEqual(serve.terminal_action(terms, "terminal-keeper-stop", {}, close_session=closed.append), {"ok": True, "ended": 2})
+        self.assertEqual(closed, ["s1", "s2"])
+
+    def test_ccc_remembers_its_background_sessions_until_one_is_ended(self):
+        kept = serve.Backgrounds(self.home / "background.json")
+        kept.keep("s1", "/a", "auto", 1)
+        kept.keep("s2", "/b", "rm -rf", 2)
+        self.assertEqual(kept.get("s1"), {"folder": "/a", "mode": "auto", "at": 1})
+        # only a mode CCC knows is kept
+        self.assertEqual(kept.get("s2")["mode"], "")
+        kept.forget("s1")
+        self.assertIsNone(kept.get("s1"))
+        for n in range(serve.BACKGROUND_KEPT + 5):
+            kept.keep(f"n{n}", "/c", "", 100 + n)
+        self.assertEqual(len(kept.load()), serve.BACKGROUND_KEPT)
+        self.assertIn(f"n{serve.BACKGROUND_KEPT + 4}", kept.load())
+
+    def test_a_stopped_background_session_is_listed_to_resume_and_a_running_one_is_not(self):
+        kept = serve.Backgrounds(self.home / "background.json")
+        sessions = self.home / "sessions"
+        sessions.mkdir()
+        projects = self.home / "projects" / "p"
+        projects.mkdir(parents=True)
+        for session_id in ("stopped", "in-keeper", "elsewhere", "ended"):
+            kept.keep(session_id, str(self.home), "auto", 1)
+            (projects / f"{session_id}.jsonl").write_text(json.dumps({"type": "user", "cwd": str(self.home), "message": {"content": f"Fix {session_id}"}}) + "\n")
+        kept.keep("no-history", str(self.home), "", 1)
+        now = 10_000_000
+        (sessions / "elsewhere.json").write_text(json.dumps({"updatedAt": now - 1000}))
+        (sessions / "ended.json").write_text(json.dumps({"updatedAt": now - 1000, "endedAt": now - 1000}))
+        (sessions / "stopped.json").write_text(json.dumps({"updatedAt": now - 10 * 60_000}))
+        cards = [{"id": "t1", "sessionId": "in-keeper", "endedAt": None}]
+        stopped = serve.stopped_backgrounds(kept, cards, sessions, serve.Transcripts(self.home / "projects"), now)
+        self.assertEqual(sorted(one["sessionId"] for one in stopped), ["ended", "stopped"])
+        self.assertEqual(next(one for one in stopped if one["sessionId"] == "stopped")["title"], "Fix stopped")
+
+    def test_a_message_from_the_inbox_goes_in_as_the_mod_would_write_it(self):
+        self.assertEqual(serve.prompt_for({"text": " Look ", "files": ["/f.txt"], "images": ["/i.png"]}), "Look\n\nFiles I added (open them with the Read tool):\n- /f.txt\n\nImages I added (open them with the Read tool):\n- /i.png")
+        self.assertEqual(serve.prompt_for({"text": "Hi"}), "Hi")
+
+    def test_the_inbox_hands_its_oldest_waiting_message_over_once(self):
+        inbox = serve.Inbox(self.home / "inbox", self.home / "uploads")
+        inbox.stop("s1", 1)
+        inbox.send("s1", "first", [], "queue", 2)
+        inbox.send("s1", "second", [], "queue", 3)
+        self.assertEqual(inbox.take_first("s1")["text"], "first")
+        # marked taken as the mod marks one: it is not given again, nor listed as waiting
+        self.assertEqual(inbox.take_first("s1")["text"], "second")
+        self.assertIsNone(inbox.take_first("s1"))
+        self.assertEqual(inbox.pending("s1"), [])
+        self.assertIsNone(inbox.take_first("../x"))
+
+    def test_stop_on_the_agent_map_asks_the_session_to_end_one_run(self):
+        inbox = serve.Inbox(self.home / "inbox", self.home / "uploads")
+        message_id = inbox.stop_run("s1", "toolu_01AB", 5)
+        stored = json.loads((self.home / "inbox" / "s1" / f"{message_id}.json").read_text())
+        self.assertEqual((stored["stopRun"], stored["at"]), ("toolu_01AB", 5))
+        # it is no message: not listed as waiting, nor taken as one
+        self.assertEqual(inbox.pending("s1"), [])
+        self.assertIsNone(inbox.take_first("s1"))
+
+    def test_a_stopped_session_is_resumed_in_the_background_with_a_message(self):
+        kept = serve.Backgrounds(self.home / "background.json")
+        projects = self.home / "projects" / "p"
+        projects.mkdir(parents=True)
+        (projects / "s1.jsonl").write_text(json.dumps({"type": "user", "cwd": str(self.home), "message": {"content": "hi"}}) + "\n")
+        transcripts = serve.Transcripts(self.home / "projects")
+        inbox = serve.Inbox(self.home / "inbox", self.home / "uploads")
+        terms = FakeTerms()
+        resume = lambda text, session_id="s1": serve.resume_background(terms, kept, inbox, transcripts, session_id, text, program="/bin/claude", trusted=lambda folder: True)
+        self.assertEqual(resume("go"), (None, "CCC did not start that session in the background."))
+        kept.keep("s1", str(self.home), "auto", 1)
+        started, problem = resume("")
+        self.assertEqual(problem, "")
+        self.assertEqual(started, {"sessionId": "s1", "terminalId": "t000000000001", "shown": False})
+        asked = terms.started[0]
+        self.assertEqual(asked["command"], ["/bin/claude", "--resume", "s1", "--permission-mode", "auto", "--", serve.RESUME_PROMPT])
+        self.assertEqual((asked["folder"], asked["sessionId"], asked["hidden"]), (os.path.realpath(self.home), "s1", True))
+        # the person's own words, else a message they wrote that never went in, which goes first
+        resume("Check the tests")
+        self.assertEqual(terms.started[1]["command"][-1], "Check the tests")
+        inbox.send("s1", "testing", [], "queue", 5)
+        resume("Check the tests")
+        self.assertEqual(terms.started[2]["command"][-1], "testing")
+        # one that runs in the keeper already is not started twice
+        terms.cards = [{"id": "t1", "sessionId": "s1", "endedAt": None}]
+        self.assertEqual(resume("go"), (None, "It runs in the background already."))
+
+    def test_a_background_claude_is_named_after_its_conversation_and_marked_when_its_card_is_closed(self):
+        projects = self.home / "projects" / "p"
+        projects.mkdir(parents=True)
+        (projects / "s1.jsonl").write_text(json.dumps({"type": "user", "cwd": str(self.home), "message": {"content": "Write the docs"}}) + "\n")
+        cards = [{"id": "t1", "sessionId": "s1"}, {"id": "t2", "sessionId": "new"}, {"id": "t3"}]
+        named = serve.named_backgrounds(cards, serve.Transcripts(self.home / "projects"), {"s1": 5})
+        self.assertEqual((named[0]["title"], named[0]["closed"]), ("Write the docs", True))
+        # no conversation yet: no name, and a shell is left as it is
+        self.assertEqual(named[1], {"id": "t2", "sessionId": "new", "closed": False})
+        self.assertEqual(named[2], {"id": "t3"})
+
+    def test_a_terminal_is_shown_or_hidden_from_the_board(self):
+        terms = FakeTerms()
+        self.assertEqual(serve.terminal_action(terms, "terminal-show", {"id": "t1", "hidden": False}), {"ok": True})
+        self.assertEqual(terms.shown, [("t1", False)])
 
 
 class MentionTest(unittest.TestCase):

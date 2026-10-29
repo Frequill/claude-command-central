@@ -2,8 +2,10 @@
 # ccc: opens the CCC board in a browser window of its own.
 #   ccc        starts the server when needed, asks whether to close this terminal,
 #                      then opens the board
-#   ccc stop   stops the server; it asks first while terminals run on the board,
-#              since stopping it ends them (ccc stop --force does not ask)
+#   ccc stop   stops the server; the terminals and background sessions go on in
+#              CCC's keeper, and the next ccc finds them again
+#   ccc stop --all  stops the keeper too, which ends them; it asks first while any
+#              run (ccc stop --all --force does not ask)
 # Exits 100 when the person asked to close the terminal: the ccc function in
 # ~/.zshrc then exits the shell, which closes the terminal window cleanly.
 set -uo pipefail
@@ -12,6 +14,7 @@ PORT="${CCC_PORT:-8765}"
 URL="http://127.0.0.1:${PORT}/"
 BOARD_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 SERVER="$BOARD_DIR/serve.py"
+KEEPER="$BOARD_DIR/keeper.py"
 LOG="$HOME/.claude/ccc/server.log"
 CLOSE_TERMINAL=100
 
@@ -35,45 +38,62 @@ start_server() {
   return 1
 }
 
-# how many terminals on the board still run a shell: the server ends them all when it stops
+# how many terminals (shells and background sessions) still run in CCC's keeper
 running_terminals() {
-  curl -fsS --max-time 2 "${URL}api/sessions" 2>/dev/null |
-    python3 -I -c 'import json, sys
-try:
-    cards = json.load(sys.stdin).get("terminals", [])
-except ValueError:
-    cards = []
-print(sum(1 for card in cards if isinstance(card, dict) and not card.get("endedAt")))' 2>/dev/null || echo 0
+  python3 "$KEEPER" count 2>/dev/null || echo 0
 }
 
 # yes only when the person says so; with no one at the keyboard to ask, it is no
 sure_to_end_terminals() {
   local count="$1" answer word="terminals"
   [ "$count" = "1" ] && word="terminal"
-  echo "Are you sure? This will terminate all active terminals: $count $word running in CCC, and anything running in them."
+  echo "Are you sure? This will terminate all active terminals: $count $word running in CCC (shells and background Claude sessions), and anything running in them."
   if [ ! -t 0 ]; then
-    echo "Nothing was stopped. Run 'ccc stop --force' to stop it anyway." >&2
+    echo "Nothing was stopped. Run 'ccc stop --all --force' to stop it anyway." >&2
     return 1
   fi
-  read -r -n 1 -p "Stop the board server? (y/n) " answer
+  read -r -n 1 -p "Stop them? (y/n) " answer
   echo
   [[ "$answer" =~ ^[yY]$ ]]
 }
 
 stop_server() {
-  local pid force="${1:-}" count
+  local pid
   pid="$(lsof -t -nP -iTCP:"$PORT" -sTCP:LISTEN 2>/dev/null | head -1)"
   if [ -n "$pid" ] && is_up; then
-    count="$(running_terminals)"
-    if [ "$force" != "--force" ] && [ "${count:-0}" -gt 0 ] && ! sure_to_end_terminals "$count"; then
-      echo "The board server keeps running."
-      return 1
-    fi
     kill "$pid"
     echo "Board server stopped."
   else
     echo "Board server was not running."
   fi
+}
+
+# ccc stop [--all] [--force], in any order
+stop() {
+  local all=false force=false word count
+  for word in "$@"; do
+    case "$word" in
+      --all) all=true ;;
+      --force) force=true ;;
+      *)
+        echo "Usage: ccc [stop [--all] [--force]]" >&2
+        return 2
+        ;;
+    esac
+  done
+  if ! $all; then
+    stop_server
+    count="$(running_terminals)"
+    [ "${count:-0}" -gt 0 ] && echo "$count terminal(s) keep running in CCC's keeper; the next ccc shows them again. 'ccc stop --all' ends them."
+    return 0
+  fi
+  count="$(running_terminals)"
+  if ! $force && [ "${count:-0}" -gt 0 ] && ! sure_to_end_terminals "$count"; then
+    echo "Nothing was stopped."
+    return 1
+  fi
+  stop_server
+  python3 "$KEEPER" stop
 }
 
 open_board() {
@@ -97,12 +117,13 @@ wants_terminal_closed() {
 main() {
   case "${1:-}" in
     stop)
-      stop_server "${2:-}"
+      shift
+      stop "$@"
       return
       ;;
     "") ;;
     *)
-      echo "Usage: ccc [stop [--force]]" >&2
+      echo "Usage: ccc [stop [--all] [--force]]" >&2
       return 2
       ;;
   esac

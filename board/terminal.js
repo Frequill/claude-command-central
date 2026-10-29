@@ -1,8 +1,10 @@
 // Terminal cards: a real shell on the board, drawn by xterm.js (the terminal VS Code uses).
 //
-// The board's server runs each shell. One long request brings what every shell prints, and each
-// key press goes back in a small POST, in order. Every request carries the key the server made when
-// it started, which only this page can read.
+// CCC's keeper runs each shell, so it goes on when the board's server stops; the server passes
+// everything on. One long request brings what every shell prints, and each key press goes back in a
+// small POST, in order. Every request carries the key the server made when it started, which only
+// this page can read. A terminal can also run a Claude session started in the background: its card
+// is only on the board while the person wants to see it.
 
 import * as L from './board-logic.js'
 
@@ -16,7 +18,7 @@ const SCROLL_KEY = 'ccc.terminalScroll'
 
 const terminals = new Map()
 const linesUp = readLinesUp()
-let context = { appName: () => 'Terminal', appId: () => 'auto', themeId: () => 'aero', onClose: () => {}, onRestarted: () => {} }
+let context = { appName: () => 'Terminal', appId: () => 'auto', themeId: () => 'aero', isOnBoard: () => false, onClose: () => {}, onHide: () => {}, onRestarted: () => {} }
 let key = ''
 let isStreaming = false
 
@@ -120,6 +122,24 @@ export async function startTerminal(folder) {
     return data.ok ? { id: data.id } : { problem: data.problem || 'Could not start the terminal.' }
   } catch {
     return { problem: 'Could not start the terminal. Is the board still running?' }
+  }
+}
+
+/** Puts a background session's terminal on the board, or takes it off it; Claude runs on either way. */
+export async function toggleTerminal(id, isHidden) {
+  try {
+    return (await ask('/api/terminal/show', 'terminal-show', { id, hidden: isHidden })).ok === true
+  } catch {
+    return false
+  }
+}
+
+/** Ends CCC's keeper and everything that runs in it; whether it went. */
+export async function stopKeeper() {
+  try {
+    return (await ask('/api/keeper/stop', 'terminal-keeper-stop', {})).ok === true
+  } catch {
+    return false
   }
 }
 
@@ -308,32 +328,48 @@ function drawHead(term) {
   const label = L.folderLabel(where)
   const title = L.terminalTitle(term.title, where)
   const appName = context.appName()
-  const signature = JSON.stringify([title, appName, Boolean(term.ended), where])
+  const isClaude = term.card.kind === 'claude'
+  // hidden, it is brought back from its session's card: until that card is on the board (Claude
+  // asks something before it starts), the × closes it like any terminal
+  const isHiding = isClaude && !term.ended && context.isOnBoard(term.card.sessionId)
+  const signature = JSON.stringify([title, appName, Boolean(term.ended), where, isClaude, isHiding])
   if (signature === term.headSignature) return
   term.headSignature = signature
-  const open = el('button', { type: 'button', class: 'open-link terminal-open', title: `Opens a new ${appName} window in the folder this shell is in now` }, `Open in ${appName}`, icon('M9 2h5v5M14 2 7 9', 11))
-  open.addEventListener('click', () => openInApp(term, open))
-  const close = el('button', { type: 'button', class: 'chat-close chat-remove', 'aria-label': `Close ${title}`, title: term.ended ? 'Close this terminal' : 'Close: ends the shell and what runs in it' }, icon('M4 4l8 8M12 4l-8 8'))
-  close.addEventListener('click', () => context.onClose(term.id, title, Boolean(term.ended)))
+  // Claude in the background has no folder of its own to open elsewhere: its session's card is the way in
+  const open = isClaude ? null : el('button', { type: 'button', class: 'open-link terminal-open', title: `Opens a new ${appName} window in the folder this shell is in now` }, `Open in ${appName}`, icon('M9 2h5v5M14 2 7 9', 11))
+  open?.addEventListener('click', () => openInApp(term, open))
+  const close = el(
+    'button',
+    {
+      type: 'button',
+      class: 'chat-close chat-remove',
+      'aria-label': isHiding ? `Hide ${title}` : `Close ${title}`,
+      title: isHiding ? 'Hide: Claude keeps working in the background. Its card can show this again.' : term.ended ? 'Close this terminal' : 'Close: ends the shell and what runs in it',
+    },
+    icon('M4 4l8 8M12 4l-8 8'),
+  )
+  close.addEventListener('click', () => (isHiding ? context.onHide(term.id) : context.onClose(term.id, title, Boolean(term.ended))))
   term.head.replaceChildren(
     el('span', { class: 'terminal-glyph', 'aria-hidden': 'true' }, '>_'),
     el('span', { class: 'chat-title' }, title),
-    el('span', { class: 'source source-terminal' }, 'Terminal'),
+    el('span', { class: 'source source-terminal' }, isClaude ? 'Claude in the background' : 'Terminal'),
     el('span', { class: 'chat-where', title: where }, `${label.parent}/${label.name}`.replace('//', '/')),
     el('span', { class: `pill ${term.ended ? 'pill-done' : 'pill-work'}` }, term.ended ? 'ended' : 'running'),
-    open,
-    close,
+    ...[open, close].filter(Boolean),
   )
   term.root.setAttribute('aria-label', `Terminal: ${title}`)
 }
 
 function drawEnded(term) {
   const code = term.ended?.exitCode
-  const again = el('button', { type: 'button', class: 'primary' }, 'Start again')
-  again.addEventListener('click', () => restart(term, again))
+  const isClaude = term.card.kind === 'claude'
+  // a shell is started again in its folder; Claude ended, its conversation is picked up from + instead
+  const again = isClaude ? null : el('button', { type: 'button', class: 'primary' }, 'Start again')
+  again?.addEventListener('click', () => restart(term, again))
   const close = el('button', { type: 'button', class: 'secondary' }, 'Close')
   close.addEventListener('click', () => context.onClose(term.id, L.terminalTitle(term.title, term.card.where || term.card.folder), true))
-  term.endBar.replaceChildren(el('span', {}, Number.isInteger(code) && code !== 0 ? `The shell ended (exit ${code}).` : 'The shell ended.'), again, close)
+  const what = isClaude ? 'Claude' : 'The shell'
+  term.endBar.replaceChildren(el('span', {}, Number.isInteger(code) && code !== 0 ? `${what} ended (exit ${code}).` : `${what} ended.`), ...[again, close].filter(Boolean))
   term.endBar.hidden = false
 }
 

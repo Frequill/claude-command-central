@@ -157,10 +157,16 @@ export function liveRemainder(items, replyText) {
   return rest.trim()
 }
 
-/** Whether the window can write to the session, and what to tell the person about it. */
-export function composeState(session) {
+/**
+ * Whether the window can write to the session, and what to tell the person about it. `isResumable`:
+ * it ran in the background and stopped, so sending picks it up there again.
+ */
+export function composeState(session, isResumable = false) {
   if (!session) return { canSend: false, note: 'This session is no longer on the board.' }
   if (!session.takesMessages) return { canSend: false, note: 'This session runs an older CCC. Restart it to write to it from here.' }
+  if (session.endedAt !== undefined && isResumable) {
+    return { canSend: true, note: 'This session ran in the background and stopped. Sending resumes it there, and your message goes in.', resumeHere: true }
+  }
   if (session.endedAt !== undefined) {
     const where = isWakeable(session)
     const note = where

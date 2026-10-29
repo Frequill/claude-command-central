@@ -2170,6 +2170,36 @@ body.theme-neon .source-vscode {
   border-color: var(--fail);
 }
 
+/* Stop, on a working agent or background command: two clicks, the second one within a few seconds */
+.map-agent.has-stop {
+  padding-right: 112px;
+}
+
+.map-stop {
+  position: absolute;
+  top: 50%;
+  right: 14px;
+  transform: translateY(-50%);
+  padding: 5px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--chip-border);
+  background: var(--chip-bg);
+  color: var(--ink);
+  font: 600 12px var(--sans);
+  cursor: pointer;
+}
+
+.map-stop:hover,
+.map-stop.is-armed {
+  border-color: var(--fail);
+  color: var(--fail);
+}
+
+.map-stop:disabled {
+  cursor: default;
+  opacity: 0.7;
+}
+
 .map-agent .title {
   color: var(--ink);
   font-weight: 700;
@@ -2700,6 +2730,14 @@ body.theme-neon .source-vscode {
 .settings-window .settings-body {
   max-height: 90vh;
   box-sizing: border-box;
+}
+
+.settings-tab-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px 24px;
 }
 
 .settings-tabs {
@@ -6025,7 +6063,8 @@ body.theme-inferno .live-reply {
 }
 
 .side-toggle[aria-pressed='true'],
-.caveman-toggle[aria-pressed='true'] {
+.caveman-toggle[aria-pressed='true'],
+.terminal-toggle[aria-pressed='true'] {
   border-color: var(--accent);
   color: var(--accent);
 }
@@ -6603,6 +6642,77 @@ body.theme-inferno .live-reply {
   text-decoration: none;
 }
 
+/* Settings, Terminal & editor: what runs in CCC's keeper */
+.running-status {
+  margin: 0 0 6px;
+  color: var(--ink);
+  font-size: 13.5px;
+}
+
+.running-outdated {
+  color: var(--pill-wait);
+}
+
+.running-list:empty {
+  display: none;
+}
+
+.running-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin: 8px 0 4px;
+}
+
+.running-actions[hidden],
+.running-status[hidden],
+.stopped .field[hidden] {
+  display: none;
+}
+
+.running-sub {
+  margin: 14px 0 4px;
+  color: var(--ink);
+  font-size: 13.5px;
+}
+
+.resume-text {
+  flex: 1;
+  min-width: 0;
+}
+
+/* the start window: what "In the background" means, a click away */
+.settings .start-info {
+  align-self: flex-start;
+  margin: 6px 0 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--ink-3);
+  font: 12.5px var(--sans);
+  text-decoration: underline dotted;
+  cursor: pointer;
+}
+
+.settings .start-info:hover {
+  color: var(--ink);
+}
+
+.background-info {
+  width: min(560px, 92vw);
+}
+
+.background-info-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 12px 0 4px;
+  padding-left: 18px;
+  color: var(--ink-2, var(--ink));
+  font-size: 13.5px;
+  line-height: 1.45;
+}
+
 /* the close dialog: two ways to close, each saying what it does */
 .close-choices {
   display: flex;
@@ -6623,6 +6733,10 @@ body.theme-inferno .live-reply {
   font: 13px/1.4 var(--sans);
   text-align: left;
   cursor: pointer;
+}
+
+.close-choice[hidden] {
+  display: none;
 }
 
 .close-choice strong {
@@ -9673,7 +9787,8 @@ body.theme-cyberpunk .chat-close:hover {
 
 /* a toggle that is on (caveman mode, the side panel) is filled, so it reads apart from one that is off */
 body.theme-cyberpunk .caveman-toggle[aria-pressed='true'],
-body.theme-cyberpunk .side-toggle[aria-pressed='true'] {
+body.theme-cyberpunk .side-toggle[aria-pressed='true'],
+body.theme-cyberpunk .terminal-toggle[aria-pressed='true'] {
   border-color: #f75049;
   background: #f75049;
   color: #05060a;

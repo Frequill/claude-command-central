@@ -4,6 +4,7 @@ export const STATUS_WORD: Record<RunStatus, string> = {
   running: 'working',
   done: 'done',
   failed: 'failed',
+  stopped: 'stopped',
   started: 'started',
   proposed: 'proposed',
 }
@@ -12,6 +13,7 @@ export const STATUS_COLOR: Record<RunStatus, string> = {
   running: '#3b82f6',
   done: '#16a34a',
   failed: '#dc2626',
+  stopped: '#64748b',
   started: '#64748b',
   proposed: '#94a3b8',
 }

@@ -47,6 +47,20 @@ describe('messages from the chat window', () => {
     expect(readMessage('[]')).toBeUndefined()
   })
 
+  test('Stop on the agent map ends that run and goes in as no message', async () => {
+    expect(readMessage('{"stopRun": "toolu_01AB", "at": 7}')).toEqual({ text: '', images: [], mode: 'now', stopRun: 'toolu_01AB', at: 7 })
+    expect(readMessage('{"stopRun": "../x"}')).toBeUndefined()
+    const { io, sent, steps } = fakeInbox({ '1000-aa.json': '{"stopRun": "toolu_01AB"}', '2000-bb.json': '{"text": "next"}' })
+    const stopped: string[] = []
+    const inbox = createInbox({ ...io, stopRun: async id => void stopped.push(id) })
+    await inbox.check()
+    expect(stopped).toEqual(['toolu_01AB'])
+    // the turn is not stopped for it, and the next message goes in as usual
+    expect(steps.filter(step => step.startsWith('interrupt'))).toEqual([])
+    await Promise.resolve()
+    expect(sent).toEqual(['next'])
+  })
+
   test('images are named in the prompt so Claude can open them', async () => {
     expect(promptFor({ text: 'What do you see?', images: [], mode: 'queue' })).toBe('What do you see?')
     expect(promptFor({ text: 'What do you see?', images: ['/u/a.png', '/u/b.jpg'], mode: 'queue' })).toBe('What do you see?\n\nImages I added (open them with the Read tool):\n- /u/a.png\n- /u/b.jpg')

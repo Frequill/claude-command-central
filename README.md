@@ -55,6 +55,20 @@ A live board of every Claude Code session on your Mac, from the Claude app, VS C
 
 Sessions already running pick CCC up when their current turn ends; new ones have it right away.
 
+## Sessions in the background
+
+The **+** in the header starts a session **in the background** by default: CCC runs `claude` itself, in the folder and mode you pick, with your first message, and nothing opens. It shows up on the board like any other session, and you chat with it, answer its questions and approve its steps there. Its `>_` button shows the terminal it runs in; the × on that terminal hides it again, and Claude keeps working. The ⓘ next to the choice says what it means.
+
+Closing its card offers **Close from CCC** (Claude keeps working; Settings → Background sessions shows it again) or **End it** (Claude stops; the conversation stays in Claude's history, to pick up again from + → From an existing conversation or `claude --resume`).
+
+In a folder Claude was never told to trust, Claude asks first. Its terminal then comes onto the board, so you can answer.
+
+The terminals on the board, background sessions included, run in CCC's keeper (`board/keeper.py`), a small program of its own that CCC starts when it needs it. So they keep running when you close the Claude app, your terminal windows or the board's server. `ccc stop` stops only the server; the next `ccc` finds them again. `ccc stop --all` also stops the keeper, which ends them (it asks first). A restart of your Mac ends them too.
+
+**Settings → Background sessions** lists what runs in the keeper, with Show and End for each and End everything for all. A background session that stopped without you ending it (your Mac restarted) is listed there under Stopped, to resume in the background again; Claude starts only with a message, so it goes in with one. Nothing resumes by itself. After an update of CCC, a keeper with things running in it keeps its old code until you restart it there.
+
+Every working agent and background command on the agent map has a **Stop**: click it, then click again within a few seconds, and that one ends while its session's turn goes on.
+
 ## Themes
 
 Twelve of them, from Clean to Cyberpunk 2077. Pick one in Settings.
@@ -66,12 +80,12 @@ Twelve of them, from Clean to Cyberpunk 2077. Pick one in Settings.
 
 ## Safety
 
-The board only listens on `127.0.0.1` and refuses requests from other pages. It can run shells and approve Claude's tool calls, so never expose it beyond your own machine.
+The board only listens on `127.0.0.1` and refuses requests from other pages. It can run shells and approve Claude's tool calls, so never expose it beyond your own machine. The keeper listens on `127.0.0.1` too, and answers only requests that carry the key in `~/.claude/ccc/keeper.json`, a file only your user can read.
 
 ## Tests
 
 ```bash
-cd ~/.claude/mods/ccc/board && python3 -m unittest test_serve && node --test test_board.mjs && bash test_ccc.sh
+cd ~/.claude/mods/ccc/board && python3 -m unittest test_serve test_keeper && node --test test_board.mjs && bash test_ccc.sh
 ```
 
 ```bash

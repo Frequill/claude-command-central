@@ -2,7 +2,7 @@ import type { Register } from 'claude-code'
 import { describe, expect, mock, test } from 'claude-code/testing'
 
 import type { AgentRun } from '../types'
-import { backgroundRunFor, finishAgent, isOnlyNotification, isOnlyStoppedReport, proposalOf, rememberStopped, resumeAgent, runFor, settleRun, settleTasks, startProposal, stopTarget, stoppedByUs } from '../hooks/activity'
+import { backgroundRunFor, finishAgent, isOnlyNotification, isOnlyStoppedReport, proposalOf, rememberStopped, resumeAgent, runFor, settleRun, settleTasks, startProposal, stopRunIn, stopTarget, stopTaskOf, stoppedByUs, trackAgent } from '../hooks/activity'
 
 const NOW = Date.UTC(2026, 9, 19, 12, 0, 0)
 const FLOW: AgentRun = { id: 'w1', kind: 'workflow', label: 'probe', status: 'started', startedAt: 1 }
@@ -96,6 +96,8 @@ describe('commands in the background', () => {
       label: 'Run the tests',
       status: 'running',
       startedAt: 5,
+      // its task, so Stop on the agent map can end it
+      taskId: 'b1',
     })
     expect(backgroundRunFor('Bash', { command: 'sleep 60\necho done' }, OUT, 't1', 5)?.label).toBe('sleep 60 …')
     expect(backgroundRunFor('Bash', {}, OUT, 't1', 5)?.label).toBe('Background command')
@@ -113,7 +115,7 @@ describe('commands in the background', () => {
     on('tool.call', () => ({ result: OUT }))
     on('turn.start', (_, e) => ({ turnId: e.turnId }))
     await $.tool.call({ tool: 'Bash', tool_use_id: 'tb1', command: 'npm test', description: 'Run the tests', run_in_background: true } as never)
-    expect((await peek($)).runs).toEqual([{ id: 'tb1', kind: 'command', label: 'Run the tests', status: 'running', startedAt: NOW }])
+    expect((await peek($)).runs).toEqual([{ id: 'tb1', kind: 'command', label: 'Run the tests', status: 'running', startedAt: NOW, taskId: 'b1' }])
 
     await $.turn.start({ turnId: 't2', text: notification('tb1', 'failed') })
     expect((await peek($)).runs.map(r => [r.label, r.status])).toEqual([['Run the tests', 'failed']])
@@ -184,5 +186,30 @@ describe('stops from CCC', () => {
     expect(isOnlyStoppedReport(`${report('bw9')}\n${report('other')}`, stopped)).toBe(false)
     expect(isOnlyStoppedReport(`${report('bw9')}\nwhat happened?`, stopped)).toBe(false)
     expect(isOnlyStoppedReport('plain prompt', stopped)).toBe(false)
+  })
+})
+
+describe('Stop on the agent map', () => {
+  test("a background command keeps its task, so Stop can end it; an agent is ended by its id", () => {
+    const command = backgroundRunFor('Bash', { command: 'npm test', description: 'Run the tests', run_in_background: true }, { backgroundTaskId: 'bash_7' }, 'toolu_1', 5)
+    expect(command?.taskId).toBe('bash_7')
+    expect(stopTaskOf(command as AgentRun)).toBe('bash_7')
+    expect(stopTaskOf({ id: 'a', kind: 'agent', label: 'x', status: 'running', startedAt: 1, agentId: 'ag1' })).toBe('ag1')
+    // a command from before CCC kept its task, and a workflow, have nothing for TaskStop to end
+    expect(stopTaskOf({ id: 'c', kind: 'command', label: 'x', status: 'running', startedAt: 1 })).toBeUndefined()
+    expect(stopTaskOf({ id: 'w', kind: 'workflow', label: 'x', status: 'started', startedAt: 1 })).toBeUndefined()
+  })
+
+  test('a stopped run, and what still worked under it, show as stopped, and the engine word for it does not undo that', () => {
+    const list: AgentRun[] = [
+      { id: 'r1', kind: 'agent', label: 'a', status: 'running', startedAt: 1, agentId: 'ag1' },
+      { id: 'r2', kind: 'agent', label: 'b', status: 'running', startedAt: 1, parentId: 'r1' },
+      { id: 'r3', kind: 'agent', label: 'c', status: 'done', startedAt: 1, endedAt: 2, parentId: 'r1' },
+      { id: 'r4', kind: 'command', label: 'd', status: 'running', startedAt: 1 },
+    ]
+    const stopped = stopRunIn(list, 'r1', 9)
+    expect(stopped.map(one => one.status)).toEqual(['stopped', 'stopped', 'done', 'running'])
+    expect(stopped[0]?.endedAt).toBe(9)
+    expect(trackAgent(stopped[0] as AgentRun, 'killed', 10).status).toBe('stopped')
   })
 })

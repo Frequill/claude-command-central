@@ -3,7 +3,7 @@ export type PlanStep = { text: string; status: StepStatus; /** The task's own id
 
 /** What a run on the agent map is: an agent, a session card, a workflow, or a command that runs in the background. */
 export type RunKind = 'agent' | 'session' | 'workflow' | 'command'
-export type RunStatus = 'running' | 'done' | 'failed' | 'started' | 'proposed'
+export type RunStatus = 'running' | 'done' | 'failed' | 'stopped' | 'started' | 'proposed'
 export type AgentRun = {
   id: string
   kind: RunKind
@@ -15,7 +15,7 @@ export type AgentRun = {
   lastAction?: string
   /** The workflow run an agent works in; absent for a run the session started itself. */
   parentId?: string
-  /** A proposed session card's task id, which a later start names. */
+  /** A proposed session card's task id, which a later start names; a background command's task, which TaskStop ends. */
   taskId?: string
   /** An agent's own tool calls, the latest last; only the last ones are kept. */
   steps?: AgentStep[]

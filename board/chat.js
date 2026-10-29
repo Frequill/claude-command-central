@@ -18,7 +18,10 @@ const chats = new Map()
 
 /**
  * The board's view of a session: `sessionOf(id)`, `titleOf(id)`, `colorOf(id)`, its facts
- * (`statsOf(id)`: a signature and a node), `onRemove(id, title)` when the person closes it, and
+ * (`statsOf(id)`: a signature and a node), `onRemove(id, title)` when the person closes it, the
+ * terminal it runs in when CCC started it in the background (`terminalOf(id)`, shown or hidden with
+ * `onShowTerminal(terminalId, isHidden)`), whether it stopped there and can be resumed
+ * (`isResumable(id)`, done by `onResume(id)`, which says what went wrong or ''), and
  * whether its panel of facts is folded in (`isSideHidden(id)`, `onSide(id, isHidden)`).
  */
 export function setupChat(given) {
@@ -749,11 +752,12 @@ function drawHead(chat, session) {
   const id = chat.id
   const title = context.titleOf(id) ?? session?.folder ?? 'Session'
   const state = session ? L.sessionState(session, Date.now()) : 'ended'
-  const source = L.sourceOf(session)
+  const background = context.terminalOf?.(id) ?? null
+  const source = background ? { kind: 'terminal', label: 'Background' } : L.sourceOf(session)
   const link = L.openLink(session)
   const facts = C.sessionSetup(session)
   const caveman = context.cavemanOf?.(id) ?? { level: 'off', isOwn: false }
-  const signature = JSON.stringify([title, state, source?.label, link?.href, session?.folder, session?.branch, context.colorOf(id), facts, caveman])
+  const signature = JSON.stringify([title, state, source?.label, link?.href, session?.folder, session?.branch, context.colorOf(id), facts, caveman, background?.id, background?.hidden])
   if (signature === chat.headSignature) return
   chat.headSignature = signature
   const close = el('button', { type: 'button', class: 'chat-close chat-remove', 'aria-label': `Close ${title}`, title: 'Close: from CCC only, or clear its context too' }, icon('M4 4l8 8M12 4l-8 8'))
@@ -787,6 +791,26 @@ function drawHead(chat, session) {
     icon(CAVEMAN_ICON),
   )
   rock.addEventListener('click', () => switchCaveman(chat, C.cavemanToggled(caveman.level, lastCavemanLevel()), rock))
+  // Claude in the background: its own screen, on the board or off it again
+  const isShown = background && !background.hidden
+  const screen = background
+    ? el(
+        'button',
+        {
+          type: 'button',
+          class: 'chat-close terminal-toggle',
+          'aria-pressed': String(Boolean(isShown)),
+          'aria-label': isShown ? 'Hide its terminal' : 'Show its terminal',
+          title: isShown ? 'Hide its terminal: Claude keeps working in the background' : 'Show its terminal: the screen Claude runs in, in the background',
+        },
+        // a prompt and its cursor, drawn in lines like the header's other buttons
+        icon('M3 4.5 6.5 8 3 11.5M8.5 11.5H13'),
+      )
+    : null
+  screen?.addEventListener('click', () => {
+    screen.disabled = true
+    context.onShowTerminal(background.id, Boolean(isShown))
+  })
   const parts = [
     el('span', { class: 'dot', style: `background:${context.colorOf(id)}`, 'aria-hidden': 'true' }),
     el('span', { class: 'chat-title' }, title),
@@ -795,6 +819,7 @@ function drawHead(chat, session) {
     el('span', { class: `pill ${state === 'working' ? 'pill-work live' : state === 'needs-you' ? 'pill-wait' : 'pill-done'}` }, L.STATE_LABEL[state] ?? state),
     link ? el('a', { class: 'open-link', href: link.href, title: link.about }, 'Open', icon('M9 2h5v5M14 2 7 9', 11)) : null,
     setup,
+    screen,
     rock,
     panel,
     close,
@@ -1491,7 +1516,7 @@ export async function sendText(sessionId, text) {
 // ---------- writing ----------
 
 function drawCompose(chat, session) {
-  const state = C.composeState(session)
+  const state = C.composeState(session, Boolean(context.isResumable?.(chat.id)))
   chat.canSend = state.canSend
   chat.text.disabled = !state.canSend
   chat.send.disabled = !state.canSend || chat.isSending
@@ -1609,6 +1634,11 @@ async function sendMessage(chat, mode) {
     if (link) {
       el('a', { href: link.href }).click()
       setTimeout(() => say(chat, `Waking the session in ${wakeIn}: your message goes in as soon as it runs.`), 0)
+    }
+    // one that ran in the background is resumed there, with the message just sent
+    if (C.composeState(session, Boolean(context.isResumable?.(chat.id))).resumeHere) {
+      const problem = await context.onResume(chat.id)
+      setTimeout(() => say(chat, problem || 'Resuming it in the background: your message goes in as it starts.'), 0)
     }
     for (const image of chat.images) URL.revokeObjectURL(image.url)
     chat.images = []

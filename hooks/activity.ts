@@ -216,7 +216,7 @@ export function backgroundRunFor(tool: string, input: Input, output: unknown, id
   const { backgroundTaskId, backgroundEndsWithFinalResponse } = output as Record<string, unknown>
   if (typeof backgroundTaskId !== 'string' || !backgroundTaskId || backgroundEndsWithFinalResponse === true) return undefined
   const label = field(input, 'description').trim() || firstLine(field(input, 'command')) || 'Background command'
-  return { id, kind: 'command', label: clip(label), status: 'running', startedAt }
+  return { id, kind: 'command', label: clip(label), status: 'running', startedAt, taskId: backgroundTaskId }
 }
 
 /** A run once its starting call has answered. */
@@ -287,6 +287,21 @@ function tagOf(body: string, tag: string): string | undefined {
   return new RegExp(`<${tag}>([^<]*)</${tag}>`).exec(body)?.[1]?.trim() || undefined
 }
 
+/**
+ * What Stop on the agent map ends: a background command's task, or an agent by its id; undefined
+ * for a run that has neither (a workflow, or a command from before CCC kept its task).
+ */
+export function stopTaskOf(run: AgentRun): string | undefined {
+  if (run.kind === 'command') return run.taskId
+  if (run.kind === 'agent') return run.agentId
+  return undefined
+}
+
+/** The runs once one was stopped from CCC: it, and what still worked under it, are stopped. */
+export function stopRunIn(list: readonly AgentRun[], runId: string, now: number): AgentRun[] {
+  return list.map(one => ((one.id === runId || one.parentId === runId) && one.status === 'running' ? { ...one, status: 'stopped', endedAt: now } : one))
+}
+
 function taskEndOf(status: string | undefined): RunStatus | undefined {
   if (status === 'completed') return 'done'
   if (status === 'failed' || status === 'killed' || status === 'stopped' || status === 'error') return 'failed'
@@ -322,6 +337,8 @@ export function startProposal(list: readonly AgentRun[], taskId: string): AgentR
 
 /** A run as the engine's agent list says it stands now. */
 export function trackAgent(run: AgentRun, status: AgentStatus, now: number): AgentRun {
+  // stopped from CCC: the engine's word for it (killed) does not make it a failure
+  if (run.status === 'stopped') return run
   const next = runStatusOf(status)
   if (next === run.status) return run
   return next === 'running' ? { ...run, status: next } : { ...run, status: next, endedAt: now }

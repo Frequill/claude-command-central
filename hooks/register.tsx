@@ -24,6 +24,8 @@ import {
   pushLog,
   readContext,
   rememberStopped,
+  stopRunIn,
+  stopTaskOf,
   replyChoices,
   runFor,
   settleLog,
@@ -92,6 +94,7 @@ export const register: Register = on => {
       at => stopTurn($, at),
       async () => Boolean((await read($, turn)).isRunning),
       text => cavemanDressed($, text),
+      runId => stopRun($, runId),
     ).catch(() => undefined)
     await publishCommands($).catch(() => undefined)
     startTicking($)
@@ -504,13 +507,36 @@ async function endStoppedTasks($: EngineInterface) {
   }
 }
 
-async function endStoppedTask($: EngineInterface, taskId: string) {
+async function endStoppedTask($: EngineInterface, taskId: string): Promise<boolean> {
   try {
     const answer = (await $.tool.call({ tool: 'TaskStop', task_id: taskId } as never)) as { deny?: string; isError?: boolean; text?: string }
-    if (answer?.deny !== undefined || answer?.isError) $.ui.log(`ccc: could not end background task ${taskId}: ${answer.deny ?? answer.text ?? 'refused'}`)
+    if (answer?.deny === undefined && !answer?.isError) return true
+    $.ui.log(`ccc: could not end background task ${taskId}: ${answer.deny ?? answer.text ?? 'refused'}`)
+    return false
   } catch (error) {
     $.ui.log(`ccc: could not end background task ${taskId}: ${error instanceof Error ? error.message : String(error)}`)
+    return false
   }
+}
+
+/**
+ * Stop on CCC's agent map: one agent or background command ends, as TaskStop ends it, and the
+ * turn goes on. Its report starts no turn. A run its task no longer answers for (it ended without
+ * the board hearing, or came from before CCC kept its task) is marked stopped all the same; an
+ * agent the engine still says is working is left as it is.
+ */
+async function stopRun($: EngineInterface, runId: string) {
+  const run = (await read($, runs)).find(one => one.id === runId && one.status === 'running')
+  if (!run) return
+  const taskId = stopTaskOf(run)
+  if (taskId) await update($, stoppedTasks, list => rememberStopped(list, taskId))
+  const isEnded = taskId ? await endStoppedTask($, taskId) : false
+  if (!isEnded && run.agentId) {
+    const agent = (await $.agent.list()).find(one => one.id === run.agentId)
+    if (agent && agent.status === 'running') return
+  }
+  const now = await $.clock.now()
+  await update($, runs, list => stopRunIn(list, runId, now))
 }
 
 function withoutWaiting(state: TurnState): TurnState {

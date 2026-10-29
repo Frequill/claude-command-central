@@ -195,11 +195,17 @@
     <dialog id="settings" class="settings settings-window" aria-labelledby="settings-title">
       <form method="dialog" class="settings-body">
         <h2 id="settings-title" class="window-title">SETTINGS</h2>
-        <div id="settings-tabs" class="th-periods settings-tabs" role="tablist" aria-label="Settings">
-          <button type="button" role="tab" class="th-period" id="settings-tab-look" data-tab="look" aria-controls="settings-page-look">Theme</button>
-          <button type="button" role="tab" class="th-period" id="settings-tab-board" data-tab="board" aria-controls="settings-page-board">Board</button>
-          <button type="button" role="tab" class="th-period" id="settings-tab-behaviour" data-tab="behaviour" aria-controls="settings-page-behaviour">Scrolling &amp; motion</button>
-          <button type="button" role="tab" class="th-period" id="settings-tab-terminal" data-tab="terminal" aria-controls="settings-page-terminal">Terminal &amp; editor</button>
+        <div id="settings-tabs" class="settings-tab-row" role="tablist" aria-label="Settings">
+          <div class="th-periods settings-tabs" role="presentation">
+            <button type="button" role="tab" class="th-period" id="settings-tab-look" data-tab="look" aria-controls="settings-page-look">Theme</button>
+            <button type="button" role="tab" class="th-period" id="settings-tab-board" data-tab="board" aria-controls="settings-page-board">Board</button>
+            <button type="button" role="tab" class="th-period" id="settings-tab-behaviour" data-tab="behaviour" aria-controls="settings-page-behaviour">Scrolling &amp; motion</button>
+            <button type="button" role="tab" class="th-period" id="settings-tab-terminal" data-tab="terminal" aria-controls="settings-page-terminal">Terminal &amp; editor</button>
+          </div>
+          <!-- what CCC runs on its own: a place of its own, apart from the settings -->
+          <div class="th-periods settings-tabs settings-tabs-own" role="presentation">
+            <button type="button" role="tab" class="th-period" id="settings-tab-background" data-tab="background" aria-controls="settings-page-background">Background sessions</button>
+          </div>
         </div>
         <div class="settings-pages">
           <section id="settings-page-look" class="settings-page" role="tabpanel" aria-labelledby="settings-tab-look" data-page="look">
@@ -315,6 +321,32 @@
               <p class="hint">On, the file name in an opened step (an edit, a read, a new file) opens that file in your editor at the line Claude changed or read.</p>
             </fieldset>
           </section>
+          <section id="settings-page-background" class="settings-page" role="tabpanel" aria-labelledby="settings-tab-background" data-page="background" hidden>
+            <p class="hint background-about">What CCC runs on its own, out of sight: the Claude sessions you start with + &rarr; <strong>In the background</strong>, and the shells on the board. They run in CCC's keeper, a small program of its own, so they keep going when CCC's server stops, or you close the Claude app or your terminal windows. A restart of your Mac ends them. Here you see what runs, go to it, end it, and resume what stopped.</p>
+            <fieldset id="running">
+              <legend>Running now</legend>
+              <p id="running-status" class="running-status" role="status"></p>
+              <p id="running-outdated" class="hint running-outdated" hidden>CCC was updated, but its keeper still runs the code from before, as things run in it. Restart it to use the new code: that ends everything below.</p>
+              <div id="running-list" class="existing-list running-list" role="list" aria-label="What runs in CCC"></div>
+              <div id="running-now" class="running-actions">
+                <button id="running-restart" type="button" class="secondary" hidden>Restart keeper</button>
+                <button id="running-stop" type="button" class="secondary">End everything</button>
+              </div>
+            </fieldset>
+            <fieldset id="stopped" class="stopped">
+              <legend>Stopped</legend>
+              <p class="hint">Background sessions that stopped without you ending them, as when your Mac restarts. Resume one to pick it up where it was, in the background again. Claude only starts with a message, so it gets the one below; a message you wrote to it that never went in goes first instead. A turn that was cut off does not go on by itself.</p>
+              <p id="stopped-none" class="running-status">None right now.</p>
+              <label id="resume-field" class="field" for="resume-text">
+                Message
+                <input id="resume-text" class="existing-search resume-text" type="text" maxlength="2000" value="Continue where you left off." aria-label="Message to resume with" />
+              </label>
+              <div id="stopped-list" class="existing-list running-list" role="list" aria-label="Stopped background sessions"></div>
+              <div class="running-actions">
+                <button id="stopped-resume-all" type="button" class="secondary">Resume all</button>
+              </div>
+            </fieldset>
+          </section>
         </div>
         <div class="settings-actions settings-foot">
           <button value="close" class="primary">Done</button>
@@ -383,9 +415,11 @@
         <fieldset id="start-in" class="start-new">
           <legend>Start in</legend>
           <div id="start-where" class="th-periods start-where" role="radiogroup" aria-label="Start in">
+            <button type="button" role="radio" class="th-period" data-where="background">In the background</button>
             <button type="button" role="radio" class="th-period" data-where="app">Claude app</button>
             <button type="button" role="radio" class="th-period" data-where="terminal" id="start-app-name">Terminal</button>
           </div>
+          <button id="start-background-info" type="button" class="link-button start-info" aria-haspopup="dialog" aria-controls="background-info">ⓘ What "In the background" means</button>
           <p id="start-note" class="hint start-note"></p>
           <label class="field start-perm" for="start-perm">
             Mode
@@ -414,8 +448,12 @@
         <p class="confirm-question">What should happen to <strong id="remove-name">this session</strong>?</p>
         <div class="close-choices">
           <button id="remove-confirm" value="remove" class="close-choice">
-            <strong>Close from CCC</strong>
-            <span>Only CCC lets go of it. The conversation goes on where it runs, stays in Claude's history, and comes back here as soon as you write in it again.</span>
+            <strong id="remove-confirm-title">Close from CCC</strong>
+            <span id="remove-confirm-note">Only CCC lets go of it. The conversation goes on where it runs, stays in Claude's history, and comes back here as soon as you write in it again.</span>
+          </button>
+          <button id="remove-quit" value="quit" class="close-choice close-end" hidden>
+            <strong>End it</strong>
+            <span>Claude stops and its background terminal closes. The conversation stays in Claude's history: + &rarr; From an existing conversation picks it up again.</span>
           </button>
           <button id="remove-end" value="end" class="close-choice close-end">
             <strong>Clear its context</strong>
@@ -424,6 +462,36 @@
         </div>
         <div class="settings-actions confirm-actions">
           <button value="cancel" class="secondary">Cancel</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="background-info" class="settings confirm background-info" aria-labelledby="background-info-title">
+      <form method="dialog" class="settings-body">
+        <h2 id="background-info-title" class="window-title">IN THE BACKGROUND</h2>
+        <p class="confirm-question">CCC runs Claude Code itself, on this Mac, in a terminal nobody sees.</p>
+        <ul class="background-info-list">
+          <li><strong>It is the real thing.</strong> The same <code>claude</code> you run in a terminal: your account, settings, CLAUDE.md, skills, MCP servers and hooks. It uses your usage limits like any other session.</li>
+          <li><strong>You work with it here.</strong> Its card on the board is the only way in: chat, questions and approvals all come there. Its <code>&gt;_</code> button shows the terminal it runs in.</li>
+          <li><strong>It is not in the Claude app.</strong> The app lists only the sessions it started itself, so this one never shows there. Its conversation is saved in Claude's history like any terminal session's, so it can be resumed in a terminal too (<code>claude --resume</code>).</li>
+          <li><strong>Nobody watches its screen.</strong> Auto mode suits it best: Claude then rarely needs to stop and ask. What only its screen can show (such as Claude asking whether to trust a new folder) brings its terminal onto the board for you.</li>
+          <li><strong>It keeps going</strong> when you close the Claude app, your terminal windows or CCC itself, as CCC's keeper runs it. While the Mac sleeps, it waits.</li>
+          <li><strong>It ends</strong> when you close its card (End it), use End everything in Settings, or restart your Mac. After a restart it is listed in Settings, Background, Stopped, to resume; it never starts again by itself.</li>
+        </ul>
+        <div class="settings-actions confirm-actions">
+          <button value="close" class="primary">Got it</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="keeper-stop-dialog" class="settings confirm" aria-labelledby="keeper-stop-title">
+      <form method="dialog" class="settings-body">
+        <h2 id="keeper-stop-title" class="window-title">END EVERYTHING</h2>
+        <p class="confirm-question">Are you sure? This will terminate <strong id="keeper-stop-what">everything running in CCC</strong>.</p>
+        <p class="hint">Every shell on the board ends, and so does anything still running in it. Every Claude session in the background stops and its card closes; its conversation stays in Claude's history. CCC's keeper starts again, with CCC's newest code, when you next open a terminal or start a session in the background.</p>
+        <div class="settings-actions confirm-actions">
+          <button value="cancel" class="secondary">Cancel</button>
+          <button id="keeper-stop-confirm" value="stop" class="primary">End everything</button>
         </div>
       </form>
     </dialog>

@@ -591,10 +591,20 @@ test('a session can be started once a folder is picked, in the app unless the Te
   assert.equal(L.startState({ folder: '', where: 'app' }).canStart, false)
   assert.equal(L.startState({ folder: '/x', where: 'app' }).canStart, true)
   assert.equal(L.startState({ folder: '/x', where: 'app', isStarting: true }).canStart, false)
-  assert.equal(L.startState({ folder: '/x', where: 'nowhere' }).where, 'app')
+  // nothing picked yet: in the background, the way a first message goes in without leaving CCC
+  assert.equal(L.startState({ folder: '/x', where: 'nowhere' }).where, 'background')
+  assert.equal(L.startState({ folder: '/x' }).where, 'background')
+  // in the background Claude starts only with a message: Start waits for one; a new shell needs none
+  assert.equal(L.startState({ folder: '/x', where: 'background', prompt: '  ' }).canStart, false)
+  assert.equal(L.startState({ folder: '/x', where: 'background', prompt: '  ' }).needsPrompt, true)
+  assert.equal(L.startState({ folder: '/x', where: 'background', prompt: 'Fix it' }).canStart, true)
+  assert.equal(L.startState({ folder: '/x', where: 'background', mode: 'terminal' }).canStart, true)
+  assert.equal(L.startState({ folder: '/x', where: 'app' }).canStart, true)
   assert.match(L.startState({ folder: '/x', where: 'terminal' }).note, /Terminal/)
   assert.match(L.startState({ folder: '/x', where: 'app' }).note, /Claude app/)
   assert.match(L.startState({ folder: '/x', where: 'app' }).note, /first message already written/)
+  assert.equal(L.startState({ folder: '/x', where: 'background' }).where, 'background')
+  assert.match(L.startState({ folder: '/x', where: 'background' }).note, /nothing opens/)
 })
 
 test('the token history picks a period, a week when the choice is unknown', () => {
@@ -1610,4 +1620,55 @@ test('an empty strip across the board: found where no card covers a row, closed 
   assert.equal(stripAt(nodes, 60), null)
   // closed: the cards below move up by its height, the ones above stay, and none changes size
   assert.deepEqual(closedStrip(nodes, { y: 32, h: 4 }).map(({ node, y }) => [node.id, y]), [['c', 32], ['d', 32]])
+})
+
+test('a session started in the background is found by its terminal while Claude runs there', () => {
+  const terminals = [
+    { id: 't1', folder: '/x' },
+    { id: 't2', folder: '/x', kind: 'claude', sessionId: 's1', hidden: true },
+    { id: 't3', folder: '/x', kind: 'claude', sessionId: 's2', endedAt: 5 },
+  ]
+  assert.equal(L.backgroundTerminal(terminals, 's1').id, 't2')
+  // Claude ended there: the session runs nowhere CCC can show
+  assert.equal(L.backgroundTerminal(terminals, 's2'), null)
+  assert.equal(L.backgroundTerminal(terminals, 'nobody'), null)
+  assert.equal(L.backgroundTerminal(undefined, 's1'), null)
+})
+
+test("Settings lists what runs in CCC's keeper: background sessions first, then shells", () => {
+  const terminals = [
+    { id: 't1', folder: '/Users/me/code', where: '/Users/me/code/app' },
+    { id: 't2', folder: '/Users/me/shop', kind: 'claude', sessionId: 's1', hidden: true },
+    { id: 't3', folder: '/Users/me/blog', kind: 'claude', sessionId: 's2', hidden: false },
+    { id: 't4', folder: '/x', endedAt: 5 },
+  ]
+  const rows = L.runningRows(terminals, id => id === 's1', id => (id === 's1' ? 'Fix the cart' : undefined))
+  assert.deepEqual(rows.map(row => [row.id, row.kind, row.title]), [
+    ['t2', 'claude', 'Fix the cart'],
+    // its card is not on the board yet: it is starting, or asks something on its own screen
+    ['t3', 'claude', 'Starting, or waiting on its screen'],
+    ['t1', 'shell', 'app'],
+  ])
+  assert.equal(rows[0].isHidden, true)
+  assert.equal(rows[1].isOnBoard, false)
+  assert.match(L.keeperLine({ running: true }, rows), /running: 2 background sessions and 1 shell\./)
+  assert.match(L.keeperLine({ running: true }, rows.slice(2)), /running: 1 shell\./)
+  assert.match(L.keeperLine({ running: true }, []), /nothing in it/)
+  assert.match(L.keeperLine({ running: false }, []), /not running/)
+  assert.deepEqual(L.runningRows(undefined), [])
+  // its card closed from CCC, it runs on: named after its conversation, to show again
+  const closed = L.runningRows([{ id: 't5', folder: '/x', kind: 'claude', sessionId: 's5', title: 'Write the docs', closed: true }])[0]
+  assert.equal(closed.title, 'Write the docs')
+  assert.equal(closed.isClosed, true)
+})
+
+test('a background session that stopped is resumed by sending to it', () => {
+  const ended = { takesMessages: true, endedAt: 5 }
+  const state = C.composeState(ended, true)
+  assert.equal(state.canSend, true)
+  assert.equal(state.resumeHere, true)
+  assert.match(state.note, /Sending resumes it there/)
+  assert.equal(C.composeState(ended).resumeHere, undefined)
+  // running, it takes the message as any session does
+  assert.equal(C.composeState({ takesMessages: true }, true).resumeHere, undefined)
 })

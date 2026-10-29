@@ -10,15 +10,18 @@ import os
 import re
 import secrets
 import shlex
+import shutil
 import subprocess
 import threading
 import time
+import uuid
 from datetime import datetime, timedelta
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, quote, urlsplit
 
 import editors
+import keeper
 import mentions
 import terminals
 
@@ -42,6 +45,7 @@ APPROVALS_DIR = Path(os.environ.get("CCC_APPROVALS_DIR", CCC_DIR / "approvals"))
 COMMANDS_DIR = Path(os.environ.get("CCC_COMMANDS_DIR", CCC_DIR / "commands"))
 # caveman mode per session, as the person switches it in CCC; the mod reads it (hooks/caveman.ts)
 CAVEMAN_DIR = Path(os.environ.get("CCC_CAVEMAN_DIR", CCC_DIR / "caveman"))
+BACKGROUND_FILE = Path(os.environ.get("CCC_BACKGROUND_FILE", CCC_DIR / "background.json"))
 CAVEMAN_LEVELS = ("off", "lite", "full", "ultra")
 COMMANDS_MAX = 400
 COMMAND_NAME = re.compile(r"^[A-Za-z0-9_:.-]{1,80}$")
@@ -49,10 +53,24 @@ MAX_ANSWER_BODY_BYTES = 64 * 1024
 MAX_START_BODY_BYTES = 64 * 1024
 RECENT_FOLDERS = 12
 CWD_FIELD = re.compile(rb'"cwd"\s*:\s*("(?:[^"\\]|\\.){1,4096}")')
-START_PLACES = ("app", "terminal")
-# the modes a session started in a terminal can be given (claude --permission-mode); '' is the
-# person's own default from Claude Code's settings
+START_PLACES = ("app", "terminal", "background")
+# the modes a session started in a terminal or in the background can be given (claude
+# --permission-mode); '' is the person's own default from Claude Code's settings
 START_MODES = ("", "manual", "acceptEdits", "plan", "auto")
+# Claude's own settings file, only ever read here: it says which folders the person trusts
+CLAUDE_CONFIG = Path(os.environ.get("CCC_CLAUDE_CONFIG", Path.home() / ".claude.json"))
+# where claude is when the server's PATH does not have it (the server may be started from the app)
+CLAUDE_PLACES = (Path.home() / ".local" / "bin" / "claude", Path.home() / ".claude" / "local" / "claude", Path("/opt/homebrew/bin/claude"), Path("/usr/local/bin/claude"))
+BACKGROUND_SIZE = (120, 36)
+# a session started in the background that is not on the board by then is waiting for the person,
+# on something only its own screen shows: its terminal comes onto the board
+BACKGROUND_WAIT_MS = 30_000
+# the sessions started in the background CCC remembers, newest first, so a stopped one can be resumed
+BACKGROUND_KEPT = 50
+# what a resumed session gets when nothing else was written to it: Claude starts only with a message
+RESUME_PROMPT = "Continue where you left off."
+# a snapshot written this recently, and not ended, is a session that runs somewhere now
+RUNS_NOW_MS = 60_000
 PICK_TIMEOUT_S = 300
 CHAT_CHUNK_BYTES = 1024 * 1024
 CHAT_ITEMS = 300
@@ -1605,6 +1623,36 @@ class Inbox:
         temporary.replace(path)
         return True
 
+    def take_first(self, session_id: str):
+        """The oldest message that waits for the session, marked taken as its mod marks one, for a
+        session that starts with it; None when nothing waits."""
+        folder = self.inbox_dir / session_id
+        if not SAFE_ID.match(session_id or "") or not folder.is_dir():
+            return None
+        for path in sorted(folder.glob("*.json")):
+            if path.with_suffix(".taken").exists():
+                continue
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if not isinstance(data, dict) or data.get("stop") or data.get("stopRun"):
+                continue
+            path.with_suffix(".taken").write_text(str(int(time.time() * 1000)), encoding="utf-8")
+            return data
+        return None
+
+    def stop_run(self, session_id: str, run_id: str, now_ms: int) -> str:
+        """Asks the session to end one agent or background command (Stop on the agent map); its
+        turn goes on. The session's mod takes it as it takes a stop."""
+        message_id = f"{now_ms}-{secrets.token_hex(4)}"
+        folder = self.inbox_dir / session_id
+        folder.mkdir(parents=True, exist_ok=True)
+        temporary = folder / f"{message_id}.tmp"
+        temporary.write_text(json.dumps({"id": message_id, "stopRun": run_id, "at": now_ms}), encoding="utf-8")
+        temporary.replace(folder / f"{message_id}.json")
+        return message_id
+
     def stop(self, session_id: str, now_ms: int) -> str:
         """Asks the session to stop Claude's running turn: a message with no words that the session's
         mod takes as a stop. Messages queued before it still go in once Claude has stopped."""
@@ -1641,7 +1689,7 @@ class Inbox:
                 data = json.loads(path.read_text(encoding="utf-8"))
             except (OSError, ValueError):
                 continue
-            if isinstance(data, dict) and not data.get("stop"):
+            if isinstance(data, dict) and not data.get("stop") and not data.get("stopRun"):
                 waiting.append({"id": data.get("id"), "text": str(data.get("text", ""))[:CHAT_TEXT_MAX], "images": len(data.get("images") or []), "files": len(data.get("files") or []), "mode": data.get("mode") if data.get("mode") in SEND_MODES else "queue", "at": data.get("at")})
         return waiting
 
@@ -1893,11 +1941,12 @@ def read_resume_request(body: bytes, transcripts):
 
 def read_start_request(body: bytes):
     """((folder, where, first prompt), '') for a plain request to start a session, else (None, what
-    is wrong). The folder must be one on this Mac; where is the Claude app or the Terminal. A first
-    prompt goes with either: the app gets it written in its new session's box, the Terminal runs
-    claude with it. The Terminal
-    gets its command typed in, so a control character (a key press there, such as Ctrl-U or Enter)
-    is never let through: the prompt may hold line breaks, the folder nothing of the kind."""
+    is wrong). The folder must be one on this Mac; where is the Claude app, the Terminal or the
+    background. A first prompt goes with each: the app gets it written in its new session's box, the
+    Terminal and the background run claude with it. The Terminal gets its command typed in, so a
+    control character (a key press there, such as Ctrl-U or Enter) is never let through: the prompt
+    may hold line breaks, the folder nothing of the kind. In the background the prompt is an argument
+    of its own, which may hold anything but a zero byte."""
     try:
         data = json.loads(body.decode("utf-8"))
     except (UnicodeDecodeError, ValueError):
@@ -1907,18 +1956,18 @@ def read_start_request(body: bytes):
     folder, where, prompt, app = data.get("folder"), data.get("where"), data.get("prompt", ""), data.get("app")
     mode = data.get("mode", "")
     if where not in START_PLACES:
-        return None, "Pick the Claude app or the Terminal."
+        return None, "Pick the Claude app, the Terminal or the background."
     if not isinstance(folder, str) or not folder.startswith("/") or len(folder) > 4096 or CONTROL.search(folder) or not os.path.isdir(folder):
         return None, "That folder is not on this Mac."
     if not isinstance(prompt, str) or len(prompt) > START_PROMPT_MAX:
         return None, "The first message is too long for the Terminal. Start with a shorter one and send the rest from the chat."
-    if CONTROL.search(prompt.replace("\n", "")):
+    if (CONTROL.search(prompt.replace("\n", "")) if where != "background" else "\0" in prompt):
         return None, "The first message holds a character the Terminal would take as a key press. Write it without it."
     if mode not in START_MODES:
         return None, "Pick one of the modes in the list."
     app = terminals.chosen_app(app, terminals.installed_apps())
     # the app's link takes no mode: a session there starts in the app's own default
-    return (os.path.realpath(folder), where, prompt.strip(), app, mode if where == "terminal" else ""), ""
+    return (os.path.realpath(folder), where, prompt.strip(), app, mode if where != "app" else ""), ""
 
 PICK_SCRIPT = """on run argv
   activate
@@ -1938,6 +1987,197 @@ def start_command(folder: str, where: str, prompt: str, app: str = "terminal", m
     flag = f" --permission-mode {shlex.quote(mode)}" if mode in START_MODES and mode else ""
     command = f"cd {shlex.quote(folder)} && claude{flag}" + (f" -- {shlex.quote(prompt)}" if prompt else "")
     return terminals.app_command(app, command)
+
+
+def claude_program(environ=os.environ, places=CLAUDE_PLACES):
+    """Where claude is on this Mac, or None."""
+    found = shutil.which("claude", path=environ.get("PATH"))
+    if found:
+        return found
+    return next((str(place) for place in places if os.access(place, os.X_OK)), None)
+
+
+def is_trusted(folder: str, config: Path = CLAUDE_CONFIG) -> bool:
+    """Whether the person told Claude to trust the folder, as Claude's own settings file says."""
+    try:
+        projects = json.loads(config.read_text()).get("projects")
+    except (OSError, ValueError, AttributeError):
+        return False
+    entry = projects.get(folder) if isinstance(projects, dict) else None
+    return isinstance(entry, dict) and entry.get("hasTrustDialogAccepted") is True
+
+
+def background_command(program: str, session_id: str, prompt: str, mode: str) -> list:
+    """claude with the id CCC picked for the session, so the board knows which card it is, in the
+    mode asked for, with the first message. Each part is its own argument: nothing in them runs."""
+    return [program, "--session-id", session_id, *(["--permission-mode", mode] if mode else []), *(["--", prompt] if prompt else [])]
+
+
+def start_background(terms, folder: str, prompt: str, mode: str, program=None, trusted=is_trusted):
+    """Starts Claude in the background, in a terminal of CCC's keeper: (what the board needs to find
+    it, '') or (None, what went wrong). In a folder Claude was never told to trust, it asks first,
+    and only the person can answer: its terminal is on the board from the start. A first message is
+    needed: Claude starts its session only with one, and nobody sees its screen to type it."""
+    if not prompt.strip():
+        return None, "Write the first message: in the background, Claude starts with it."
+    program = program or claude_program()
+    if not program:
+        return None, "Claude Code is not installed where CCC can find it (no claude in your PATH or ~/.local/bin)."
+    session_id = str(uuid.uuid4())
+    is_hidden = trusted(folder)
+    terminal_id, problem = terms.start(folder, *BACKGROUND_SIZE, command=background_command(program, session_id, prompt, mode), session_id=session_id, is_hidden=is_hidden)
+    if not terminal_id:
+        return None, problem
+    return {"sessionId": session_id, "terminalId": terminal_id, "shown": not is_hidden}, ""
+
+
+class Backgrounds:
+    """The sessions CCC started in the background: their folder and mode, so one that stopped
+    without the person ending it (the Mac restarted) can be resumed. Ending one forgets it."""
+
+    def __init__(self, path: Path):
+        self.path = path
+        self.lock = threading.Lock()
+
+    def load(self) -> dict:
+        try:
+            data = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        kept = data.get("sessions") if isinstance(data, dict) else None
+        return {key: value for key, value in kept.items() if SAFE_ID.match(key) and isinstance(value, dict)} if isinstance(kept, dict) else {}
+
+    def save(self, kept: dict):
+        newest = dict(sorted(kept.items(), key=lambda item: item[1].get("at") or 0, reverse=True)[:BACKGROUND_KEPT])
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = self.path.with_suffix(".tmp")
+        temporary.write_text(json.dumps({"sessions": newest}), encoding="utf-8")
+        temporary.replace(self.path)
+
+    def keep(self, session_id: str, folder: str, mode: str, now_ms: int):
+        with self.lock:
+            kept = self.load()
+            kept[session_id] = {"folder": folder, "mode": mode if mode in START_MODES else "", "at": now_ms}
+            self.save(kept)
+
+    def get(self, session_id: str):
+        return self.load().get(session_id) if isinstance(session_id, str) else None
+
+    def forget(self, session_id: str):
+        with self.lock:
+            kept = self.load()
+            if kept.pop(session_id, None) is not None:
+                self.save(kept)
+
+
+def runs_now(snapshot_path: Path, now_ms: int) -> bool:
+    """Whether a session's snapshot says it runs somewhere now: written lately, and not ended."""
+    try:
+        data = json.loads(snapshot_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return isinstance(data, dict) and data.get("endedAt") is None and isinstance(data.get("updatedAt"), int) and now_ms - data["updatedAt"] < RUNS_NOW_MS
+
+
+def stopped_backgrounds(backgrounds, cards: list, sessions_dir: Path, transcripts, now_ms: int) -> list:
+    """The background sessions that stopped without the person ending them, newest first: not in
+    the keeper, not running anywhere else, and with a conversation in Claude's history to resume."""
+    in_keeper = {card.get("sessionId") for card in cards if isinstance(card, dict) and not card.get("endedAt")}
+    stopped = []
+    for session_id, kept in sorted(backgrounds.load().items(), key=lambda item: item[1].get("at") or 0, reverse=True):
+        if session_id in in_keeper or runs_now(sessions_dir / f"{session_id}.json", now_ms):
+            continue
+        path = transcripts.find(session_id)
+        if path is None:
+            continue
+        folder = folder_of(path) or kept.get("folder") or ""
+        title = transcripts.describe(session_id).get("title") or first_prompt(path) or Path(folder).name or folder
+        stopped.append({"sessionId": session_id, "title": title, "folder": folder, "at": kept.get("at")})
+    return stopped
+
+
+def prompt_for(message: dict) -> str:
+    """A message from the inbox as it goes in, as the session's mod writes it (hooks/inbox.ts): its
+    words, then where its files and images are, so Claude opens them."""
+    listed = lambda paths: "\n".join(f"- {path}" for path in paths)
+    files = [path for path in message.get("files") or [] if isinstance(path, str)]
+    images = [path for path in message.get("images") or [] if isinstance(path, str)]
+    parts = [
+        str(message.get("text") or "").strip(),
+        f"Files I added (open them with the Read tool):\n{listed(files)}" if files else "",
+        f"Images I added (open them with the Read tool):\n{listed(images)}" if images else "",
+    ]
+    return "\n\n".join(part for part in parts if part)
+
+
+def resume_background(terms, backgrounds, inbox, transcripts, session_id: str, text: str, program=None, trusted=is_trusted):
+    """Picks a stopped background session up again, in the background: (what the board needs, '') or
+    (None, what went wrong). Claude starts only with a message, so it goes in with one: the oldest
+    written to it that never went in, else the person's `text`, else RESUME_PROMPT."""
+    kept = backgrounds.get(session_id)
+    if not kept:
+        return None, "CCC did not start that session in the background."
+    path = transcripts.find(session_id)
+    folder = folder_of(path) if path else None
+    if not folder or not os.path.isdir(folder):
+        return None, "That conversation's folder is not on this Mac any more."
+    if any(isinstance(card, dict) and card.get("sessionId") == session_id and not card.get("endedAt") for card in terms.list()):
+        return None, "It runs in the background already."
+    program = program or claude_program()
+    if not program:
+        return None, "Claude Code is not installed where CCC can find it (no claude in your PATH or ~/.local/bin)."
+    waiting = inbox.take_first(session_id)
+    prompt = prompt_for(waiting) if waiting else (text.strip() if isinstance(text, str) and text.strip() else RESUME_PROMPT)
+    mode = kept.get("mode") if kept.get("mode") in START_MODES else ""
+    command = [program, "--resume", session_id, *(["--permission-mode", mode] if mode else []), "--", prompt]
+    folder = os.path.realpath(folder)
+    is_hidden = trusted(folder)
+    terminal_id, problem = terms.start(folder, *BACKGROUND_SIZE, command=command, session_id=session_id, is_hidden=is_hidden)
+    if not terminal_id:
+        return None, problem
+    return {"sessionId": session_id, "terminalId": terminal_id, "shown": not is_hidden}, ""
+
+
+def reveal_waiting(terms, cards: list, sessions_dir: Path, now_ms: int) -> list:
+    """The terminals, with each background session that never came onto the board put there, as it
+    waits for something only its own screen shows (a question Claude asks before it starts)."""
+    shown = []
+    for card in cards:
+        session_id = card.get("sessionId") if isinstance(card, dict) else None
+        is_waiting = (
+            card.get("hidden") is True
+            and not card.get("endedAt")
+            and isinstance(session_id, str)
+            and SAFE_ID.match(session_id)
+            and isinstance(card.get("startedAt"), int)
+            and now_ms - card["startedAt"] >= BACKGROUND_WAIT_MS
+            and not (sessions_dir / f"{session_id}.json").exists()
+        )
+        if is_waiting and terms.show(card["id"], False):
+            card = {**card, "hidden": False}
+        shown.append(card)
+    return shown
+
+
+def named_backgrounds(cards: list, transcripts, removed: dict) -> list:
+    """The terminals, each Claude in the background with its conversation's name, and whether the
+    person closed its card from CCC (it runs on, and Settings lists it to show it again)."""
+    named = []
+    for card in cards:
+        session_id = card.get("sessionId") if isinstance(card, dict) else None
+        if isinstance(session_id, str) and SAFE_ID.match(session_id):
+            path = transcripts.find(session_id)
+            title = (transcripts.describe(session_id).get("title") or first_prompt(path)) if path else ""
+            card = {**card, **({"title": title[:200]} if title else {}), "closed": session_id in removed}
+        named.append(card)
+    return named
+
+
+def end_background(terms, session_id: str):
+    """Ends the background Claude a session runs in, if it runs in one, and lets its terminal go."""
+    for card in terms.list():
+        if isinstance(card, dict) and card.get("sessionId") == session_id:
+            terms.close(card.get("id"))
 
 
 def end_session(inbox, session_id: str, now_ms: int):
@@ -2017,7 +2257,8 @@ REMOVALS = Removals(REMOVED_FILE)
 PINS = Pins(PINNED_FILE)
 CAVEMAN = Caveman(CAVEMAN_DIR)
 NOTES = Notes(NOTES_FILE)
-TERMINALS = terminals.Terminals()
+TERMINALS = keeper.KeptTerminals()
+BACKGROUNDS = Backgrounds(BACKGROUND_FILE)
 
 
 def with_transcript_facts(sessions: list, transcripts: Transcripts) -> list:
@@ -2107,7 +2348,7 @@ def removal_target(body: bytes):
     return session_id if isinstance(session_id, str) and SAFE_ID.match(session_id) else None
 
 
-TERMINAL_ROUTES = {"/api/terminal/start": "terminal-start", "/api/terminal/type": "terminal-type", "/api/terminal/resize": "terminal-resize", "/api/terminal/close": "terminal-close", "/api/terminal/open": "terminal-open"}
+TERMINAL_ROUTES = {"/api/terminal/start": "terminal-start", "/api/terminal/type": "terminal-type", "/api/terminal/resize": "terminal-resize", "/api/terminal/close": "terminal-close", "/api/terminal/open": "terminal-open", "/api/terminal/show": "terminal-show", "/api/keeper/stop": "terminal-keeper-stop"}
 TERMINAL_KEY_HEADER = "X-CCC-Key"
 MAX_TERMINAL_BODY_BYTES = 256 * 1024
 
@@ -2127,8 +2368,9 @@ def json_object(body: bytes):
     return data if isinstance(data, dict) else None
 
 
-def terminal_action(terms, action: str, data: dict, run=subprocess.run) -> dict:
-    """Does what the board asks of a terminal, and says how it went."""
+def terminal_action(terms, action: str, data: dict, run=subprocess.run, close_session=lambda session_id: None) -> dict:
+    """Does what the board asks of a terminal, and says how it went. `close_session` takes a
+    session off the board, as its card's × does."""
     if action == "terminal-start":
         folder = data.get("folder")
         if not isinstance(folder, str) or len(folder) > 4096 or CONTROL.search(folder):
@@ -2143,6 +2385,15 @@ def terminal_action(terms, action: str, data: dict, run=subprocess.run) -> dict:
         return {"ok": terms.resize(data.get("id"), data.get("cols"), data.get("rows"))}
     if action == "terminal-close":
         return {"ok": terms.close(data.get("id"))}
+    if action == "terminal-show":
+        return {"ok": terms.show(data.get("id"), data.get("hidden"))}
+    if action == "terminal-keeper-stop":
+        # the background sessions go with the keeper: their cards close, as "End it" closes one
+        sessions = {card.get("sessionId") for card in terms.list() if isinstance(card, dict) and isinstance(card.get("sessionId"), str) and SAFE_ID.match(card["sessionId"])}
+        ended = terms.stop_keeper()
+        for session_id in sorted(sessions):
+            close_session(session_id)
+        return {"ok": True, "ended": ended}
     folder = terms.folder_now(data.get("id"))
     if folder is None:
         return {"ok": False, "problem": "That terminal is gone."}
@@ -2154,6 +2405,14 @@ def terminal_action(terms, action: str, data: dict, run=subprocess.run) -> dict:
     if done.returncode != 0:
         return {"ok": False, "problem": "Could not open the terminal app. " + (done.stderr or "").strip()[:200]}
     return {"ok": True}
+
+
+def close_on_board(session_id: str):
+    """Takes a background session off the board, as "End it" does: ended by the person, it is
+    no longer one to resume."""
+    REMOVALS.remove(session_id, int(time.time() * 1000))
+    PINS.drop(session_id)
+    BACKGROUNDS.forget(session_id)
 
 
 def open_step_file(transcripts, data: dict, open_file=editors.open_file, installed=editors.installed_editors) -> dict:
@@ -2186,7 +2445,10 @@ class Handler(SimpleHTTPRequestHandler):
         if route == "/api/sessions":
             payload = board_payload(SESSIONS_DIR, REMOVALS, TRANSCRIPTS, APP_SESSIONS, pins=PINS)
             editor_apps = [{"id": editor["id"], "name": editor["name"]} for editor in editors.installed_editors()]
-            return self.send_json({**payload, "terminals": TERMINALS.list(), "terminalApps": terminals.installed_apps(), "editorApps": editor_apps, "caveman": CAVEMAN.choices()})
+            now_ms = int(time.time() * 1000)
+            cards = named_backgrounds(reveal_waiting(TERMINALS, TERMINALS.list(), SESSIONS_DIR, now_ms), TRANSCRIPTS, REMOVALS.load())
+            stopped = stopped_backgrounds(BACKGROUNDS, cards, SESSIONS_DIR, TRANSCRIPTS, now_ms)
+            return self.send_json({**payload, "terminals": cards, "stopped": stopped, "keeper": {"running": TERMINALS.is_running, "outdated": TERMINALS.is_outdated}, "terminalApps": terminals.installed_apps(), "editorApps": editor_apps, "caveman": CAVEMAN.choices()})
         if route == "/api/terminals/key":
             # only the board's own page may learn the key: the browser marks a request from any other site
             if self.headers.get("Sec-Fetch-Site") != "same-origin":
@@ -2244,10 +2506,10 @@ class Handler(SimpleHTTPRequestHandler):
 
     def do_POST(self):
         route = self.path.split("?", 1)[0]
-        action = {"/api/remove": "remove", "/api/notes": "notes", "/api/send": "send", "/api/answer": "answer", "/api/approve": "approve", "/api/start": "start", "/api/pick-folder": "pick", "/api/interrupt": "interrupt", "/api/add": "add", "/api/end": "end", "/api/hurry": "hurry", "/api/open-file": "open-file", "/api/caveman": "caveman", **TERMINAL_ROUTES}.get(route)
+        action = {"/api/remove": "remove", "/api/notes": "notes", "/api/send": "send", "/api/answer": "answer", "/api/approve": "approve", "/api/start": "start", "/api/pick-folder": "pick", "/api/interrupt": "interrupt", "/api/add": "add", "/api/end": "end", "/api/hurry": "hurry", "/api/open-file": "open-file", "/api/caveman": "caveman", "/api/background/resume": "background-resume", "/api/background/forget": "background-forget", "/api/stop-run": "stop-run", **TERMINAL_ROUTES}.get(route)
         if not is_local_host(self.headers.get("Host", ""), PORT) or action is None or not is_from_board(self.headers, PORT, action):
             return self.send_error(403 if action else 404)
-        limits = {"remove": MAX_BODY_BYTES, "notes": MAX_NOTES_BODY_BYTES, "send": MAX_SEND_BODY_BYTES, "answer": MAX_ANSWER_BODY_BYTES, "approve": MAX_BODY_BYTES, "start": MAX_START_BODY_BYTES, "pick": MAX_BODY_BYTES, "interrupt": MAX_BODY_BYTES, "add": MAX_BODY_BYTES, "end": MAX_BODY_BYTES, "hurry": MAX_BODY_BYTES, "open-file": MAX_BODY_BYTES, "caveman": MAX_BODY_BYTES}
+        limits = {"remove": MAX_BODY_BYTES, "notes": MAX_NOTES_BODY_BYTES, "send": MAX_SEND_BODY_BYTES, "answer": MAX_ANSWER_BODY_BYTES, "approve": MAX_BODY_BYTES, "start": MAX_START_BODY_BYTES, "pick": MAX_BODY_BYTES, "interrupt": MAX_BODY_BYTES, "add": MAX_BODY_BYTES, "end": MAX_BODY_BYTES, "hurry": MAX_BODY_BYTES, "open-file": MAX_BODY_BYTES, "caveman": MAX_BODY_BYTES, "background-resume": MAX_START_BODY_BYTES, "background-forget": MAX_BODY_BYTES, "stop-run": MAX_BODY_BYTES}
         if action.startswith("terminal-"):
             if not has_terminal_key(self.headers, TERMINALS.key):
                 return self.send_error(403)
@@ -2255,7 +2517,7 @@ class Handler(SimpleHTTPRequestHandler):
             data = json_object(body) if body is not None else None
             if data is None:
                 return self.send_error(400)
-            return self.send_json(terminal_action(TERMINALS, action, data))
+            return self.send_json(terminal_action(TERMINALS, action, data, close_session=close_on_board))
         body = self.read_body(limits[action])
         if body is None:
             return self.send_error(400)
@@ -2264,6 +2526,13 @@ class Handler(SimpleHTTPRequestHandler):
             if session_id is None:
                 return self.send_error(400)
             INBOX.stop(session_id, int(time.time() * 1000))
+            return self.send_json({"ok": True})
+        if action == "stop-run":
+            data = json_object(body) or {}
+            session_id, run_id = data.get("sessionId"), data.get("runId")
+            if not isinstance(session_id, str) or not SAFE_ID.match(session_id) or not isinstance(run_id, str) or not SAFE_ID.match(run_id):
+                return self.send_error(400)
+            INBOX.stop_run(session_id, run_id, int(time.time() * 1000))
             return self.send_json({"ok": True})
         if action == "pick":
             folder, why = pick_folder()
@@ -2283,6 +2552,12 @@ class Handler(SimpleHTTPRequestHandler):
             request, problem = read_start_request(body)
             if request is None:
                 return self.send_json({"ok": False, "problem": problem})
+            folder, where, prompt, _app, mode = request
+            if where == "background":
+                started, problem = start_background(TERMINALS, folder, prompt, mode)
+                if started:
+                    BACKGROUNDS.keep(started["sessionId"], folder, mode, int(time.time() * 1000))
+                return self.send_json({"ok": True, **started} if started else {"ok": False, "problem": problem})
             problem = start_session(*request)
             return self.send_json({"ok": not problem, **({"problem": problem} if problem else {})})
         if action == "answer":
@@ -2311,7 +2586,27 @@ class Handler(SimpleHTTPRequestHandler):
                 return self.send_error(400)
             REMOVALS.remove(session_id, int(time.time() * 1000))
             PINS.drop(session_id)
+            # a session run in the background goes on there unless the person ends it ("End it")
+            if (json_object(body) or {}).get("end") is True:
+                end_background(TERMINALS, session_id)
+                BACKGROUNDS.forget(session_id)
             return self.send_json({"ok": True})
+        if action in ("background-resume", "background-forget"):
+            data = json_object(body) or {}
+            session_id = data.get("sessionId")
+            if not isinstance(session_id, str) or not SAFE_ID.match(session_id):
+                return self.send_error(400)
+            if action == "background-forget":
+                BACKGROUNDS.forget(session_id)
+                return self.send_json({"ok": True})
+            text = data.get("text") if isinstance(data.get("text"), str) else ""
+            started, problem = resume_background(TERMINALS, BACKGROUNDS, INBOX, TRANSCRIPTS, session_id, text[:START_PROMPT_MAX])
+            if started:
+                # it comes back onto the board, as one added from the history does
+                REMOVALS.forget([session_id])
+                kept = BACKGROUNDS.get(session_id) or {}
+                BACKGROUNDS.keep(session_id, kept.get("folder", ""), kept.get("mode", ""), int(time.time() * 1000))
+            return self.send_json({"ok": True, **started} if started else {"ok": False, "problem": problem})
         if action == "add":
             session_id = removal_target(body)
             if session_id is None or TRANSCRIPTS.find(session_id) is None:
@@ -2385,6 +2680,9 @@ class Handler(SimpleHTTPRequestHandler):
                 self.wfile.flush()
         except (BrokenPipeError, ConnectionResetError, OSError):
             pass
+        finally:
+            # a stream from the keeper lets go of its connection to it now, not whenever it is collected
+            getattr(frames, "close", lambda: None)()
         self.close_connection = True
 
     def send_json(self, payload):
@@ -2403,10 +2701,8 @@ def main():
     server = ThreadingHTTPServer((HOST, PORT), Handler)
     server.daemon_threads = True
     print(f"ccc: board at http://{HOST}:{PORT}/", flush=True)
-    try:
-        server.serve_forever()
-    finally:
-        TERMINALS.stop_all()
+    # the terminals live in the keeper, so they go on when this server stops
+    server.serve_forever()
 
 
 if __name__ == "__main__":

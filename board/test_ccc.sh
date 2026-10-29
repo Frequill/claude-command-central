@@ -8,12 +8,13 @@ export CCC_PORT=18765
 export CCC_SESSIONS_DIR="$WORK/sessions"
 export CCC_REMOVED_FILE="$WORK/removed.json"
 export CCC_NOTES_FILE="$WORK/notes.json"
+export CCC_KEEPER_FILE="$WORK/keeper.json"
 SQUAT_PORT=18766
 PASSED=0
 FAILED=0
 
 cleanup() {
-  CCC_PORT=$CCC_PORT "$HERE/ccc" stop --force >/dev/null 2>&1
+  CCC_PORT=$CCC_PORT "$HERE/ccc" stop --all --force >/dev/null 2>&1
   [ -n "${SQUATTER:-}" ] && kill "$SQUATTER" 2>/dev/null
   rm -rf "$WORK"
 }
@@ -58,19 +59,29 @@ check "the removal is remembered" "$(python3 -c 'import json,sys; print(list(jso
 "$HERE/ccc" nonsense >/dev/null 2>&1
 check "an unknown argument exits 2" "$?" "2"
 
-# a terminal on the board: stop asks first, and with no one to ask it stops nothing
+# a terminal on the board lives in the keeper: stopping the server leaves it running
 BASE="http://127.0.0.1:$CCC_PORT"
 KEY="$(curl -fsS -H 'Sec-Fetch-Site: same-origin' "$BASE/api/terminals/key" | python3 -c 'import json,sys; print(json.load(sys.stdin)["key"])')"
 mkdir -p "$WORK/shell"
-curl -fsS -X POST -H 'Content-Type: application/json' -H 'X-CCC-Action: terminal-start' -H "X-CCC-Key: $KEY" -d "{\"folder\": \"$WORK/shell\"}" "$BASE/api/terminal/start" >/dev/null
+TERMINAL="$(curl -fsS -X POST -H 'Content-Type: application/json' -H 'X-CCC-Action: terminal-start' -H "X-CCC-Key: $KEY" -d "{\"folder\": \"$WORK/shell\"}" "$BASE/api/terminal/start" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')"
 OUT="$("$HERE/ccc" stop </dev/null 2>&1)"
-check "stop with a terminal running exits 1" "$?" "1"
-check "stop with a terminal running says what it would end" "$(echo "$OUT" | grep -c 'Are you sure? This will terminate all active terminals: 1 terminal')" "1"
-check "stop with a terminal running leaves the server up" "$(curl -fsS "$BASE/api/health")" '{"app": "ccc", "ok": true}'
-
-"$HERE/ccc" stop --force >/dev/null 2>&1
+check "stop exits 0 with a terminal running" "$?" "0"
+check "stop says the terminal keeps running" "$(echo "$OUT" | grep -c '1 terminal(s) keep running')" "1"
 sleep 0.3
-check "stop stops the server" "$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$CCC_PORT/api/health")" "000"
+check "stop stops the server" "$(curl -s -o /dev/null -w '%{http_code}' "$BASE/api/health")" "000"
+
+"$HERE/ccc" </dev/null >/dev/null 2>&1
+check "the server started again finds the terminal" "$(curl -fsS "$BASE/api/sessions" | python3 -c 'import json,sys; print([c["id"] for c in json.load(sys.stdin)["terminals"]])')" "['$TERMINAL']"
+
+OUT="$("$HERE/ccc" stop --all </dev/null 2>&1)"
+check "stop --all with a terminal running exits 1" "$?" "1"
+check "stop --all says what it would end" "$(echo "$OUT" | grep -c 'Are you sure? This will terminate all active terminals: 1 terminal')" "1"
+check "stop --all with no one to ask leaves the server up" "$(curl -fsS "$BASE/api/health")" '{"app": "ccc", "ok": true}'
+
+"$HERE/ccc" stop --all --force >/dev/null 2>&1
+sleep 0.3
+check "stop --all --force stops the server" "$(curl -s -o /dev/null -w '%{http_code}' "$BASE/api/health")" "000"
+check "stop --all --force stops the keeper" "$(python3 "$HERE/keeper.py" count)" "0"
 
 "$HERE/ccc" stop >/dev/null 2>&1
 check "stop with no server running exits 0" "$?" "0"
