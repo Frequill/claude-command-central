@@ -27,6 +27,7 @@ import threading
 import time
 from pathlib import Path
 
+import names
 import terminals
 
 HERE = Path(__file__).resolve().parent
@@ -212,7 +213,7 @@ class KeptTerminals:
 
     def __init__(self, path: Path = KEEPER_FILE, start=None):
         self.path = path
-        self.start_keeper = start or (lambda: detached([sys.executable, str(HERE / "keeper.py"), "serve", "--file", str(path)], path.with_name("keeper.log")))
+        self.start_keeper = start or (lambda: detached([names.program(names.KEEPER), str(HERE / "keeper.py"), "serve", "--file", str(path)], path.with_name("keeper.log")))
         # the key the board's page shows with each request; the keeper's own key never leaves this server
         self.key = secrets.token_hex(16)
         self.is_outdated = False

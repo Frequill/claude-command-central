@@ -65,6 +65,8 @@ In a folder Claude was never told to trust, Claude asks first. Its terminal then
 
 The terminals on the board, background sessions included, run in CCC's keeper (`board/keeper.py`), a small program of its own that CCC starts when it needs it. So they keep running when you close the Claude app, your terminal windows or the board's server. `ccc stop` stops only the server; the next `ccc` finds them again. `ccc stop --all` also stops the keeper, which ends them (it asks first). A restart of your Mac ends them too.
 
+In Activity Monitor the board's server shows as **Claude Command Central** and the keeper as **Claude Command Central keeper**, with the shells and background sessions under them as `zsh` and `claude`. To do this, CCC starts Python through files named after them, in `~/.claude/ccc/programs` (on a Mac, copies of Python's small starter program; a link would still show as Python).
+
 **Settings → Background sessions** lists what runs in the keeper, with Show and End for each and End everything for all. A background session that stopped without you ending it (your Mac restarted) is listed there under Stopped, to resume in the background again; Claude starts only with a message, so it goes in with one. Nothing resumes by itself. After an update of CCC, a keeper with things running in it keeps its old code until you restart it there.
 
 Every working agent and background command on the agent map has a **Stop**: click it, then click again within a few seconds, and that one ends while its session's turn goes on.

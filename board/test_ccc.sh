@@ -9,6 +9,7 @@ export CCC_SESSIONS_DIR="$WORK/sessions"
 export CCC_REMOVED_FILE="$WORK/removed.json"
 export CCC_NOTES_FILE="$WORK/notes.json"
 export CCC_KEEPER_FILE="$WORK/keeper.json"
+export CCC_PROGRAMS_DIR="$WORK/programs"
 SQUAT_PORT=18766
 PASSED=0
 FAILED=0
@@ -43,6 +44,8 @@ check "the server answers" "$(curl -fsS "http://127.0.0.1:$CCC_PORT/api/health")
 check "the window is an app window on the board" "$(grep -c -- "--app=http://127.0.0.1:$CCC_PORT/" "$WORK/open.log")" "1"
 
 "$HERE/ccc" </dev/null >/dev/null 2>&1
+SERVER_PID="$(lsof -t -nP -iTCP:"$CCC_PORT" -sTCP:LISTEN | head -1)"
+check "the server shows by its name in the process list" "$(cd "$HERE" && python3 -c 'import sys, test_keeper; print(test_keeper.shown_name(int(sys.argv[1])))' "$SERVER_PID")" "Claude Command Central"
 check "a second run reuses the running server" "$(lsof -t -nP -iTCP:"$CCC_PORT" -sTCP:LISTEN | wc -l | tr -d ' ')" "1"
 
 check "the board page is served" "$(curl -fsS -o /dev/null -w '%{http_code}' "http://127.0.0.1:$CCC_PORT/")" "200"

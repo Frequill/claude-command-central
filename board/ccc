@@ -28,7 +28,10 @@ is_port_taken() {
 
 start_server() {
   mkdir -p "$(dirname "$LOG")"
-  CCC_PORT="$PORT" nohup python3 "$SERVER" >>"$LOG" 2>&1 </dev/null &
+  # started as "Claude Command Central", so Activity Monitor shows it by that name (names.py)
+  local python
+  python="$(python3 "$BOARD_DIR/names.py" server 2>/dev/null)" || python=python3
+  CCC_PORT="$PORT" nohup "${python:-python3}" "$SERVER" >>"$LOG" 2>&1 </dev/null &
   disown
   for _ in $(seq 1 30); do
     is_up && return 0

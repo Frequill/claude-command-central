@@ -4,6 +4,8 @@ import base64
 import json
 import os
 import socket
+import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -11,6 +13,7 @@ import unittest
 from pathlib import Path
 
 import keeper
+import names
 import terminals
 
 
@@ -190,6 +193,56 @@ class KeeperTest(unittest.TestCase):
             self.assertEqual(kept.list(), [])
         finally:
             keeper.START_WAIT_S = keeper_wait
+
+
+def shown_name(pid: int) -> str:
+    """The name Activity Monitor (or a Linux system monitor) shows for a process. Not what ps shows:
+    ps reads the name the process was started with, which a link changes even where the Mac does not."""
+    if sys.platform == "darwin":
+        import ctypes
+        name = ctypes.create_string_buffer(256)
+        ctypes.CDLL("/usr/lib/libproc.dylib").proc_name(pid, name, 256)
+        return name.value.decode()
+    return Path(f"/proc/{pid}/comm").read_text().strip()
+
+
+class NamesTest(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.folder = Path(self.dir.name) / "programs"
+
+    def tearDown(self):
+        self.dir.cleanup()
+
+    def test_a_program_is_started_through_a_file_named_after_it(self):
+        started = names.program(names.KEEPER, self.folder)
+        self.assertEqual(started, str(self.folder / names.KEEPER))
+        source, is_copied = names.python_itself()
+        self.assertEqual(Path(started).read_bytes() if is_copied else os.readlink(started), Path(source).read_bytes() if is_copied else source)
+        # a Python updated since: the file follows it, and no half-made one is left behind
+        newer = Path(self.dir.name) / "newer-python"
+        newer.write_bytes(b"newer")
+        self.assertEqual(Path(names.program(names.KEEPER, self.folder, python=(str(newer), True))).read_bytes(), b"newer")
+        self.assertEqual(os.readlink(names.program(names.KEEPER, self.folder, python=(str(newer), False))), str(newer))
+        self.assertEqual(os.listdir(self.folder), [names.KEEPER])
+
+    def test_the_process_list_shows_the_name(self):
+        started = names.program(names.KEEPER, self.folder)
+        child = subprocess.Popen([started, "-I", "-c", "import json, ssl, time; time.sleep(5)"])
+        try:
+            time.sleep(0.5)
+            self.assertIsNone(child.poll())
+            self.assertEqual(shown_name(child.pid), names.KEEPER)
+        finally:
+            child.kill()
+            child.wait()
+
+    def test_with_no_link_it_is_plain_python(self):
+        self.folder.parent.chmod(0o500)
+        try:
+            self.assertEqual(names.program(names.SERVER, self.folder), sys.executable)
+        finally:
+            self.folder.parent.chmod(0o700)
 
 
 if __name__ == "__main__":
