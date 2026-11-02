@@ -2302,6 +2302,20 @@ class BackgroundTest(unittest.TestCase):
         self.assertEqual((moved, problem, (folder / "ccc" / "sessions-s3.json").exists()), (1, "", True))
         self.assertEqual(serve.delete_conversation("../x", transcripts, "", trash, claude, ())[2], "That conversation could not be found.")
 
+    def test_a_session_deleted_where_it_was_started_leaves_no_card(self):
+        projects = self.home / "projects" / "p"
+        projects.mkdir(parents=True)
+        (projects / "kept.jsonl").write_text("{}\n")
+        transcripts = serve.Transcripts(self.home / "projects")
+        sessions = [
+            {"sessionId": "kept", "endedAt": 5},
+            # deleted in the Claude app: it ended, and its conversation is gone
+            {"sessionId": "gone", "endedAt": 5},
+            # still running, its conversation not written yet: it keeps its card
+            {"sessionId": "new"},
+        ]
+        self.assertEqual([one["sessionId"] for one in serve.without_gone(sessions, transcripts)], ["kept", "new"])
+
     def test_a_deleted_conversation_is_never_shown_again(self):
         deleted = serve.Deleted(self.home / "deleted.json")
         deleted.add("s1", self.home / "Trash" / "x", 5)

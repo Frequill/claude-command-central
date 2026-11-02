@@ -2712,6 +2712,13 @@ def late_sweep(session_id: str, folder: Path):
         print(f"ccc: could not move what came late for {session_id} to the Trash: {error}", flush=True)
 
 
+def without_gone(sessions: list, transcripts) -> list:
+    """The sessions without those deleted where they were started (the Claude app, a terminal's
+    claude): ended, and with no conversation left in Claude's history, their card would be a husk.
+    One still running keeps its card, as a session that has just begun may not have written yet."""
+    return [session for session in sessions if not (isinstance(session, dict) and session.get("endedAt") is not None and transcripts.find(session.get("sessionId")) is None)]
+
+
 def without_deleted(sessions: list, deleted: dict) -> list:
     return [session for session in sessions if not (isinstance(session, dict) and session.get("sessionId") in deleted)]
 
@@ -3002,7 +3009,7 @@ class Handler(SimpleHTTPRequestHandler):
         if route == "/api/sessions":
             payload = board_payload(SESSIONS_DIR, REMOVALS, TRANSCRIPTS, APP_SESSIONS, pins=PINS)
             deleted = DELETED.load()
-            payload["sessions"] = without_deleted(payload["sessions"] + planned_cards(BACKGROUNDS, SESSIONS_DIR, int(time.time() * 1000)), deleted)
+            payload["sessions"] = without_deleted(without_gone(payload["sessions"], TRANSCRIPTS) + planned_cards(BACKGROUNDS, SESSIONS_DIR, int(time.time() * 1000)), deleted)
             payload["hidden"] = without_deleted(payload["hidden"], deleted)
             editor_apps = [{"id": editor["id"], "name": editor["name"]} for editor in editors.installed_editors()]
             now_ms = int(time.time() * 1000)
