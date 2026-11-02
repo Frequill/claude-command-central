@@ -2326,6 +2326,39 @@ class BackgroundTest(unittest.TestCase):
         terms.close = lambda terminal_id: (setattr(terms, "cards", []), original(terminal_id))[1]
         self.assertEqual(serve.stop_before_deleting(terms, "s2", sessions, wait_s=1), "")
 
+    def test_a_sessions_designs_are_found_and_their_screens_served_from_their_folder_only(self):
+        canvas = self.home / "scratch" / "canvas" / "project"
+        canvas.mkdir(parents=True)
+        (canvas / "Main.dc.html").write_text("<p>main</p>")
+        (canvas / "Sheet.dc.html").write_text("<p>sheet</p>")
+        (canvas / "canvas.json").write_text(json.dumps({"title": "Unit list options menu", "order": ["Sheet.dc.html", "Main.dc.html"], "boards": {"Main.dc.html": {"x": 470, "y": 0, "w": 390, "h": 844, "title": "1 · Header button"}}, "notes": {"row1": {"x": 0, "y": -300, "text": "One button"}}}))
+        (self.home / "secret.txt").write_text("not for pages")
+        projects = self.home / "projects" / "p"
+        projects.mkdir(parents=True)
+        use = lambda name, given: {"type": "assistant", "message": {"content": [{"type": "tool_use", "name": name, "input": given}]}}
+        (projects / "s1.jsonl").write_text("\n".join(json.dumps(line) for line in [
+            use("Write", {"file_path": str(canvas / "Main.dc.html"), "content": "<p>main</p>"}),
+            use("Artifact", {"url": "https://claude.ai/artifact/NtW2mmMfTp76", "root": str(canvas.parent), "file_path": str(canvas / "canvas.json")}),
+            use("Write", {"file_path": str(self.home / "notes.md"), "content": "not a design"}),
+        ]) + "\n")
+        transcripts = serve.Transcripts(self.home / "projects")
+        [design] = serve.session_designs(transcripts, "s1")
+        self.assertEqual((design["id"], design["title"], design["url"]), (0, "Unit list options menu", "https://claude.ai/artifact/NtW2mmMfTp76"))
+        # in the canvas's order, each where it places it; one it does not place, side by side
+        self.assertEqual([(one["file"], one["title"], one["x"]) for one in design["screens"]], [("Sheet.dc.html", "Sheet", 0), ("Main.dc.html", "1 · Header button", 470)])
+        self.assertEqual(design["notes"], [{"text": "One button", "x": 0, "y": -300}])
+        self.assertEqual(serve.design_summary([design])["screens"], 2)
+        [card] = serve.with_designs([{"sessionId": "s1"}, {"sessionId": "s2"}], transcripts)[:1]
+        self.assertEqual(card["design"]["title"], "Unit list options menu")
+        self.assertEqual(serve.design_file(transcripts, "s1", "0", "Main.dc.html"), ("text/html; charset=utf-8", b"<p>main</p>"))
+        # nothing outside the design's folder, nor a kind no page shows
+        for name in ("../../secret.txt", "..%2F..%2Fsecret.txt", "/etc/passwd", "canvas.json.bak"):
+            self.assertIsNone(serve.design_file(transcripts, "s1", "0", name), name)
+        self.assertIsNone(serve.design_file(transcripts, "s1", "1", "Main.dc.html"))
+        self.assertIsNone(serve.design_file(transcripts, "../x", "0", "Main.dc.html"))
+        # a session that made no design has none
+        self.assertEqual(serve.session_designs(transcripts, "s2"), [])
+
     def test_a_background_claudes_mode_is_read_off_its_own_screen(self):
         line = lambda words: f"\x1b[2K\x1b[38;5;2m⏵⏵ {words}\x1b[39m (shift+tab to cycle)\r\n".encode()
         self.assertEqual(serve.screen_mode(line("auto mode on")), "auto")

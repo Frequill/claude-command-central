@@ -7,6 +7,7 @@
 
 import * as L from './board-logic.js'
 import * as C from './chat-logic.js'
+import { designTab } from './design.js'
 import { blocks } from './markdown.js'
 
 const REFRESH_MS = 1500
@@ -82,6 +83,7 @@ export function dropChat(sessionId) {
   if (!chat) return
   clearInterval(chat.timer)
   for (const image of chat.images) URL.revokeObjectURL(image.url)
+  chat.design?.stop()
   chats.delete(sessionId)
 }
 
@@ -97,6 +99,11 @@ export function updateChat() {
 
 function update(chat) {
   const session = context.sessionOf(chat.id)
+  // its design changed while it is shown: seen, and drawn again
+  if (chat.isDesignShown && session?.design) {
+    chat.design?.show(session.design)
+    markDesignSeen(chat.id, session.design.at)
+  }
   drawHead(chat, session)
   drawLost(chat)
   drawLive(chat, session)
@@ -165,9 +172,11 @@ function buildCard(sessionId) {
   // shown while the session is stopped because CCC's keeper crashed
   const restart = el('button', { type: 'button', class: 'primary', title: 'Starts it again in the background, where it left off' }, 'Restart')
   const lostBar = el('div', { class: 'chat-lost', role: 'status', hidden: true }, el('span', { class: 'chat-lost-text' }, 'CCC\u2019s keeper crashed, and this session stopped with it. Its conversation is saved.'), restart)
-  const body = el('div', { class: 'chat-body' }, el('div', { class: 'chat-main' }, scroll, form), side)
+  // the screens of a design Claude makes, in place of the chat while the person looks at them
+  const designPane = el('div', { class: 'chat-design', hidden: true, 'aria-label': 'Design' })
+  const body = el('div', { class: 'chat-body' }, el('div', { class: 'chat-main' }, scroll, form), side, designPane)
   const root = el('article', { class: `glass tile expanded-tile${context.isSideHidden(sessionId) ? ' side-hidden' : ''}`, 'data-session': sessionId, 'data-ghost': 'light' }, head, lostBar, body, el('span', { class: 'grip grip-x', 'data-axis': 'x', 'aria-hidden': 'true' }), el('span', { class: 'grip grip-y', 'data-axis': 'y', 'aria-hidden': 'true' }), el('span', { class: 'grip', 'aria-hidden': 'true' }), el('span', { class: 'grip grip-bl', 'data-axis': 'corner-bl', 'aria-hidden': 'true' }), el('span', { class: 'grip grip-tr', 'data-axis': 'corner-tr', 'aria-hidden': 'true' }), el('span', { class: 'grip grip-tl', 'data-axis': 'corner-tl', 'aria-hidden': 'true' }))
-  const chat = { id: sessionId, root, head, lostBar, log, live, dock, scroll, thumbs, text, queue, send, stop, note, side, form, menu, emojiPicker: emojiPanel, suggestKey, suggestion: '', slash: { list: null, at: 0, shown: [], index: 0 }, mention: { shown: [], index: 0, asked: 0, timer: 0 }, menuFor: '', images: [], files: [], items: [], signature: '', timer: 0, isSending: false, isFollowing: true, canSend: false, problem: '', openSteps: new Set(), openGroups: new Set(), openPrompts: new Set(), steps: new Map(), drafts: new Map(), approvals: new Map() }
+  const chat = { id: sessionId, root, head, lostBar, designPane, design: null, isDesignShown: false, log, live, dock, scroll, thumbs, text, queue, send, stop, note, side, form, menu, emojiPicker: emojiPanel, suggestKey, suggestion: '', slash: { list: null, at: 0, shown: [], index: 0 }, mention: { shown: [], index: 0, asked: 0, timer: 0 }, menuFor: '', images: [], files: [], items: [], signature: '', timer: 0, isSending: false, isFollowing: true, canSend: false, problem: '', openSteps: new Set(), openGroups: new Set(), openPrompts: new Set(), steps: new Map(), drafts: new Map(), approvals: new Map() }
 
   // hovering the panel leaves the wheel to the page; a click in it lets the wheel scroll the panel,
   // until a click somewhere else or Esc
@@ -815,7 +824,9 @@ function drawHead(chat, session) {
   const link = L.openLink(session)
   const facts = C.sessionSetup(session, background)
   const caveman = context.cavemanOf?.(id) ?? { level: 'off', isOwn: false }
-  const signature = JSON.stringify([title, state, source?.label, link?.href, session?.folder, session?.branch, context.colorOf(id), facts, caveman, background?.id, background?.hidden])
+  const design = session?.design ?? null
+  const isNewDesign = Boolean(design) && !chat.isDesignShown && design.at > designSeenAt(id)
+  const signature = JSON.stringify([title, state, source?.label, link?.href, session?.folder, session?.branch, context.colorOf(id), facts, caveman, background?.id, background?.hidden, design?.at, chat.isDesignShown, isNewDesign])
   if (signature === chat.headSignature) return
   chat.headSignature = signature
   const close = el('button', { type: 'button', class: 'chat-close chat-remove', 'aria-label': `Close ${title}`, title: 'Close it, or close and delete the conversation' }, icon('M4 4l8 8M12 4l-8 8'))
@@ -869,6 +880,22 @@ function drawHead(chat, session) {
     screen.disabled = true
     context.onShowTerminal(background.id, Boolean(isShown))
   })
+  // Claude made a design in this session: the card can show its screens instead of the chat
+  const designButton = design
+    ? el(
+        'button',
+        {
+          type: 'button',
+          class: `design-toggle${isNewDesign ? ' is-new' : ''}`,
+          'aria-pressed': String(chat.isDesignShown),
+          title: chat.isDesignShown ? 'Back to the chat' : `Claude is designing: ${design.title}. Show its ${design.screens} screen${design.screens === 1 ? '' : 's'} here`,
+        },
+        icon('M8 2.5a5.5 5.5 0 1 0 0 11c.9 0 1.2-.6 1.2-1.1 0-.8-.6-1-.6-1.7 0-.6.5-1 1.1-1h1.3a2.5 2.5 0 0 0 2.5-2.5C13.5 4.6 11 2.5 8 2.5zM5 7.5h.01M6.5 5h.01M9.5 5h.01'),
+        el('span', {}, chat.isDesignShown ? 'Chat' : 'Design'),
+        isNewDesign ? el('span', { class: 'design-dot', 'aria-label': 'new screens' }) : null,
+      )
+    : null
+  designButton?.addEventListener('click', () => toggleDesign(chat))
   const parts = [
     el('span', { class: 'dot', style: `background:${context.colorOf(id)}`, 'aria-hidden': 'true' }),
     el('span', { class: 'chat-title' }, title),
@@ -877,6 +904,7 @@ function drawHead(chat, session) {
     el('span', { class: `pill ${state === 'working' ? 'pill-work live' : state === 'needs-you' ? 'pill-wait' : 'pill-done'}` }, L.STATE_LABEL[state] ?? state),
     link ? el('a', { class: 'open-link', href: link.href, title: link.about }, 'Open', icon('M9 2h5v5M14 2 7 9', 11)) : null,
     setup,
+    designButton,
     screen,
     rock,
     panel,
@@ -885,6 +913,48 @@ function drawHead(chat, session) {
   chat.head.replaceChildren(...parts.filter(Boolean))
   if (chat.isSetupOpen) drawSetup(chat, session)
   chat.root.setAttribute('aria-label', `Chat: ${title}`)
+}
+
+// ---------- the design tab ----------
+
+/** Swaps the card between its chat and the screens of the design Claude makes in the session. */
+function toggleDesign(chat) {
+  const session = context.sessionOf(chat.id)
+  chat.isDesignShown = !chat.isDesignShown && Boolean(session?.design)
+  chat.root.classList.toggle('shows-design', chat.isDesignShown)
+  chat.designPane.hidden = !chat.isDesignShown
+  if (chat.isDesignShown) {
+    chat.design ??= designTab(chat.designPane, chat.id, { onBack: () => toggleDesign(chat) })
+    chat.design.show(session.design)
+    markDesignSeen(chat.id, session.design.at)
+  }
+  chat.headSignature = ''
+  drawHead(chat, session)
+}
+
+// when the person last looked at each session's design, kept across reloads: newer screens are marked
+const DESIGN_SEEN_KEY = 'ccc.designSeen'
+
+function designSeen() {
+  try {
+    return JSON.parse(localStorage.getItem(DESIGN_SEEN_KEY) ?? '{}') ?? {}
+  } catch {
+    return {}
+  }
+}
+
+function designSeenAt(sessionId) {
+  const at = designSeen()[sessionId]
+  return Number.isFinite(at) ? at : 0
+}
+
+function markDesignSeen(sessionId, at) {
+  if (!Number.isFinite(at) || designSeenAt(sessionId) >= at) return
+  try {
+    localStorage.setItem(DESIGN_SEEN_KEY, JSON.stringify({ ...designSeen(), [sessionId]: at }))
+  } catch {
+    // a browser that keeps nothing: the mark comes back after a reload
+  }
 }
 
 // ---------- the history ----------

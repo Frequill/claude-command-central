@@ -242,6 +242,33 @@ export function sessionSetup(session, terminal = null) {
   }
 }
 
+/**
+ * A design's canvas as the Design tab lays it out: its screens and row titles moved so the canvas
+ * starts at 0, with room above each row for the screens' titles. In the canvas's own units.
+ */
+export function designLayout(design, labelRoom = 60) {
+  const screens = Array.isArray(design?.screens) ? design.screens : []
+  const notes = Array.isArray(design?.notes) ? design.notes : []
+  if (screens.length === 0) return { w: 1, h: 1, screens: [], notes: [] }
+  const xs = [...screens.map(one => one.x), ...notes.map(one => one.x)]
+  const ys = [...screens.map(one => one.y), ...notes.map(one => one.y)]
+  const left = Math.min(...xs)
+  const top = Math.min(...ys) - labelRoom
+  const right = Math.max(...screens.map(one => one.x + one.w))
+  const bottom = Math.max(...screens.map(one => one.y + one.h))
+  return {
+    w: right - left,
+    h: bottom - top,
+    screens: screens.map(one => ({ ...one, x: one.x - left, y: one.y - top })),
+    notes: notes.map(one => ({ ...one, x: one.x - left, y: one.y - top })),
+  }
+}
+
+/** How much smaller the canvas is drawn to fit the room the card gives it; never larger than itself. */
+export function designScale(layout, room, margin = 16) {
+  return Math.max(0.01, Math.min(1, (room.w - margin) / layout.w, (room.h - margin) / layout.h))
+}
+
 /** The modes a session in CCC's background can be switched to, named as Claude's own mode line names them. */
 export const MODE_CHOICES = [
   { id: 'manual', label: 'manual' },

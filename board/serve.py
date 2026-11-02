@@ -154,7 +154,8 @@ BOARD_FILES = {"/": "index.html", "/index.html": "index.html", "/board.css": "bo
                "/markdown.js": "markdown.js", "/placement.js": "placement.js",
                "/eva-logo.png": "eva-logo.png",
                "/terminal.js": "terminal.js", "/xterm.js": "xterm.js", "/xterm.css": "xterm.css", "/xterm-fit.js": "xterm-fit.js",
-               "/grid.js": "grid.js", "/gridstack.js": "gridstack.js", "/gridstack.css": "gridstack.css"}
+               "/grid.js": "grid.js", "/gridstack.js": "gridstack.js", "/gridstack.css": "gridstack.css",
+               "/design.js": "design.js"}
 
 
 def board_version(board_dir: Path = BOARD_DIR) -> str:
@@ -473,6 +474,31 @@ class Transcripts:
         self.paths = {}
         self.cache = {}
         self.tasks = {}
+        self.designs_seen = {}
+
+    def designs(self, session_id: str) -> dict:
+        """The folders a session made designs in (Claude Design), each with its canvas's link when
+        Claude published it: read once from the start, then only what was added since."""
+        path = self.find(session_id) if isinstance(session_id, str) and SAFE_ID.match(session_id) else None
+        if path is None:
+            return {}
+        try:
+            size = path.stat().st_size
+        except OSError:
+            return {}
+        offset, found = self.designs_seen.get(session_id, (0, {}))
+        if size < offset:
+            offset, found = 0, {}
+        if size > offset:
+            start = max(offset, size - WHOLE_FILE_LIMIT)
+            chunk = read_bytes(path, start, size - start)
+            end = chunk.rfind(b"\n") + 1
+            if end > 0:
+                for folder, url in designs_in(chunk[:end].decode("utf-8", errors="replace")).items():
+                    found = {**found, folder: url or found.get(folder)}
+                offset = start + end
+        self.designs_seen[session_id] = (offset, found)
+        return found
 
     def describe(self, session_id: str) -> dict:
         if not isinstance(session_id, str) or not SAFE_ID.match(session_id):
@@ -548,6 +574,127 @@ def last_mode_before(path: Path, end: int):
             return modes[-1]
         end = start
     return None
+
+
+# ---------- designs (Claude Design) ----------
+
+# a design's canvas, as Claude writes it: its layout (canvas.json) and a page per screen (<name>.dc.html)
+DESIGN_FILE = re.compile(r"(?:\.dc\.html|/canvas\.json)$")
+CANVAS_URL = re.compile(r"^https://claude\.ai/artifact/[A-Za-z0-9_-]{6,64}$")
+# what a design's folder may hand the board's page, and how big
+DESIGN_TYPES = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8", ".json": "application/json", ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp", ".svg": "image/svg+xml", ".woff": "font/woff", ".woff2": "font/woff2"}
+DESIGN_FILE_MAX = 32 * 1024 * 1024
+# a screen with no size of its own in canvas.json is drawn this big, side by side
+DESIGN_BOARD = (390, 844)
+DESIGN_GAP = 80
+
+
+def designs_in(text: str) -> dict:
+    """The design folders the transcript's lines show Claude writing in, each with the canvas link of
+    the Artifact it published from there, if it did (None when not yet)."""
+    found = {}
+    for line in text.splitlines():
+        if ".dc.html" not in line and "canvas.json" not in line:
+            continue
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        content = (record.get("message") or {}).get("content") if isinstance(record, dict) else None
+        for item in content if isinstance(content, list) else []:
+            given = item.get("input") if isinstance(item, dict) and item.get("type") == "tool_use" else None
+            path = given.get("file_path") if isinstance(given, dict) else None
+            if not isinstance(path, str) or not path.startswith("/") or not DESIGN_FILE.search(path):
+                continue
+            folder = str(Path(path).parent)
+            url = given.get("url")
+            found[folder] = url if item.get("name") == "Artifact" and isinstance(url, str) and CANVAS_URL.match(url) else found.get(folder)
+    return found
+
+
+def design_view(folder: str, url) -> dict:
+    """A design as the board draws it: its title, its screens where the canvas places them (canvas.json),
+    its row titles, and when a screen last changed. With no canvas.json, its screens side by side."""
+    place = Path(folder)
+    try:
+        canvas = json.loads((place / "canvas.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        canvas = {}
+    canvas = canvas if isinstance(canvas, dict) else {}
+    boards = canvas.get("boards") if isinstance(canvas.get("boards"), dict) else {}
+    order = [name for name in canvas.get("order", []) if isinstance(name, str)] if isinstance(canvas.get("order"), list) else []
+    try:
+        pages = sorted(path.name for path in place.glob("*.dc.html"))
+    except OSError:
+        pages = []
+    names = [name for name in order if name in pages] + [name for name in pages if name not in order]
+    screens = []
+    for index, name in enumerate(names):
+        board = boards.get(name) if isinstance(boards.get(name), dict) else {}
+        number = lambda key, default: board[key] if isinstance(board.get(key), (int, float)) and not isinstance(board.get(key), bool) else default
+        try:
+            at = int((place / name).stat().st_mtime * 1000)
+        except OSError:
+            continue
+        w, h = number("w", DESIGN_BOARD[0]), number("h", DESIGN_BOARD[1])
+        screens.append({"file": name, "title": str(board.get("title") or name[: -len(".dc.html")])[:200], "x": number("x", index * (DESIGN_BOARD[0] + DESIGN_GAP)), "y": number("y", 0), "w": w, "h": h, "at": at})
+    notes = []
+    for note in (canvas.get("notes") or {}).values() if isinstance(canvas.get("notes"), dict) else []:
+        if isinstance(note, dict) and isinstance(note.get("text"), str) and isinstance(note.get("x"), (int, float)) and isinstance(note.get("y"), (int, float)):
+            notes.append({"text": note["text"][:300], "x": note["x"], "y": note["y"]})
+    title = canvas.get("title") if isinstance(canvas.get("title"), str) else place.parent.name
+    return {"title": title[:200], "url": url, "screens": screens, "notes": notes, "at": max((one["at"] for one in screens), default=0)}
+
+
+def design_folders(transcripts, session_id: str) -> list:
+    """(folder, canvas link) of each of a session's design folders still on disk; a folder's place
+    in this list is its number in the Design tab's addresses (/design/<session>/<number>/...)."""
+    return [(folder, url) for folder, url in transcripts.designs(session_id).items() if os.path.isdir(folder)]
+
+
+def session_designs(transcripts, session_id: str) -> list:
+    """The designs of a session with screens on disk, each with its number."""
+    views = [{**design_view(folder, url), "id": number} for number, (folder, url) in enumerate(design_folders(transcripts, session_id))]
+    return [view for view in views if view["screens"]]
+
+
+def design_summary(designs: list):
+    """What a card needs to know of a session's designs: how many screens, when one last changed,
+    the newest design's title and canvas link. None with no design."""
+    if not designs:
+        return None
+    newest = max(designs, key=lambda view: view["at"])
+    return {"title": newest["title"], "url": newest["url"], "screens": sum(len(view["screens"]) for view in designs), "at": newest["at"]}
+
+
+def with_designs(sessions: list, transcripts) -> list:
+    """Each session that made designs, with what its card shows of them (design_summary)."""
+    marked = []
+    for session in sessions:
+        summary = design_summary(session_designs(transcripts, session.get("sessionId"))) if isinstance(session, dict) else None
+        marked.append({**session, "design": summary} if summary else session)
+    return marked
+
+
+def design_file(transcripts, session_id: str, index: str, name: str):
+    """(content type, bytes) of a file of one of a session's design folders, for the board's Design
+    tab, or None. Only a kind a page shows, and only from inside that folder."""
+    if not isinstance(session_id, str) or not SAFE_ID.match(session_id) or not index.isdigit():
+        return None
+    folders = design_folders(transcripts, session_id)
+    if int(index) >= len(folders):
+        return None
+    folder = os.path.realpath(folders[int(index)][0])
+    target = os.path.realpath(os.path.join(folder, unquote(name)))
+    media = DESIGN_TYPES.get(os.path.splitext(target)[1].lower())
+    if media is None or os.path.commonpath([folder, target]) != folder or not os.path.isfile(target):
+        return None
+    try:
+        if os.path.getsize(target) > DESIGN_FILE_MAX:
+            return None
+        return media, Path(target).read_bytes()
+    except OSError:
+        return None
 
 
 def read_tail(path: Path, size: int, length: int) -> str:
@@ -2860,7 +3007,7 @@ class Handler(SimpleHTTPRequestHandler):
             editor_apps = [{"id": editor["id"], "name": editor["name"]} for editor in editors.installed_editors()]
             now_ms = int(time.time() * 1000)
             cards = with_screen_modes(TERMINALS, named_backgrounds(reveal_waiting(TERMINALS, TERMINALS.list(), SESSIONS_DIR, now_ms), TRANSCRIPTS, REMOVALS.load()))
-            payload["sessions"] = with_screen_boxes(payload["sessions"], cards, now_ms, SCREEN_BOXES)
+            payload["sessions"] = with_designs(with_screen_boxes(payload["sessions"], cards, now_ms, SCREEN_BOXES), TRANSCRIPTS)
             lost, seen = KEEPER_WATCH.look(TERMINALS.keeper_id, cards, now_ms)
             stopped = stopped_backgrounds(BACKGROUNDS, cards, SESSIONS_DIR, TRANSCRIPTS, now_ms, lost)
             lost_now = [one["sessionId"] for one in stopped if one["sessionId"] in lost]
@@ -2875,6 +3022,19 @@ class Handler(SimpleHTTPRequestHandler):
             if not has_terminal_key(self.headers, TERMINALS.key):
                 return self.send_error(403)
             return self.send_stream(TERMINALS.frames())
+        if route == "/api/design":
+            session_id = parse_qs(urlsplit(self.path).query).get("session", [""])[0]
+            if not SAFE_ID.match(session_id):
+                return self.send_error(400)
+            return self.send_json({"designs": session_designs(TRANSCRIPTS, session_id)})
+        if route.startswith("/design/"):
+            # a design's own pages, run walled off from the board: the browser gives them an origin
+            # of their own, so they reach neither the board's page nor its server's answers
+            parts = route.split("/", 4)
+            found = design_file(TRANSCRIPTS, parts[2], parts[3], parts[4]) if len(parts) == 5 else None
+            if found is None:
+                return self.send_error(404)
+            return self.send_design(*found)
         if route == "/api/existing":
             shown = board_payload(SESSIONS_DIR, REMOVALS, TRANSCRIPTS, APP_SESSIONS, pins=PINS)["sessions"]
             on_board = {session.get("sessionId") for session in shown}
@@ -3135,6 +3295,15 @@ class Handler(SimpleHTTPRequestHandler):
     def end_headers(self):
         self.send_header("Cache-Control", "no-store")
         super().end_headers()
+
+    def send_design(self, media_type: str, content: bytes):
+        self.send_response(200)
+        self.send_header("Content-Type", media_type)
+        self.send_header("Content-Length", str(len(content)))
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Content-Security-Policy", "sandbox allow-scripts")
+        self.end_headers()
+        self.wfile.write(content)
 
     def send_picture(self, media_type: str, content: bytes):
         self.send_response(200)

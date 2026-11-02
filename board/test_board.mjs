@@ -1147,6 +1147,12 @@ test('the session settings mark what the session runs now', () => {
   assert.equal(C.sessionSetup({ stats: { mode: 'plan' } }, { mode: 'acceptEdits' }).mode, 'acceptEdits')
   assert.equal(C.sessionSetup({ permissionMode: 'default' }).mode, 'manual')
   assert.deepEqual(C.MODE_CHOICES.map(one => one.id), ['manual', 'acceptEdits', 'plan', 'auto'])
+  // a design's canvas, moved to start at 0 with room for titles, and scaled to fit a card, never up
+  const layout = C.designLayout({ screens: [{ file: 'a', x: 0, y: 0, w: 390, h: 844 }, { file: 'b', x: 470, y: 1224, w: 390, h: 844 }], notes: [{ text: 'Row', x: 0, y: -300 }] })
+  assert.deepEqual([layout.w, layout.h, layout.screens[0].y, layout.notes[0].y], [860, 2428, 360, 60])
+  assert.equal(C.designScale(layout, { w: 446, h: 2444 }), 0.5)
+  assert.equal(C.designScale({ w: 100, h: 100 }, { w: 2000, h: 2000 }), 1)
+  assert.deepEqual(C.designLayout({ screens: [] }).screens, [])
   // a box seen only on a background Claude's screen needs the person, in auto mode too
   const onScreen = { sessionId: 's1', permissionMode: 'auto', updatedAt: 1000, turn: { isRunning: true, startedAt: 1, waiting: { kind: 'approval', since: 5, isShown: true, onScreen: true } } }
   assert.equal(L.sessionState(onScreen, 1000), 'needs-you')
