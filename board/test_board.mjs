@@ -594,10 +594,23 @@ test('a session can be started once a folder is picked, in the app unless the Te
   // nothing picked yet: in the background, the way a first message goes in without leaving CCC
   assert.equal(L.startState({ folder: '/x', where: 'nowhere' }).where, 'background')
   assert.equal(L.startState({ folder: '/x' }).where, 'background')
-  // in the background Claude starts only with a message: Start waits for one; a new shell needs none
-  assert.equal(L.startState({ folder: '/x', where: 'background', prompt: '  ' }).canStart, false)
-  assert.equal(L.startState({ folder: '/x', where: 'background', prompt: '  ' }).needsPrompt, true)
-  assert.equal(L.startState({ folder: '/x', where: 'background', prompt: 'Fix it' }).canStart, true)
+  // Close: a session in the background stops; one running elsewhere goes on there; the conversation stays
+  assert.match(L.closeNote({ sessionId: 's1' }, true), /^Claude stops in the background\. The conversation stays/)
+  assert.match(L.closeNote({ sessionId: 's1' }), /goes on where it was started/)
+  assert.match(L.closeNote({ sessionId: 's1', endedAt: 5 }), /^The conversation stays in Claude.s history/)
+  // a conversation is deleted from Claude only once Claude no longer runs it (CCC's background ends it first)
+  assert.equal(L.deleteProblem({ sessionId: 's1', endedAt: 5 }), '')
+  assert.equal(L.deleteProblem({ sessionId: 's1' }, true), '')
+  assert.match(L.deleteProblem({ sessionId: 's1' }), /Close it there first/)
+  // in the background its card comes first, and the first message is written there
+  assert.equal(L.startState({ folder: '/x', where: 'background', prompt: '' }).canStart, true)
+  assert.match(L.startState({ folder: '/x', where: 'background' }).note, /card comes onto the board now/)
+  // a session made on the board for its first message: new, and sending starts it
+  const planned = { sessionId: 's1', planned: true, takesMessages: true, updatedAt: 0 }
+  assert.equal(L.sessionState(planned, 99_999_999), 'new')
+  assert.equal(L.sessionState({ ...planned, begun: true, updatedAt: 99_999_999 }, 99_999_999), 'done')
+  assert.equal(C.composeState(planned).resumeHere, true)
+  assert.equal(C.composeState({ ...planned, begun: true }).resumeHere, undefined)
   assert.equal(L.startState({ folder: '/x', where: 'background', mode: 'terminal' }).canStart, true)
   assert.equal(L.startState({ folder: '/x', where: 'app' }).canStart, true)
   assert.match(L.startState({ folder: '/x', where: 'terminal' }).note, /Terminal/)
@@ -915,12 +928,9 @@ test('a long message goes; one over the server limit says how long it is', () =>
 })
 
 test('only real images of a fair size go with a message', () => {
-  assert.equal(C.imageProblem({ type: 'image/png', size: 2000 }, 0), '')
-  assert.match(C.imageProblem({ type: 'image/svg+xml', size: 2000 }, 0), /PNG/)
-  assert.match(C.imageProblem({ type: 'image/png', size: 11 * 1024 * 1024 }, 0), /10 MB/)
-  assert.match(C.imageProblem({ type: 'image/png', size: 0 }, 0), /10 MB/)
-  assert.match(C.imageProblem({ type: 'image/png', size: 10 }, C.MAX_IMAGES), /At most/)
-  assert.match(C.imageProblem(undefined, 0), /PNG/)
+  // only real image types go as images; an SVG goes as a file
+  assert.equal(C.isImage({ type: 'image/png', size: 2000 }), true)
+  assert.equal(C.isImage({ type: 'image/svg+xml', size: 2000 }), false)
 })
 
 test('a code block can hold a shorter fence of its own, and keeps its language', () => {
@@ -1105,10 +1115,11 @@ test('a long prompt is cut down with Show more, as in the app', () => {
 test('any file goes along: images as images, the rest as files of at most 20 MB', () => {
   assert.equal(C.isImage({ type: 'image/png' }), true)
   assert.equal(C.isImage({ type: 'text/plain' }), false)
-  assert.equal(C.fileProblem({ size: 1000 }, 0), '')
-  assert.match(C.fileProblem({ size: 0 }, 0), /empty/)
-  assert.match(C.fileProblem({ size: 21 * 1024 * 1024 }, 0), /20 MB/)
-  assert.match(C.fileProblem({ size: 10 }, C.MAX_FILES), /At most 10 files/)
+  assert.equal(C.fileProblem({ size: 1000 }), '')
+  assert.match(C.fileProblem({ size: 0 }), /empty/)
+  assert.match(C.fileProblem(undefined), /empty/)
+  // CCC sets no limit of its own on size: a 3 GB video goes as the Claude app sends it
+  assert.equal(C.fileProblem({ size: 3 * 1024 ** 3 }), '')
   assert.equal(C.fileSize(820), '820 B')
   assert.equal(C.fileSize(14 * 1024), '14 KB')
   assert.equal(C.fileSize(3.2 * 1024 * 1024), '3.2 MB')
@@ -1132,6 +1143,14 @@ test('the session settings mark what the session runs now', () => {
   assert.deepEqual(C.sessionSetup(undefined), { modelId: '', effort: '', mode: '' })
   assert.equal(C.sessionSetup({ stats: {}, permissionMode: 'auto' }).mode, 'auto')
   assert.equal(C.sessionSetup({ stats: { mode: 'plan' }, permissionMode: 'auto' }).mode, 'plan')
+  // in CCC's background its own screen says the mode; Claude's default mode is named manual
+  assert.equal(C.sessionSetup({ stats: { mode: 'plan' } }, { mode: 'acceptEdits' }).mode, 'acceptEdits')
+  assert.equal(C.sessionSetup({ permissionMode: 'default' }).mode, 'manual')
+  assert.deepEqual(C.MODE_CHOICES.map(one => one.id), ['manual', 'acceptEdits', 'plan', 'auto'])
+  // a box seen only on a background Claude's screen needs the person, in auto mode too
+  const onScreen = { sessionId: 's1', permissionMode: 'auto', updatedAt: 1000, turn: { isRunning: true, startedAt: 1, waiting: { kind: 'approval', since: 5, isShown: true, onScreen: true } } }
+  assert.equal(L.sessionState(onScreen, 1000), 'needs-you')
+  assert.equal(C.approvalView(onScreen.turn.waiting).title, 'Claude asks you something in its terminal')
   assert.equal(C.sameChoice('opus', 'claude-opus-5-5'), true)
   assert.equal(C.sameChoice('opus[1m]', 'claude-opus-5-5'), false)
   assert.equal(C.sameChoice('opus[1m]', 'claude-opus-5-5[1m]'), true)
@@ -1141,12 +1160,6 @@ test('the session settings mark what the session runs now', () => {
   assert.deepEqual(C.modelChoices(['opus', 5]), ['opus'])
 })
 
-test('a context is cleared only in a session that runs the new CCC and is running', () => {
-  assert.equal(L.endProblem({ takesMessages: true }), '')
-  assert.match(L.endProblem({ takesMessages: false }), /older CCC/)
-  assert.match(L.endProblem({ takesMessages: true, endedAt: 5 }), /not running/)
-  assert.match(L.endProblem(undefined), /no longer/)
-})
 
 test('the history of conversations is searched by name and folder, and says how long ago', () => {
   const list = [{ title: 'Fix the login bug', folder: '/Users/me/blog' }, { title: 'Theme work', folder: '/Users/me/ccc' }]
@@ -1655,6 +1668,14 @@ test("Settings lists what runs in CCC's keeper: background sessions first, then 
   assert.match(L.keeperLine({ running: true }, rows.slice(2)), /running: 1 shell\./)
   assert.match(L.keeperLine({ running: true }, []), /nothing in it/)
   assert.match(L.keeperLine({ running: false }, []), /not running/)
+  // the keeper went away with sessions in it: the message names those still stopped, once
+  const stopped = [1, 2, 3, 4].map(n => ({ sessionId: `s${n}`, title: `Task ${n}` }))
+  assert.deepEqual(L.lostSessions({ lost: ['s1', 's3', 's9'] }, stopped).map(one => one.sessionId), ['s1', 's3'])
+  assert.deepEqual(L.lostSessions({ running: true }, stopped), [])
+  assert.deepEqual(L.lostToTell({ lost: ['s1', 's3'], lostSeen: ['s1'] }, stopped).map(one => one.sessionId), ['s3'])
+  assert.equal(L.lostLine([{ title: 'Say hi.' }]), 'A background session stopped with it: \u201cSay hi\u201d. Its conversation is saved.')
+  assert.match(L.lostLine([{ title: 'x'.repeat(80) }]), /x{57}\u2026\u201d/)
+  assert.match(L.lostLine(stopped), /^4 background sessions stopped with it: \u201cTask 1\u201d, \u201cTask 2\u201d and 2 more\./)
   assert.deepEqual(L.runningRows(undefined), [])
   // its card closed from CCC, it runs on: named after its conversation, to show again
   const closed = L.runningRows([{ id: 't5', folder: '/x', kind: 'claude', sessionId: 's5', title: 'Write the docs', closed: true }])[0]

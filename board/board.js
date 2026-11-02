@@ -1,8 +1,8 @@
 import * as L from './board-logic.js'
 import { startDecor } from './decor.js'
 import { welcome } from './arrivals.js'
-import { chatCard, dropChat, focusChat, redrawChats, sendText, sentChoices, setupChat, updateChat } from './chat.js'
-import { cavemanOf } from './chat-logic.js'
+import { chatCard, dropChat, focusChat, redrawChats, sendText, sentChoices, setupChat, updateChat, uploadFiles } from './chat.js'
+import { cavemanOf, fileProblem, fileSize, isImage } from './chat-logic.js'
 import { carryAway } from './dragon.js'
 import { jelly, loadLayout, makeResizable, makeSortable, saveLayout, watchWindowMoves } from './layout.js'
 import { setupNotes } from './notes.js'
@@ -455,7 +455,7 @@ const TYPING_MS = 4000
 function setupStart() {
   const dialog = document.querySelector('#start-dialog')
   const prompt = document.querySelector('#start-prompt')
-  view.start = { folder: '', folders: [], where: L.startState({ where: readStored(START_PLACE_KEY) }).where, isStarting: false, didStart: false, mode: 'new', existing: null, search: '' }
+  view.start = { folder: '', folders: [], where: L.startState({ where: readStored(START_PLACE_KEY) }).where, isStarting: false, didStart: false, mode: 'new', existing: null, search: '', files: [] }
   document.querySelector('#start-mode').addEventListener('click', event => {
     const button = event.target.closest('[data-mode]')
     if (!button) return
@@ -476,6 +476,7 @@ function setupStart() {
     view.start.didStart = false
     document.querySelector('#start-problem').textContent = ''
     prompt.value = ''
+    view.start.files = []
     dialog.showModal()
     drawStart()
     try {
@@ -520,11 +521,83 @@ function setupStart() {
   perm.addEventListener('change', () => writeStored(START_MODE_KEY, perm.value))
   document.querySelector('#start-go').addEventListener('click', () => startSession(dialog))
   document.querySelector('#start-background-info').addEventListener('click', explainBackground)
-  // in the background the first message is needed: Start waits for one
   prompt.addEventListener('input', () => drawStart())
   prompt.addEventListener('keydown', event => {
     if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) startSession(dialog)
   })
+  // images, videos and any other file go with the first message, picked, pasted or dropped
+  const picker = document.querySelector('#start-file-input')
+  document.querySelector('#start-attach').addEventListener('click', () => picker.click())
+  picker.addEventListener('change', () => {
+    addStartFiles([...picker.files])
+    picker.value = ''
+  })
+  prompt.addEventListener('paste', event => {
+    const files = [...(event.clipboardData?.items ?? [])].filter(item => item.kind === 'file').map(item => item.getAsFile()).filter(Boolean)
+    if (files.length === 0) return
+    event.preventDefault()
+    addStartFiles(files)
+  })
+  const first = document.querySelector('#start-first')
+  first.addEventListener('dragover', event => {
+    if (![...(event.dataTransfer?.types ?? [])].includes('Files')) return
+    event.preventDefault()
+    first.classList.add('is-dropping')
+  })
+  first.addEventListener('dragleave', () => first.classList.remove('is-dropping'))
+  first.addEventListener('drop', event => {
+    first.classList.remove('is-dropping')
+    if (!event.dataTransfer?.files?.length) return
+    event.preventDefault()
+    addStartFiles([...event.dataTransfer.files])
+  })
+}
+
+/** Files for the first message, kept as they are until Start sends them. */
+function addStartFiles(files) {
+  const problems = []
+  for (const file of files) {
+    const problem = fileProblem(file)
+    if (problem) problems.push(`${file.name || 'A file'}: ${problem}`)
+    else view.start.files.push({ file, name: file.name || 'file', isImage: isImage(file) })
+  }
+  document.querySelector('#start-problem').textContent = problems.join(' ')
+  drawStartFiles()
+}
+
+function drawStartFiles() {
+  const files = view.start.files
+  document.querySelector('#start-files').replaceChildren(
+    ...files.map((one, index) => {
+      const remove = el('button', { type: 'button', class: 'start-file-remove', 'aria-label': `Remove ${one.name}` }, '\u00d7')
+      remove.addEventListener('click', () => {
+        files.splice(index, 1)
+        drawStartFiles()
+      })
+      return el('span', { class: 'start-file', title: one.name }, el('span', { class: 'start-file-name' }, one.name), el('span', { class: 'start-file-size' }, fileSize(one.file.size)), remove)
+    }),
+  )
+}
+
+/**
+ * Sends the first message's files ahead, as the chat does, under a name of their own: the session's
+ * id is not known before it starts. What the start request names them by, or what went wrong.
+ */
+async function sendStartFiles() {
+  const files = view.start.files
+  if (files.length === 0) return {}
+  const owner = `new-${crypto.randomUUID()}`
+  document.querySelector('#start-problem').textContent = 'Sending the files\u2026'
+  const sent = await uploadFiles(owner, files.filter(one => one.isImage), files.filter(one => !one.isImage))
+  document.querySelector('#start-problem').textContent = ''
+  return sent.problem ? { problem: sent.problem } : { uploadSession: owner, images: sent.images, files: sent.files }
+}
+
+/** A card made for a background session's first message, closed before it was sent. */
+async function forgetPlanned(sessionId) {
+  view.tiles.get(sessionId)?.node.classList.add('leaving')
+  await fetch('/api/background/forget', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-CCC-Action': 'background-forget' }, body: JSON.stringify({ sessionId }) }).catch(() => {})
+  await poll()
 }
 
 /** What "In the background" means, in a popup over the start window. */
@@ -579,9 +652,10 @@ function drawStart() {
         ? 'claude starts in the background in this mode. With nobody watching it, Auto lets it work on without stopping to ask; it still asks here on its card when it must.'
         : `claude starts in ${appName} in this mode.`,
   )
-  // the first message goes with either: typed into the app's new session, or given to claude in the terminal
-  document.querySelector('#start-prompt').hidden = isShell
-  document.querySelector('#start-prompt').placeholder = state.where === 'background' ? 'First message to Claude (needed: in the background, Claude starts with it)' : 'First message to Claude (optional)'
+  // the first message goes with either: typed into the app's new session, or given to claude in the
+  // terminal. In the background it is written in the session's own card, which comes at once
+  document.querySelector('#start-first').hidden = isShell || isBackground
+  drawStartFiles()
   const go = document.querySelector('#start-go')
   go.hidden = isExisting
   go.disabled = !state.canStart
@@ -703,15 +777,30 @@ async function startSession(dialog) {
   start.isStarting = true
   drawStart()
   const problem = document.querySelector('#start-problem')
+  const isBackground = L.startState(start).where === 'background'
   try {
+    // the first message's images and files go first, each as it is, as the chat sends them
+    const attached = isBackground ? {} : await sendStartFiles()
+    if (attached.problem) {
+      problem.textContent = attached.problem
+      return
+    }
     const response = await fetch('/api/start', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-CCC-Action': 'start' },
-      body: JSON.stringify({ folder: start.folder, where: start.where, prompt: document.querySelector('#start-prompt').value, app: view.settings.terminalApp, mode: document.querySelector('#start-perm').value }),
+      body: JSON.stringify({ folder: start.folder, where: start.where, prompt: isBackground ? '' : document.querySelector('#start-prompt').value, app: view.settings.terminalApp, mode: document.querySelector('#start-perm').value, ...attached }),
     })
     const data = response.ok ? await response.json() : { problem: 'Could not start it. Is the board still running?' }
-    if (data.ok) {
+    if (data.ok && data.planned) {
+      // its card is on the board at once, with the cursor in it for the first message
       start.didStart = true
+      dialog.close()
+      await poll()
+      window.dispatchEvent(new CustomEvent('ccc:show-session', { detail: { sessionId: data.sessionId } }))
+      setTimeout(() => focusChat(data.sessionId), 400)
+    } else if (data.ok) {
+      start.didStart = true
+      start.files = []
       dialog.close()
       // the board goes to the session's card once it shows up; to its terminal, when Claude asks
       // something there first
@@ -870,7 +959,7 @@ async function showRunning(row) {
 
 /** End: as from its own card, asked first. A background session ends with its card; one with no card yet, and a shell, with their terminal. */
 function endRunning(row) {
-  if (row.kind === 'claude' && (row.isOnBoard || row.isClosed)) return askToRemove(row.sessionId, row.title, { isClosed: row.isClosed })
+  if (row.kind === 'claude' && (row.isOnBoard || row.isClosed)) return askToRemove(row.sessionId, row.title)
   askToCloseTerminal(row.id, row.title, false)
 }
 
@@ -893,6 +982,55 @@ function setupRunning() {
   document.querySelector('#running-stop').addEventListener('click', ask)
   document.querySelector('#running-restart').addEventListener('click', ask)
   document.querySelector('#stopped-resume-all').addEventListener('click', event => resumeStopped(view.stopped ?? [], event.currentTarget))
+}
+
+/**
+ * The message shown in the middle of the board when CCC's keeper went away by itself (it crashed,
+ * or was force-quit) with background sessions in it. It opens once for them and stays until it is
+ * closed; after that their cards stay greyed out, each with Restart, until they run again.
+ */
+function drawLost() {
+  const dialog = document.querySelector('#keeper-lost')
+  const lost = L.lostSessions(view.keeper, view.stopped)
+  // told here already: a look on its way while the message closes does not open it again
+  view.lostTold ??= new Set()
+  // one running again is forgotten here, so a later crash tells of it again
+  for (const id of view.lostTold) if (!lost.some(one => one.sessionId === id)) view.lostTold.delete(id)
+  const untold = L.lostToTell(view.keeper, view.stopped).filter(one => !view.lostTold.has(one.sessionId))
+  if (dialog.open) {
+    if (lost.length === 0) dialog.close()
+    else setText('#keeper-lost-text', L.lostLine(lost))
+    return
+  }
+  if (untold.length === 0) return
+  for (const one of lost) view.lostTold.add(one.sessionId)
+  setText('#keeper-lost-text', L.lostLine(lost))
+  document.querySelector('#keeper-lost-problem').hidden = true
+  dialog.showModal()
+  document.querySelector('#keeper-lost-resume').focus()
+}
+
+/** Resume all: each lost session, one after another; the message closes when they are all on their way. */
+function setupLost() {
+  const dialog = document.querySelector('#keeper-lost')
+  const resume = document.querySelector('#keeper-lost-resume')
+  resume.addEventListener('click', async () => {
+    resume.disabled = true
+    const problems = []
+    for (const one of L.lostSessions(view.keeper, view.stopped)) {
+      const problem = await resumeBackground(one.sessionId, '')
+      if (problem) problems.push(`${one.title}: ${problem}`)
+    }
+    resume.disabled = false
+    if (problems.length === 0) return dialog.close()
+    setText('#keeper-lost-problem', problems.join(' '))
+    document.querySelector('#keeper-lost-problem').hidden = false
+  })
+  // closed in any way (Close, Escape, or all resumed): it is not shown again for these sessions
+  dialog.addEventListener('close', async () => {
+    await fetch('/api/background/dismiss', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-CCC-Action': 'background-dismiss' }, body: '{}' }).catch(() => {})
+    await poll()
+  })
 }
 
 /** Puts a background session's terminal on the board, or takes it off; Claude runs on in it either way. */
@@ -1417,6 +1555,7 @@ function renderTiles(sessions, now, day, tags) {
   document.querySelector('#sessions-empty').hidden = sessions.length + shells.length > 0
   view.order = [...arranged.map(session => session.sessionId), ...shells.map(card => card.id)]
   drawRunning()
+  drawLost()
   view.onBoard = seen
   if (view.settings.animations) for (const id of arriving) welcome(view.tiles.get(id)?.node, view.settings.theme)
   // a card that comes onto the board while it is open (a new session, a terminal, one added from
@@ -1456,7 +1595,7 @@ function drawTile(session, { state, color, today, title, isFresh, now }) {
   const branch = session.branch
   const isProtected = branch && L.isProtectedBranch(branch)
   const stats = session.stats ?? {}
-  const pill = { working: 'pill-work live', 'needs-you': 'pill-wait live-wait', done: 'pill-done', stale: 'pill-idle', ended: 'pill-idle' }[state]
+  const pill = { new: 'pill-idle', working: 'pill-work live', 'needs-you': 'pill-wait live-wait', done: 'pill-done', stale: 'pill-idle', ended: 'pill-idle' }[state]
   const activity = L.activityOf(session, now)
   const runs = L.shownRuns(session.runs, view.layout.runsClearedAt)
   const card = view.layout.cards[session.sessionId] ?? {}
@@ -1596,42 +1735,68 @@ function removeButton(sessionId, title) {
 }
 
 /**
- * Asks what to do: close it from CCC alone (it goes on where it runs), or clear its context too.
- * On either the card leaves at once and the server remembers it is off the board.
+ * Asks what to do: Close (a session in the background stops; the conversation stays in Claude's
+ * history, to resume), or Close and delete (gone from Claude, moved to the Trash). On either the
+ * card leaves at once and the server remembers it is off the board.
  */
-function askToRemove(sessionId, title, { isClosed = false } = {}) {
+function askToRemove(sessionId, title) {
+  // made on the board for its first message, and nothing sent yet: there is nothing to keep
+  const planned = view.byId.get(sessionId)
+  if (planned?.planned && !planned.begun) return forgetPlanned(sessionId)
   const dialog = document.querySelector('#remove-dialog')
   setText('#remove-name', title)
-  // a session CCC runs in the background: closed from CCC it works on there, and End it stops it.
-  // Clearing its context is not offered: /clear gives it a new id, and no card would follow it
+  // a session CCC runs in the background stops as it closes; one Claude runs elsewhere goes on there
   const isBackground = Boolean(L.backgroundTerminal(view.terminals, sessionId))
-  document.querySelector('#remove-confirm').hidden = isClosed
-  document.querySelector('#remove-quit').hidden = !isBackground
-  document.querySelector('#remove-end').hidden = isBackground
+  const session = view.byId.get(sessionId)
+  setText('#remove-confirm-note', L.closeNote(session, isBackground))
+  const remove = document.querySelector('#remove-delete')
+  const cannot = L.deleteProblem(session, isBackground)
+  remove.disabled = Boolean(cannot) || remove.classList.contains('is-busy')
+  // the app keeps a list of its own sessions, which only the app can change
+  const inApp = /^local_/.test(session?.appSessionId ?? '')
   setText(
-    '#remove-confirm-note',
-    isBackground
-      ? 'Only CCC lets go of it: Claude keeps working in the background. Settings \u2192 Background sessions lists it, and Show there puts this card back. It also comes back by itself when a new turn starts in it.'
-      : 'Only CCC lets go of it. The conversation goes on where it runs, stays in Claude\u2019s history, and comes back here as soon as you write in it again.',
+    '#remove-delete-note',
+    cannot ||
+      `Gone from Claude: its history, claude --resume and + \u2192 From an existing conversation.${isBackground ? ' Claude stops first.' : ''} Everything kept for it moves to your Trash, so it can be put back.${inApp ? ' The Claude app keeps its own list: delete it there too.' : ''} CCC closes it too.`,
   )
-  const end = document.querySelector('#remove-end')
-  const why = L.endProblem(view.byId.get(sessionId))
-  end.disabled = Boolean(why)
-  setText('#remove-end-note', why || 'Stops Claude, then runs /clear in the session, so it starts over with an empty context. The old conversation stays in Claude\u2019s history. CCC closes it too.')
+  remove.onclick = async () => {
+    remove.disabled = true
+    remove.classList.add('is-busy')
+    setText('#remove-delete-note', isBackground ? 'Stopping Claude, then deleting\u2026' : 'Deleting\u2026')
+    try {
+      const response = await fetch('/api/delete', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-CCC-Action': 'delete' }, body: JSON.stringify({ sessionId }) })
+      const answer = response.ok ? await response.json() : { problem: 'Could not delete it. Is the board still running?' }
+      if (!answer.ok) {
+        setText('#remove-delete-note', answer.problem || 'Could not delete it.')
+        return
+      }
+      const node = view.tiles.get(sessionId)?.node
+      if (view.settings.theme === 'inferno' && view.settings.animations) carryAway(node)
+      else node?.classList.add('leaving')
+      view.removing.add(sessionId)
+      dialog.close('deleted')
+      await poll()
+    } catch {
+      setText('#remove-delete-note', 'Could not delete it. Is the board still running?')
+    } finally {
+      remove.classList.remove('is-busy')
+      remove.disabled = false
+    }
+  }
   dialog.returnValue = ''
   dialog.onclose = async () => {
     const choice = dialog.returnValue
-    if (choice !== 'remove' && choice !== 'end' && choice !== 'quit') return
+    if (choice !== 'remove') return
     const node = view.tiles.get(sessionId)?.node
     if (view.settings.theme === 'inferno' && view.settings.animations) carryAway(node)
     else node?.classList.add('leaving')
     view.removing.add(sessionId)
     try {
-      const response = await fetch(choice === 'end' ? '/api/end' : '/api/remove', {
+      const response = await fetch('/api/remove', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-CCC-Action': choice === 'end' ? 'end' : 'remove' },
-        // End it, for a session in the background: closed, and Claude there stops too
-        body: JSON.stringify(choice === 'quit' ? { sessionId, end: true } : { sessionId }),
+        headers: { 'Content-Type': 'application/json', 'X-CCC-Action': 'remove' },
+        // a session in the background: closed, and Claude there stops too
+        body: JSON.stringify(isBackground ? { sessionId, end: true } : { sessionId }),
       })
       if (!response.ok) throw new Error(`HTTP ${response.status}`)
     } catch {
@@ -2385,6 +2550,7 @@ setupLayout()
 setupNotes()
 setupCaveman()
 setupRunning()
+setupLost()
 document.querySelector('#map-clear').addEventListener('click', clearFinishedRuns)
 setupChat({
   sessionOf: id => view.byId.get(id),
@@ -2399,7 +2565,11 @@ setupChat({
   onRemove: (id, title) => askToRemove(id, title),
   terminalOf: id => L.backgroundTerminal(view.terminals, id),
   onShowTerminal: showTerminal,
+  // the board's data again at once, as after a change made from a card
+  refreshBoard: () => poll(),
   isResumable: id => (view.stopped ?? []).some(one => one.sessionId === id),
+  // it stopped with CCC's keeper (a crash, or a force quit): its card is greyed out, with Restart
+  isLost: id => L.lostSessions(view.keeper, view.stopped).some(one => one.sessionId === id),
   // the message was just sent, so it waits in the inbox and goes in first
   onResume: id => resumeBackground(id, ''),
   // the facts panel starts folded away, as every session now opens into its chat; opened, it stays open

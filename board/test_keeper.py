@@ -94,6 +94,10 @@ class KeeperTest(unittest.TestCase):
         self.assertTrue(kept.type(terminal_id, "stty size; echo ready$((1+1)).\n"))
         self.assertIn(b"30 90", self.read_until(frames, terminal_id, b"ready2."))
         self.assertTrue(kept.resize(terminal_id, 100, 40))
+        # its newest output, as a hidden background Claude's screen is read
+        output, written = kept.screen(terminal_id)
+        self.assertIn(b"ready2.", output)
+        self.assertGreaterEqual(written, len(output))
         self.assertEqual(kept.folder_now(terminal_id), self.folder)
         frames.close()
         # a server started again finds the same terminal, and its output from the start
@@ -124,12 +128,17 @@ class KeeperTest(unittest.TestCase):
         terminal_id, _ = kept.start(self.folder)
         self.assertEqual(len(started), 1)
         self.assertEqual([card["id"] for card in kept.list()], [terminal_id])
+        first = kept.keeper_id
+        self.assertEqual(first, (started[0].info["pid"], started[0].info["port"]))
         # it went away: its terminals with it, and the next new terminal starts a new keeper
         started[0].stop()
         self.running.remove(started[0])
         self.assertEqual(kept.list(), [])
+        self.assertIsNone(kept.keeper_id)
         kept.start(self.folder)
         self.assertEqual(len(started), 2)
+        # the server tells the new keeper from the one that went away (serve.KeeperWatch)
+        self.assertNotEqual(kept.keeper_id, first)
 
     def test_a_stream_waits_for_a_keeper_to_start(self):
         kept = keeper.KeptTerminals(self.path, start=lambda: self.keep())

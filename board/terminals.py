@@ -214,6 +214,15 @@ class Terminals:
             return False
         return True
 
+    def screen(self, terminal_id, size: int = 32 * 1024):
+        """The newest output of a terminal, shown on the board or not: (bytes, how much it wrote in
+        all), or None for no such terminal. The board's server reads a background Claude's own
+        screen with it, as the person would look at it (its mode line)."""
+        terminal = self.get(terminal_id)
+        if terminal is None:
+            return None
+        return bytes(terminal.kept[-size:]), terminal.seq
+
     def resize(self, terminal_id, cols, rows) -> bool:
         terminal = self.get(terminal_id)
         if terminal is None or terminal.ended_at is not None or not isinstance(cols, int) or not isinstance(rows, int):

@@ -432,7 +432,14 @@
             </select>
           </label>
           <p id="start-perm-note" class="hint start-perm-note"></p>
-          <textarea id="start-prompt" class="start-prompt" rows="3" maxlength="20000" placeholder="First message to Claude (optional)" aria-label="First message to Claude" hidden></textarea>
+          <div id="start-first" class="start-first" hidden>
+            <textarea id="start-prompt" class="start-prompt" rows="3" maxlength="20000" placeholder="First message to Claude (optional). Paste or drop images, videos and files here too." aria-label="First message to Claude"></textarea>
+            <div class="start-files-row">
+              <button id="start-attach" type="button" class="secondary">Add files…</button>
+              <input id="start-file-input" type="file" multiple hidden />
+              <div id="start-files" class="start-files" aria-label="Files that go with the first message"></div>
+            </div>
+          </div>
         </fieldset>
         <p id="start-problem" class="hint start-problem" role="status"></p>
         <div class="settings-actions confirm-actions">
@@ -448,16 +455,12 @@
         <p class="confirm-question">What should happen to <strong id="remove-name">this session</strong>?</p>
         <div class="close-choices">
           <button id="remove-confirm" value="remove" class="close-choice">
-            <strong id="remove-confirm-title">Close from CCC</strong>
-            <span id="remove-confirm-note">Only CCC lets go of it. The conversation goes on where it runs, stays in Claude's history, and comes back here as soon as you write in it again.</span>
+            <strong id="remove-confirm-title">Close</strong>
+            <span id="remove-confirm-note">The conversation stays in Claude's history: + &rarr; From an existing conversation, or claude --resume, picks it up again.</span>
           </button>
-          <button id="remove-quit" value="quit" class="close-choice close-end" hidden>
-            <strong>End it</strong>
-            <span>Claude stops and its background terminal closes. The conversation stays in Claude's history: + &rarr; From an existing conversation picks it up again.</span>
-          </button>
-          <button id="remove-end" value="end" class="close-choice close-end">
-            <strong>Clear its context</strong>
-            <span id="remove-end-note">Stops Claude, then runs /clear in the session, so it starts over with an empty context. The old conversation stays in Claude's history. CCC closes it too.</span>
+          <button id="remove-delete" type="button" class="close-choice close-end">
+            <strong>Close and delete</strong>
+            <span id="remove-delete-note">Gone from Claude: its history, claude --resume and + &rarr; From an existing conversation. Everything kept for it moves to your Trash, so it can be put back. CCC closes it too.</span>
           </button>
         </div>
         <div class="settings-actions confirm-actions">
@@ -476,10 +479,23 @@
           <li><strong>It is not in the Claude app.</strong> The app lists only the sessions it started itself, so this one never shows there. Its conversation is saved in Claude's history like any terminal session's, so it can be resumed in a terminal too (<code>claude --resume</code>).</li>
           <li><strong>Nobody watches its screen.</strong> Auto mode suits it best: Claude then rarely needs to stop and ask. What only its screen can show (such as Claude asking whether to trust a new folder) brings its terminal onto the board for you.</li>
           <li><strong>It keeps going</strong> when you close the Claude app, your terminal windows or CCC itself, as CCC's keeper runs it. While the Mac sleeps, it waits.</li>
-          <li><strong>It ends</strong> when you close its card (End it), use End everything in Settings, or restart your Mac. After a restart it is listed in Settings, Background, Stopped, to resume; it never starts again by itself.</li>
+          <li><strong>It ends</strong> when you close its card, use End everything in Settings, or restart your Mac. After a restart it is listed in Settings, Background, Stopped, to resume; it never starts again by itself.</li>
         </ul>
         <div class="settings-actions confirm-actions">
           <button value="close" class="primary">Got it</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="keeper-lost" class="settings confirm" aria-labelledby="keeper-lost-title">
+      <form method="dialog" class="settings-body">
+        <h2 id="keeper-lost-title" class="window-title">CCC'S KEEPER CRASHED</h2>
+        <p id="keeper-lost-text" class="confirm-question"></p>
+        <p class="hint">It stopped without being asked to: it crashed, or was force-quit. Resume all starts them again in the background, where they left off. Or close this: each one's card stays greyed out, with a Restart button, and Settings, Background sessions lists them under Stopped.</p>
+        <p id="keeper-lost-problem" class="hint start-problem" role="status" hidden></p>
+        <div class="settings-actions confirm-actions">
+          <button value="close" class="secondary">Close</button>
+          <button id="keeper-lost-resume" type="button" class="primary">Resume all</button>
         </div>
       </form>
     </dialog>

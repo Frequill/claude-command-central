@@ -450,8 +450,11 @@ body.is-resizing * {
   user-select: none;
 }
 
-/* a card that grows moves the cards below it: the browser must not scroll the page to follow them */
-body.is-resizing {
+/* The page never scrolls by itself to follow something on it. The browser would: when a card's chat
+   redraws, or a card grows and moves the cards below it, it picks something on screen and scrolls the
+   whole board to keep that in place, a line up and back down as you type. The cards are placed where
+   the person put them, and the board keeps the view still itself (grid.js). */
+html {
   overflow-anchor: none;
 }
 
@@ -3507,6 +3510,68 @@ button.q-option:disabled {
   color: var(--ink);
   font: 14px/1.45 var(--sans);
   resize: vertical;
+}
+
+/* the first message, and the images, videos and files that go with it */
+.start-first.is-dropping .start-prompt {
+  outline: 2px dashed var(--accent);
+  outline-offset: 2px;
+}
+
+.start-files-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 8px;
+  margin-top: 8px;
+}
+
+.start-files {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+}
+
+.start-file {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 260px;
+  padding: 3px 4px 3px 10px;
+  border: 1px solid var(--chip-border);
+  border-radius: 999px;
+  background: var(--chip-bg);
+  color: var(--ink);
+  font-size: 12px;
+}
+
+.start-file-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.start-file-size {
+  flex: none;
+  color: var(--ink-3);
+}
+
+.start-file-remove {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--ink-2);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.start-file-remove:hover {
+  background: var(--chip-border);
 }
 
 .start-problem {
@@ -10701,4 +10766,43 @@ body.side-off .sidebar {
 /* the mode a session started in a terminal gets; greyed out for the Claude app, which takes none */
 .start-perm.is-off {
   opacity: 0.5;
+}
+
+/* a session stopped because CCC's keeper crashed: its card is greyed out, with a line saying so and Restart */
+.chat-lost {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 14px;
+  background: var(--panel-solid);
+  color: var(--ink);
+  border-left: 4px solid var(--fail);
+}
+
+.chat-lost[hidden] {
+  display: none;
+}
+
+.chat-lost-text {
+  flex: 1;
+}
+
+/* Restart looks like the windows' main buttons */
+.chat-lost button {
+  flex: none;
+  min-height: 32px;
+  padding: 4px 16px;
+  border: none;
+  border-radius: 999px;
+  color: var(--pill-ink);
+  background: var(--pill-work);
+  box-shadow: var(--pill-shadow);
+  font: 700 13px var(--sans);
+  cursor: pointer;
+}
+
+.expanded-tile.is-lost .chat-head,
+.expanded-tile.is-lost .chat-body {
+  opacity: 0.45;
+  filter: grayscale(1);
 }

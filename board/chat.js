@@ -20,8 +20,9 @@ const chats = new Map()
  * The board's view of a session: `sessionOf(id)`, `titleOf(id)`, `colorOf(id)`, its facts
  * (`statsOf(id)`: a signature and a node), `onRemove(id, title)` when the person closes it, the
  * terminal it runs in when CCC started it in the background (`terminalOf(id)`, shown or hidden with
- * `onShowTerminal(terminalId, isHidden)`), whether it stopped there and can be resumed
- * (`isResumable(id)`, done by `onResume(id)`, which says what went wrong or ''), and
+ * `onShowTerminal(terminalId, isHidden)`), `refreshBoard()` to read the board's data again, whether it stopped there and can be resumed
+ * (`isResumable(id)`, done by `onResume(id)`, which says what went wrong or ''), whether it
+ * stopped because CCC's keeper crashed (`isLost(id)`: its card is greyed out, with Restart), and
  * whether its panel of facts is folded in (`isSideHidden(id)`, `onSide(id, isHidden)`).
  */
 export function setupChat(given) {
@@ -97,6 +98,7 @@ export function updateChat() {
 function update(chat) {
   const session = context.sessionOf(chat.id)
   drawHead(chat, session)
+  drawLost(chat)
   drawLive(chat, session)
   drawCompose(chat, session)
   drawStats(chat)
@@ -107,10 +109,16 @@ function update(chat) {
 function keepScroll(chat) {
   const { scroll } = chat
   if (chat.isFollowing !== false) {
-    if (!L.isAtBottom(scroll)) scroll.scrollTop = scroll.scrollHeight
+    if (!L.isAtBottom(scroll)) toNewest(chat)
   } else if (scroll.scrollTop === 0 && chat.top > 0) {
     scroll.scrollTop = chat.top
   }
+}
+
+/** Shows the chat's newest line, and remembers where that put it (see the scroll listener in buildCard). */
+function toNewest(chat) {
+  chat.scroll.scrollTop = chat.scroll.scrollHeight
+  chat.ownTop = chat.scroll.scrollTop
 }
 
 function markHand(chat) {
@@ -154,15 +162,23 @@ function buildCard(sessionId) {
   const menu = el('div', { class: 'slash-menu', role: 'listbox', 'aria-label': 'Commands and skills', hidden: true })
   const form = el('form', { class: 'chat-compose' }, dock, menu, emojiPanel, thumbs, el('div', { class: 'compose-row' }, el('div', { class: 'compose-tools' }, emoji, attach), text, suggestKey, stop, el('div', { class: 'compose-buttons' }, send)), el('div', { class: 'compose-bar' }, note), picker)
   const side = el('aside', { class: 'chat-side', 'aria-label': 'What the card tells' })
+  // shown while the session is stopped because CCC's keeper crashed
+  const restart = el('button', { type: 'button', class: 'primary', title: 'Starts it again in the background, where it left off' }, 'Restart')
+  const lostBar = el('div', { class: 'chat-lost', role: 'status', hidden: true }, el('span', { class: 'chat-lost-text' }, 'CCC\u2019s keeper crashed, and this session stopped with it. Its conversation is saved.'), restart)
   const body = el('div', { class: 'chat-body' }, el('div', { class: 'chat-main' }, scroll, form), side)
-  const root = el('article', { class: `glass tile expanded-tile${context.isSideHidden(sessionId) ? ' side-hidden' : ''}`, 'data-session': sessionId, 'data-ghost': 'light' }, head, body, el('span', { class: 'grip grip-x', 'data-axis': 'x', 'aria-hidden': 'true' }), el('span', { class: 'grip grip-y', 'data-axis': 'y', 'aria-hidden': 'true' }), el('span', { class: 'grip', 'aria-hidden': 'true' }), el('span', { class: 'grip grip-bl', 'data-axis': 'corner-bl', 'aria-hidden': 'true' }), el('span', { class: 'grip grip-tr', 'data-axis': 'corner-tr', 'aria-hidden': 'true' }), el('span', { class: 'grip grip-tl', 'data-axis': 'corner-tl', 'aria-hidden': 'true' }))
-  const chat = { id: sessionId, root, head, log, live, dock, scroll, thumbs, text, queue, send, stop, note, side, form, menu, emojiPicker: emojiPanel, suggestKey, suggestion: '', slash: { list: null, at: 0, shown: [], index: 0 }, mention: { shown: [], index: 0, asked: 0, timer: 0 }, menuFor: '', images: [], files: [], items: [], signature: '', timer: 0, isSending: false, isFollowing: true, canSend: false, problem: '', openSteps: new Set(), openGroups: new Set(), openPrompts: new Set(), steps: new Map(), drafts: new Map(), approvals: new Map() }
+  const root = el('article', { class: `glass tile expanded-tile${context.isSideHidden(sessionId) ? ' side-hidden' : ''}`, 'data-session': sessionId, 'data-ghost': 'light' }, head, lostBar, body, el('span', { class: 'grip grip-x', 'data-axis': 'x', 'aria-hidden': 'true' }), el('span', { class: 'grip grip-y', 'data-axis': 'y', 'aria-hidden': 'true' }), el('span', { class: 'grip', 'aria-hidden': 'true' }), el('span', { class: 'grip grip-bl', 'data-axis': 'corner-bl', 'aria-hidden': 'true' }), el('span', { class: 'grip grip-tr', 'data-axis': 'corner-tr', 'aria-hidden': 'true' }), el('span', { class: 'grip grip-tl', 'data-axis': 'corner-tl', 'aria-hidden': 'true' }))
+  const chat = { id: sessionId, root, head, lostBar, log, live, dock, scroll, thumbs, text, queue, send, stop, note, side, form, menu, emojiPicker: emojiPanel, suggestKey, suggestion: '', slash: { list: null, at: 0, shown: [], index: 0 }, mention: { shown: [], index: 0, asked: 0, timer: 0 }, menuFor: '', images: [], files: [], items: [], signature: '', timer: 0, isSending: false, isFollowing: true, canSend: false, problem: '', openSteps: new Set(), openGroups: new Set(), openPrompts: new Set(), steps: new Map(), drafts: new Map(), approvals: new Map() }
 
   // hovering the panel leaves the wheel to the page; a click in it lets the wheel scroll the panel,
   // until a click somewhere else or Esc
   side.addEventListener('pointerdown', () => side.classList.add('is-scrolling'))
   // a narrow window slides the panel in over the chat: it stops above the write box, never over it
-  new ResizeObserver(() => keepSideAboveCompose(chat)).observe(form)
+  // the write box growing a line, or a question box opening above it, takes room from the chat:
+  // a chat showing its newest line keeps showing it now, rather than jumping there at the next redraw
+  new ResizeObserver(() => {
+    keepSideAboveCompose(chat)
+    if (chat.isFollowing !== false) toNewest(chat)
+  }).observe(form)
 
   attach.addEventListener('click', () => picker.click())
   picker.addEventListener('change', () => {
@@ -196,6 +212,12 @@ function buildCard(sessionId) {
     event.preventDefault()
     for (const file of files) addFile(chat, file)
   })
+  restart.addEventListener('click', async () => {
+    restart.disabled = true
+    const problem = await context.onResume(sessionId)
+    restart.disabled = false
+    say(chat, problem || 'Restarting it in the background, where it left off.')
+  })
   form.addEventListener('submit', event => {
     event.preventDefault()
     sendMessage(chat, C.enterMode(Boolean(context.sessionOf(chat.id)?.turn?.isRunning), false))
@@ -225,6 +247,9 @@ function buildCard(sessionId) {
   scroll.addEventListener('scroll', () => {
     // a card moved on the board starts its scroll over at 0 without the person asking: not a choice
     if (scroll.scrollTop === 0 && chat.top > 0 && !chat.isScrolledByHand) return
+    // the board's own move to the newest line: by the time this is heard the chat may have grown
+    // again (another line in the write box, more of Claude's reply), which is no reason to stop following
+    if (scroll.scrollTop === chat.ownTop && !chat.isScrolledByHand) return
     chat.isFollowing = L.isAtBottom(scroll)
     chat.top = scroll.scrollTop
   })
@@ -383,7 +408,8 @@ function toggleSetup(chat) {
  * Claude is done. The permission mode is shown, and where to change it: no plugin can switch it.
  */
 async function drawSetup(chat, session) {
-  const facts = C.sessionSetup(session)
+  const background = context.terminalOf?.(chat.id) ?? null
+  const facts = C.sessionSetup(session, background)
   const { models } = await sessionCommands(chat)
   if (!chat.isSetupOpen) return
   const choices = (label, options, current, run) =>
@@ -412,12 +438,15 @@ async function drawSetup(chat, session) {
     }, 1500)
   }
   const link = L.openLink(session)
+  // in CCC's background, CCC holds its terminal: it switches the mode there as Shift+Tab does
+  const modeRow = background ? backgroundModeRow(chat, facts.mode) : null
   const panel = el(
     'div',
     { class: 'chat-setup glass', role: 'dialog', 'aria-label': 'Session settings' },
     choices('Model', C.modelChoices(models), facts.modelId, (model, button) => send(`/model ${model}`, button)),
     choices('Effort', C.EFFORTS, facts.effort, (effort, button) => send(`/effort ${effort}`, button)),
     cavemanRow(chat, choices),
+    modeRow ??
     el(
       'div',
       { class: 'setup-row' },
@@ -434,6 +463,35 @@ async function drawSetup(chat, session) {
   chat.setup?.remove()
   chat.setup = panel
   chat.head.after(panel)
+}
+
+/** The mode of a session in CCC's background, to pick: CCC presses Shift+Tab in its terminal until Claude shows it. */
+function backgroundModeRow(chat, current) {
+  const buttons = C.MODE_CHOICES.map(({ id, label }) => {
+    const isOn = id === current
+    const button = el('button', { type: 'button', class: `setup-choice${isOn ? ' on' : ''}`, 'aria-pressed': String(isOn) }, label)
+    button.addEventListener('click', async () => {
+      if (id === current) return
+      for (const one of buttons) one.disabled = true
+      say(chat, `Switching to ${label}\u2026`)
+      try {
+        const response = await fetch('/api/background/mode', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-CCC-Action': 'background-mode' }, body: JSON.stringify({ sessionId: chat.id, mode: id }) })
+        const answer = response.ok ? await response.json() : { problem: 'Could not switch it. Is the board still running?' }
+        say(chat, answer.ok ? `Now in ${label} mode.` : answer.problem || 'Could not switch it.')
+      } catch {
+        say(chat, 'Could not switch it. Is the board still running?')
+      }
+      await context.refreshBoard?.()
+      chat.isSetupOpen && drawSetup(chat, context.sessionOf(chat.id))
+    })
+    return button
+  })
+  return el(
+    'div',
+    { class: 'setup-row' },
+    el('span', { class: 'setup-label' }, 'Mode'),
+    el('div', { class: 'setup-choices', role: 'group', 'aria-label': 'Mode' }, ...buttons),
+  )
 }
 
 // the steps cards the person closed, by session, kept in the browser across reloads
@@ -753,14 +811,14 @@ function drawHead(chat, session) {
   const title = context.titleOf(id) ?? session?.folder ?? 'Session'
   const state = session ? L.sessionState(session, Date.now()) : 'ended'
   const background = context.terminalOf?.(id) ?? null
-  const source = background ? { kind: 'terminal', label: 'Background' } : L.sourceOf(session)
+  const source = background || session?.planned ? { kind: 'terminal', label: 'Background' } : L.sourceOf(session)
   const link = L.openLink(session)
-  const facts = C.sessionSetup(session)
+  const facts = C.sessionSetup(session, background)
   const caveman = context.cavemanOf?.(id) ?? { level: 'off', isOwn: false }
   const signature = JSON.stringify([title, state, source?.label, link?.href, session?.folder, session?.branch, context.colorOf(id), facts, caveman, background?.id, background?.hidden])
   if (signature === chat.headSignature) return
   chat.headSignature = signature
-  const close = el('button', { type: 'button', class: 'chat-close chat-remove', 'aria-label': `Close ${title}`, title: 'Close: from CCC only, or clear its context too' }, icon('M4 4l8 8M12 4l-8 8'))
+  const close = el('button', { type: 'button', class: 'chat-close chat-remove', 'aria-label': `Close ${title}`, title: 'Close it, or close and delete the conversation' }, icon('M4 4l8 8M12 4l-8 8'))
   close.addEventListener('click', () => context.onRemove(id, title))
   const isHidden = chat.root.classList.contains('side-hidden')
   const panel = el(
@@ -861,7 +919,7 @@ async function refresh(chat) {
   chat.liveSignature = ''
   drawLive(chat, context.sessionOf(chat.id))
   for (const toolId of chat.openSteps) if (!chat.steps.get(toolId)?.isDone) loadStep(chat, toolId)
-  if (wasFollowing) chat.scroll.scrollTop = chat.scroll.scrollHeight
+  if (wasFollowing) toNewest(chat)
 }
 
 function drawItem(chat, item) {
@@ -1288,13 +1346,13 @@ function drawLive(chat, session) {
   const steps = plan.length && !C.isPlanClosed(closedPlans(), chat.id, plan) ? drawPlan(chat, plan) : null
   if (!isRunning) {
     chat.live.replaceChildren(...[steps, next ? drawNextStep(chat, session, next) : null].filter(Boolean))
-    if (next && chat.isFollowing !== false) chat.scroll.scrollTop = chat.scroll.scrollHeight
+    if (next && chat.isFollowing !== false) toNewest(chat)
     return
   }
   const status = el('div', { class: 'live-status' }, el('span', { class: 'running-dots', 'aria-hidden': 'true' }, el('i'), el('i'), el('i')), ' ', activity?.label ?? 'Working', activity?.text ? el('span', { class: 'live-detail' }, ` · ${activity.text}`) : null)
   const writing = rest ? el('div', { class: 'msg msg-claude' }, el('span', { class: 'claude-mark', 'aria-hidden': 'true' }, '✻'), markdown(rest), session?.reply?.isWriting ? el('span', { class: 'reply-caret', 'aria-hidden': 'true' }) : null) : null
   chat.live.replaceChildren(...[writing, steps, status].filter(Boolean))
-  if (chat.isFollowing !== false) chat.scroll.scrollTop = chat.scroll.scrollHeight
+  if (chat.isFollowing !== false) toNewest(chat)
 }
 
 /**
@@ -1339,10 +1397,14 @@ function drawApproval(chat, session, view) {
     button.addEventListener('click', () => sendApproval(chat, view.box, decision))
     return button
   }
-  const where = session?.entrypoint === 'cli' ? 'Answer it in the terminal' : 'Answer it in the Claude app'
+  // in CCC's background the box is on Claude's own screen, in a terminal nobody sees: it is shown
+  const background = context.terminalOf?.(chat.id) ?? null
+  const show = background ? el('button', { type: 'button', class: 'a-choice a-allow' }, 'Show its terminal') : null
+  show?.addEventListener('click', () => context.onShowTerminal(background.id, false))
+  const where = background ? 'Answer it in its terminal' : session?.entrypoint === 'cli' ? 'Answer it in the terminal' : 'Answer it in the Claude app'
   const foot = view.canAnswer
     ? el('div', { class: 'q-foot' }, el('span', { class: `q-status${draft?.problem ? ' problem' : ''}`, role: 'status' }, C.approvalStatus(draft)), el('span', { class: 'q-actions' }, openLink(link, 'Open in the app'), choice('deny', 'Deny'), choice('allow', 'Allow once')))
-    : el('div', { class: 'q-foot' }, el('span', {}, where), openLink(link))
+    : el('div', { class: 'q-foot' }, el('span', {}, where), show ?? openLink(link))
   return el(
     'div',
     { class: 'msg msg-question msg-approval q-open', 'data-approval': view.box },
@@ -1531,19 +1593,39 @@ function drawCompose(chat, session) {
 /** Takes a file picked, pasted or dropped: an image Claude sees, or any other file it opens, as in the app. */
 function addFile(chat, file) {
   if (!chat.canSend) return
-  const isImage = C.isImage(file)
-  const problem = isImage ? C.imageProblem(file, chat.images.length) : C.fileProblem(file, chat.files.length)
+  const problem = C.fileProblem(file)
   if (problem) return say(chat, problem)
-  const reader = new FileReader()
-  reader.onload = () => {
-    if (!chats.has(chat.id)) return
-    const data = String(reader.result).split(',', 2)[1] ?? ''
-    if (isImage) chat.images.push({ type: file.type, name: file.name, data, url: URL.createObjectURL(file) })
-    else chat.files.push({ name: file.name, size: file.size, data })
-    drawThumbs(chat)
+  // kept as the file itself: it is sent as it is when the message goes, however big
+  if (C.isImage(file)) chat.images.push({ type: file.type, name: file.name, file, url: URL.createObjectURL(file) })
+  else chat.files.push({ name: file.name, size: file.size, file })
+  drawThumbs(chat)
+}
+
+/**
+ * Sends each image and file of a message to the server, one after another, as they are: the ids
+ * they got there, for the message to name, or what went wrong. `owner` is the session they go to
+ * (or, for a session not started yet, a name of their own). Each is `{ file, name }`.
+ */
+export async function uploadFiles(owner, images, files) {
+  const send = async (item, kind) => {
+    const response = await fetch('/api/upload', {
+      method: 'POST',
+      headers: { 'Content-Type': item.file.type || 'application/octet-stream', 'X-CCC-Action': 'upload', 'X-CCC-Session': owner, 'X-CCC-Kind': kind, 'X-CCC-Name': encodeURIComponent(item.name || 'file') },
+      body: item.file,
+    })
+    const answer = response.ok ? await response.json() : { problem: `Could not send ${item.name || 'a file'}.` }
+    if (!answer.ok) throw new Error(answer.problem || `Could not send ${item.name || 'a file'}.`)
+    return { upload: answer.upload }
   }
-  reader.onerror = () => say(chat, `Could not read ${file.name || 'that file'}.`)
-  reader.readAsDataURL(file)
+  try {
+    const sentImages = []
+    for (const image of images) sentImages.push(await send(image, 'image'))
+    const sentFiles = []
+    for (const file of files) sentFiles.push(await send(file, 'file'))
+    return { images: sentImages, files: sentFiles }
+  } catch (error) {
+    return { problem: error.message || 'Could not send the files. Is the board still running?' }
+  }
 }
 
 function drawThumbs(chat) {
@@ -1566,6 +1648,13 @@ function drawThumbs(chat) {
       return el('figure', { class: 'thumb thumb-file', title: file.name }, icon('M9 1.5H4a1.5 1.5 0 0 0-1.5 1.5v10A1.5 1.5 0 0 0 4 14.5h8a1.5 1.5 0 0 0 1.5-1.5V6L9 1.5zM9 1.5V6h4.5', 16), el('span', { class: 'thumb-name' }, file.name || 'file'), el('span', { class: 'thumb-size' }, C.fileSize(file.size)), remove)
     }),
   )
+}
+
+/** Greys the card out while its session is stopped because CCC's keeper crashed. */
+function drawLost(chat) {
+  const isLost = Boolean(context.isLost?.(chat.id))
+  chat.root.classList.toggle('is-lost', isLost)
+  chat.lostBar.hidden = !isLost
 }
 
 function say(chat, problem) {
@@ -1611,8 +1700,17 @@ async function sendMessage(chat, mode) {
   chat.send.disabled = true
   chat.queue.disabled = true
   const card = mode === 'queue' && text && chat.images.length === 0 && chat.files.length === 0 ? openCard(chat) : null
+  // the images and files go first, each as it is; the message then names them
+  const hasFiles = !card && (chat.images.length > 0 || chat.files.length > 0)
+  if (hasFiles) chat.note.textContent = 'Sending the files\u2026'
+  const uploaded = hasFiles ? await uploadFiles(chat.id, chat.images, chat.files) : { images: [], files: [] }
+  if (uploaded.problem) {
+    chat.isSending = false
+    drawCompose(chat, context.sessionOf(chat.id))
+    return say(chat, uploaded.problem)
+  }
   const request = !card
-    ? { route: '/api/send', action: 'send', body: { sessionId: chat.id, text, mode, images: chat.images.map(image => ({ mediaType: image.type, name: image.name, data: image.data })), files: chat.files.map(file => ({ name: file.name, data: file.data })) } }
+    ? { route: '/api/send', action: 'send', body: { sessionId: chat.id, text, mode, images: uploaded.images, files: uploaded.files } }
     : card.kind === 'approval'
       ? { route: '/api/approve', action: 'approve', body: { sessionId: chat.id, box: card.box, decision: 'deny', message: text } }
       : { route: '/api/answer', action: 'answer', body: { sessionId: chat.id, toolId: card.toolId, message: text } }
@@ -1638,7 +1736,8 @@ async function sendMessage(chat, mode) {
     // one that ran in the background is resumed there, with the message just sent
     if (C.composeState(session, Boolean(context.isResumable?.(chat.id))).resumeHere) {
       const problem = await context.onResume(chat.id)
-      setTimeout(() => say(chat, problem || 'Resuming it in the background: your message goes in as it starts.'), 0)
+      const started = session?.planned ? 'Starting Claude in the background with your message.' : 'Resuming it in the background: your message goes in as it starts.'
+      setTimeout(() => say(chat, problem || started), 0)
     }
     for (const image of chat.images) URL.revokeObjectURL(image.url)
     chat.images = []

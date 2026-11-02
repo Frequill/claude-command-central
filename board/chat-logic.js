@@ -2,11 +2,8 @@
 // folded, what of the reply being written is new, when the person can write, and which images go.
 
 export const IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp']
-export const MAX_IMAGE_BYTES = 10 * 1024 * 1024
-export const MAX_IMAGES = 6
-// any other file dropped on the chat goes along too, as in the Claude app (serve.py MAX_FILES, MAX_FILE_BYTES)
-export const MAX_FILES = 10
-export const MAX_FILE_BYTES = 20 * 1024 * 1024
+// any other file dropped on the chat goes along too, as in the Claude app. CCC sets no limit of its
+// own on how big they are or how many: each is sent to the server as it is (serve.py Inbox.receive).
 /** The longest message the board's server takes (serve.py MESSAGE_TEXT_MAX): about what Claude can take in, 1 million tokens. */
 export const MESSAGE_MAX = 4_000_000
 
@@ -164,6 +161,9 @@ export function liveRemainder(items, replyText) {
 export function composeState(session, isResumable = false) {
   if (!session) return { canSend: false, note: 'This session is no longer on the board.' }
   if (!session.takesMessages) return { canSend: false, note: 'This session runs an older CCC. Restart it to write to it from here.' }
+  // made on the board: its first message, with any images and files, starts Claude in the background
+  if (session.planned && !session.begun) return { canSend: true, note: 'Write your first message. Sending it starts Claude here, in the background.', resumeHere: true }
+  if (session.planned) return { canSend: true, note: 'Claude is starting in the background. A message you send now goes in once it runs.' }
   if (session.endedAt !== undefined && isResumable) {
     return { canSend: true, note: 'This session ran in the background and stopped. Sending resumes it there, and your message goes in.', resumeHere: true }
   }
@@ -212,14 +212,6 @@ export function lengthProblem(text) {
   return `The message is too long: ${spaced(length)} characters, at most ${spaced(MESSAGE_MAX)}.`
 }
 
-/** Why an image cannot go with the message, or '' when it can. */
-export function imageProblem(file, count) {
-  if (count >= MAX_IMAGES) return `At most ${MAX_IMAGES} images in one message.`
-  if (!IMAGE_TYPES.includes(file?.type)) return 'Only PNG, JPEG, GIF and WebP images can go along.'
-  if (!(file.size > 0) || file.size > MAX_IMAGE_BYTES) return 'An image can be at most 10 MB.'
-  return ''
-}
-
 /** A file's size the way the app writes it: 820 B, 14 KB, 3.2 MB. */
 export function fileSize(bytes) {
   if (!(bytes >= 0)) return ''
@@ -233,17 +225,30 @@ export const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max']
 // the models offered when the session has not said which it takes (an older CCC)
 const DEFAULT_MODELS = ['default', 'sonnet', 'opus', 'haiku', 'fable', 'best', 'opusplan']
 
-/** The session's model, effort and mode, as its header shows them and its settings mark them. */
-export function sessionSetup(session) {
+/**
+ * The session's model, effort and mode, as its header shows them and its settings mark them. A
+ * session in CCC's background has its mode read off its own screen (`terminal.mode`): changed in
+ * CCC or in its terminal, that is the mode it has now.
+ */
+export function sessionSetup(session, terminal = null) {
   const stats = session?.stats ?? {}
   const modelId = typeof stats.model === 'string' ? stats.model : ''
+  const written = typeof stats.mode === 'string' && stats.mode ? stats.mode : typeof session?.permissionMode === 'string' ? session.permissionMode : ''
   return {
     modelId,
     effort: typeof stats.effort === 'string' ? stats.effort : '',
-    // the mode as the session's hooks saw it, else as its transcript last wrote it down
-    mode: typeof stats.mode === 'string' && stats.mode ? stats.mode : typeof session?.permissionMode === 'string' ? session.permissionMode : '',
+    // else the mode as the session's hooks saw it, else as its transcript last wrote it down
+    mode: typeof terminal?.mode === 'string' && terminal.mode ? terminal.mode : written === 'default' ? 'manual' : written,
   }
 }
+
+/** The modes a session in CCC's background can be switched to, named as Claude's own mode line names them. */
+export const MODE_CHOICES = [
+  { id: 'manual', label: 'manual' },
+  { id: 'acceptEdits', label: 'accept edits' },
+  { id: 'plan', label: 'plan' },
+  { id: 'auto', label: 'auto' },
+]
 
 // caveman mode as the board's server keeps it: off, or how terse Claude answers
 export const CAVEMAN_LEVELS = ['off', 'lite', 'full', 'ultra']
@@ -381,11 +386,9 @@ export function isImage(file) {
   return IMAGE_TYPES.includes(file?.type)
 }
 
-/** Why a file that is not an image cannot go with the message, or '' when it can. */
-export function fileProblem(file, count) {
-  if (count >= MAX_FILES) return `At most ${MAX_FILES} files in one message.`
+/** Why a file or image cannot go with the message, or '' when it can: only nothing to send. */
+export function fileProblem(file) {
   if (!(file?.size > 0)) return 'That file is empty, or it is a folder.'
-  if (file.size > MAX_FILE_BYTES) return 'A file can be at most 20 MB.'
   return ''
 }
 
@@ -417,6 +420,8 @@ export function approvalView(waiting) {
   const tool = typeof box?.tool === 'string' ? box.tool : ''
   // the Claude app's branch question comes as an approval box; it is drawn as the app draws it
   const branch = box?.kind === 'branch' ? { suggested: typeof box.suggested === 'string' ? box.suggested : '' } : null
+  // seen only on the screen of a Claude in CCC's background: what it asks is there
+  if (waiting.onScreen) return { branch: null, title: 'Claude asks you something in its terminal', description: '', reason: '', code: '', box: '', canAnswer: false }
   return {
     branch,
     title: branch ? 'Work on a separate branch?' : approvalTitle(box, tool),

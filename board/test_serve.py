@@ -1,4 +1,5 @@
 import base64
+import io
 import json
 import os
 import re
@@ -54,7 +55,7 @@ class ReadSessionsTest(unittest.TestCase):
         self.assertEqual([s["sessionId"] for s in serve.read_sessions(self.dir, limit=2)], ["s4", "s3"])
 
     def test_skips_oversized_files(self):
-        self.write("big.json", json.dumps({"version": 1, "pad": "x" * serve.MAX_FILE_BYTES}))
+        self.write("big.json", json.dumps({"version": 1, "pad": "x" * serve.MAX_SNAPSHOT_BYTES}))
         self.assertEqual(serve.read_sessions(self.dir), [])
 
     def test_missing_directory_gives_no_sessions(self):
@@ -212,6 +213,32 @@ class TranscriptTest(unittest.TestCase):
         with path.open("a") as handle:
             handle.write(json.dumps({"type": "assistant", "pad": "x" * (serve.TAIL_BYTES + 10)}) + "\n")
         self.assertEqual(serve.Transcripts(self.projects).describe("s2"), {"title": "Early name"})
+
+    def test_the_mode_of_a_transcript_too_long_to_read_whole_is_found_further_back(self):
+        path = self.transcript("s5", [{"type": "user", "permissionMode": "auto"}])
+        with path.open("a") as handle:
+            for _ in range(6):
+                handle.write(json.dumps({"type": "assistant", "pad": "x" * 1000}) + "\n")
+        limits = (serve.TAIL_BYTES, serve.WHOLE_FILE_LIMIT, serve.MODE_SCAN_BYTES)
+        serve.TAIL_BYTES, serve.WHOLE_FILE_LIMIT, serve.MODE_SCAN_BYTES = 1500, 3000, 1000
+        try:
+            self.assertEqual(serve.Transcripts(self.projects).describe("s5")["permissionMode"], "auto")
+        finally:
+            serve.TAIL_BYTES, serve.WHOLE_FILE_LIMIT, serve.MODE_SCAN_BYTES = limits
+
+    def test_a_session_keeps_its_mode_while_its_newest_part_names_none(self):
+        path = self.transcript("s6", [{"type": "user", "permissionMode": "auto"}])
+        transcripts = serve.Transcripts(self.projects)
+        self.assertEqual(transcripts.describe("s6")["permissionMode"], "auto")
+        # a long stretch of work: Claude's steps and their output, no prompt of the person's
+        with path.open("a") as handle:
+            handle.write(json.dumps({"type": "assistant", "pad": "x" * 5000}) + "\n")
+        limits = (serve.TAIL_BYTES, serve.WHOLE_FILE_LIMIT)
+        serve.TAIL_BYTES, serve.WHOLE_FILE_LIMIT = 1000, 2000
+        try:
+            self.assertEqual(transcripts.describe("s6")["permissionMode"], "auto")
+        finally:
+            serve.TAIL_BYTES, serve.WHOLE_FILE_LIMIT = limits
 
     def test_unknown_unsafe_or_nameless_sessions_give_nothing(self):
         self.transcript("s3", [{"type": "user", "text": "hi"}])
@@ -892,10 +919,44 @@ class SendTest(unittest.TestCase):
     def body(**fields):
         return json.dumps({"sessionId": "s1", "text": "hi", **fields}).encode()
 
-    def test_a_plain_message_with_real_images_is_taken(self):
-        picture = {"mediaType": "image/png", "data": base64.b64encode(PNG).decode()}
-        self.assertEqual(serve.read_send_request(self.body(text="  hi  ", images=[picture])), (("s1", "hi", [("png", PNG)], "queue", []), ""))
+    def test_a_plain_message_names_the_files_sent_ahead(self):
+        picture, notes = {"upload": "a" * 32}, {"upload": "b" * 32}
+        self.assertEqual(serve.read_send_request(self.body(text="  hi  ", images=[picture], files=[notes])), (("s1", "hi", ["a" * 32], "queue", ["b" * 32]), ""))
         self.assertEqual(serve.read_send_request(self.body(text="", images=[picture]))[0][1], "")
+
+    def test_an_image_or_file_is_saved_as_it_comes_whatever_its_size(self):
+        big = io.BytesIO(PNG + b"x" * (25 * 1024 * 1024))
+        image_id, problem = self.inbox.receive("s1", "image", "shot.png", "image/png", big, len(big.getvalue()), 1000)
+        self.assertEqual(problem, "")
+        video = io.BytesIO(b"\x00\x00\x00\x14ftypqt  " + b"v" * (3 * 1024 * 1024))
+        file_id, problem = self.inbox.receive("s1", "file", "../Screen Recording 14.35.27.mov", "video/quicktime", video, len(video.getvalue()), 1000)
+        self.assertEqual(problem, "")
+        sent, problem = self.inbox.claim("s1", [image_id], [file_id])
+        message_id = self.inbox.send("s1", "look", *sent[:1], "queue", 2000, sent[1])
+        stored = json.loads((Path(self.tmp.name) / "inbox" / "s1" / f"{message_id}.json").read_text())
+        self.assertEqual(Path(stored["images"][0]).read_bytes(), big.getvalue())
+        self.assertTrue(stored["files"][0].endswith(f"{message_id}-f1-Screen Recording 14.35.27.mov"))
+        self.assertEqual(Path(stored["files"][0]).read_bytes(), video.getvalue())
+        # moved to its name, not copied: nothing is left behind
+        self.assertEqual([path.name for path in (Path(self.tmp.name) / "uploads" / "s1").glob(".up-*")], [])
+        # each goes with one message only
+        self.assertEqual(self.inbox.claim("s1", [image_id], []), (None, "An image is not there any more. Add it again."))
+
+    def test_a_file_sent_ahead_is_refused_when_it_is_not_what_it_says(self):
+        self.assertEqual(self.inbox.receive("s1", "image", "x.png", "image/png", io.BytesIO(b"not a picture"), 13, 0), (None, "That image could not be read."))
+        self.assertEqual(self.inbox.receive("s1", "image", "x.svg", "image/svg+xml", io.BytesIO(b"<svg/>"), 6, 0)[0], None)
+        self.assertEqual(self.inbox.receive("../x", "file", "x", "", io.BytesIO(b"x"), 1, 0)[0], None)
+        # cut off on the way: no half file is kept
+        self.assertEqual(self.inbox.receive("s1", "file", "cut.txt", "text/plain", io.BytesIO(b"short"), 100, 0), (None, "The file did not arrive whole. Try adding it again."))
+        self.assertEqual(list((Path(self.tmp.name) / "uploads" / "s1").glob(".up-*")), [])
+
+    def test_a_file_sent_for_a_message_that_never_went_is_cleared_a_day_later(self):
+        file_id, _ = self.inbox.receive("s1", "file", "old.txt", "text/plain", io.BytesIO(b"old"), 3, 1000)
+        folder = Path(self.tmp.name) / "uploads" / "s1"
+        [old] = folder.glob(f".up-{file_id}-f-*")
+        os.utime(old, (1000, 1000))
+        self.inbox.receive("s1", "file", "new.txt", "text/plain", io.BytesIO(b"new"), 3, 1000 + serve.UPLOAD_KEPT_S + 1)
+        self.assertFalse(old.exists())
 
     def test_a_long_message_goes_and_one_too_long_says_so(self):
         long = "line\n" * 100_000
@@ -919,12 +980,9 @@ class SendTest(unittest.TestCase):
         self.assertIsNone(serve.read_send_request(self.body(mode="later"))[0])
 
     def test_anything_odd_is_refused(self):
-        fake = {"mediaType": "image/png", "data": base64.b64encode(b"not a picture").decode()}
-        svg = {"mediaType": "image/svg+xml", "data": base64.b64encode(b"<svg/>").decode()}
         for body in [
             b"not json", b"[]", self.body(sessionId="../etc"), self.body(text=""), self.body(text="x" * (serve.MESSAGE_TEXT_MAX + 1)),
-            self.body(images=[fake]), self.body(images=[svg]), self.body(images=[{"mediaType": "image/png", "data": "@@@"}]),
-            self.body(images=[{"mediaType": "image/png", "data": base64.b64encode(PNG).decode()}] * (serve.MAX_IMAGES + 1)),
+            self.body(images=[{"upload": "../../etc/passwd"}]), self.body(files=[{"upload": "short"}]), self.body(images=["a" * 32]),
             self.body(images="no"), self.body(text=5), self.body(mode=1),
         ]:
             request, problem = serve.read_send_request(body)
@@ -944,19 +1002,16 @@ class SendTest(unittest.TestCase):
         self.assertEqual(self.inbox.pending("../x"), [])
 
     def test_any_dropped_file_goes_along_under_its_own_name(self):
-        notes = {"name": "../../etc/My notes (v2).txt", "data": base64.b64encode(b"hello").decode()}
-        request, problem = serve.read_send_request(self.body(files=[notes]))
-        self.assertEqual((request[4], problem), ([("My notes (v2).txt", b"hello")], ""))
+        file_id, _ = self.inbox.receive("s1", "file", "../../etc/My notes (v2).txt", "text/plain", io.BytesIO(b"hello"), 5, 0)
         self.assertEqual(serve.safe_file_name("a/b/crème brûlée?.md"), "cr_me br_l_e_.md")
         self.assertEqual(serve.safe_file_name(""), "file")
-        message_id = self.inbox.send("s1", "", [], "queue", 1000, request[4])
+        (images, files), _ = self.inbox.claim("s1", [], [file_id])
+        self.assertEqual(files[0][0], "My notes (v2).txt")
+        message_id = self.inbox.send("s1", "", images, "queue", 1000, files)
         stored = json.loads((Path(self.tmp.name) / "inbox" / "s1" / f"{message_id}.json").read_text())
         self.assertTrue(stored["files"][0].endswith(f"{message_id}-f1-My notes (v2).txt"))
         self.assertEqual(Path(stored["files"][0]).read_bytes(), b"hello")
         self.assertEqual(self.inbox.pending("s1")[0]["files"], 1)
-        too_many = self.body(files=[notes] * (serve.MAX_FILES + 1))
-        self.assertIsNone(serve.read_send_request(too_many)[0])
-        self.assertIsNone(serve.read_send_request(self.body(files=[{"name": "x", "data": "@@@"}]))[0])
 
     def test_a_sessions_slash_commands_are_read_plainly(self):
         folder = Path(self.tmp.name) / "commands"
@@ -1684,12 +1739,6 @@ class AddedConversationTest(unittest.TestCase):
         [two] = serve.existing_conversations(self.projects, self.transcripts, {}, set())
         self.assertEqual((two["where"], two["onBoard"]), ("terminal", False))
 
-    def test_ending_stops_claude_then_clears_the_context(self):
-        inbox = serve.Inbox(self.dir / "inbox", self.dir / "uploads")
-        serve.end_session(inbox, "abc-1", 1000)
-        stored = [json.loads(p.read_text()) for p in sorted((self.dir / "inbox" / "abc-1").glob("*.json"))]
-        self.assertEqual([(m.get("stop"), m.get("text"), m.get("mode")) for m in stored], [(True, None, None), (None, "/clear", "queue")])
-
     def test_a_conversation_resumes_in_its_own_folder(self):
         body = json.dumps({"sessionId": "abc-1", "resume": True}).encode()
         self.assertEqual(serve.read_resume_request(body, self.transcripts), (os.path.realpath(self.folder), "abc-1"))
@@ -2086,6 +2135,46 @@ class BackgroundTest(unittest.TestCase):
         self.assertEqual(sorted(one["sessionId"] for one in stopped), ["ended", "stopped"])
         self.assertEqual(next(one for one in stopped if one["sessionId"] == "stopped")["title"], "Fix stopped")
 
+    def test_a_session_lost_with_the_keeper_is_listed_at_once(self):
+        kept = serve.Backgrounds(self.home / "background.json")
+        sessions = self.home / "sessions"
+        sessions.mkdir()
+        projects = self.home / "projects" / "p"
+        projects.mkdir(parents=True)
+        kept.keep("lost", str(self.home), "auto", 1)
+        (projects / "lost.jsonl").write_text(json.dumps({"type": "user", "cwd": str(self.home), "message": {"content": "Fix it"}}) + "\n")
+        now = 10_000_000
+        # its snapshot was written a moment before the keeper went: it would look as if it ran on
+        (sessions / "lost.json").write_text(json.dumps({"updatedAt": now - 1000}))
+        transcripts = serve.Transcripts(self.home / "projects")
+        self.assertEqual(serve.stopped_backgrounds(kept, [], sessions, transcripts, now), [])
+        self.assertEqual([one["sessionId"] for one in serve.stopped_backgrounds(kept, [], sessions, transcripts, now, {"lost"})], ["lost"])
+
+    def test_a_keeper_that_went_away_by_itself_loses_its_sessions(self):
+        watch = serve.KeeperWatch()
+        running = [{"id": "t1", "kind": "claude", "sessionId": "s1"}, {"id": "t2", "kind": "claude", "sessionId": "s2"}, {"id": "t3", "folder": "/x"}, {"id": "t4", "kind": "claude", "sessionId": "s4", "endedAt": 5}]
+        self.assertEqual(watch.look(100, running, 1_000), (set(), set()))
+        self.assertEqual(watch.look(100, running, 3_000), (set(), set()))
+        # gone, or another keeper started since: what ran in the last one stopped with it
+        self.assertEqual(watch.look(None, [], 5_000), ({"s1", "s2"}, set()))
+        # the person closed the message: it is not shown again, but the cards stay marked
+        watch.dismiss()
+        self.assertEqual(watch.look(200, [], 7_000), ({"s1", "s2"}, {"s1", "s2"}))
+        # one resumed runs again, and is neither
+        self.assertEqual(watch.look(200, running[:1], 9_000), ({"s2"}, {"s2"}))
+
+    def test_a_keeper_ended_on_purpose_or_long_unseen_loses_nothing(self):
+        watch = serve.KeeperWatch()
+        running = [{"id": "t1", "kind": "claude", "sessionId": "s1"}]
+        watch.look(100, running, 1_000)
+        # End everything: a look on its way then still sees the old keeper
+        watch.ended_on_purpose(100)
+        watch.look(100, running, 2_000)
+        self.assertEqual(watch.look(None, [], 3_000), (set(), set()))
+        # the board did not look for a long while: the session may have ended by itself since
+        watch.look(300, running, 4_000)
+        self.assertEqual(watch.look(None, [], 4_000 + serve.KEEPER_SEEN_MS), (set(), set()))
+
     def test_a_message_from_the_inbox_goes_in_as_the_mod_would_write_it(self):
         self.assertEqual(serve.prompt_for({"text": " Look ", "files": ["/f.txt"], "images": ["/i.png"]}), "Look\n\nFiles I added (open them with the Read tool):\n- /f.txt\n\nImages I added (open them with the Read tool):\n- /i.png")
         self.assertEqual(serve.prompt_for({"text": "Hi"}), "Hi")
@@ -2137,6 +2226,183 @@ class BackgroundTest(unittest.TestCase):
         # one that runs in the keeper already is not started twice
         terms.cards = [{"id": "t1", "sessionId": "s1", "endedAt": None}]
         self.assertEqual(resume("go"), (None, "It runs in the background already."))
+
+    def test_a_background_session_gets_its_card_first_and_starts_with_the_message_written_there(self):
+        kept = serve.Backgrounds(self.home / "background.json")
+        sessions = self.home / "sessions"
+        sessions.mkdir()
+        transcripts = serve.Transcripts(self.home / "projects")
+        inbox = serve.Inbox(self.home / "inbox", self.home / "uploads")
+        terms = FakeTerms()
+        session_id, problem = serve.plan_background(kept, str(self.home), "auto", 1000, program="/bin/claude")
+        self.assertEqual(problem, "")
+        # its card, before Claude runs: new, for its first message
+        [card] = serve.planned_cards(kept, sessions, 5000)
+        self.assertEqual({key: card[key] for key in ("sessionId", "folder", "planned", "takesMessages", "updatedAt", "permissionMode")}, {"sessionId": session_id, "folder": str(self.home), "planned": True, "takesMessages": True, "updatedAt": 5000, "permissionMode": "auto"})
+        start = lambda: serve.resume_background(terms, kept, inbox, transcripts, session_id, "", program="/bin/claude", trusted=lambda folder: True)
+        self.assertEqual(start(), (None, "Write the first message: Claude starts with it."))
+        # the message written in its card, with a video, goes in as Claude starts: a new session, with that id
+        video_id, _ = inbox.receive(session_id, "file", "clip.mov", "video/quicktime", io.BytesIO(b"moov"), 4, 0)
+        (_, files), _ = inbox.claim(session_id, [], [video_id])
+        inbox.send(session_id, "Look at this", [], "queue", 2000, files)
+        started, problem = start()
+        self.assertEqual((started["begun"], problem), (True, ""))
+        command = terms.started[0]["command"]
+        self.assertEqual(command[:5], ["/bin/claude", "--session-id", session_id, "--permission-mode", "auto"])
+        self.assertTrue(command[-1].startswith("Look at this\n\nFiles I added (open them with the Read tool):\n- ") and command[-1].endswith("-f1-clip.mov"))
+        # while Claude starts its card stays, marked begun; once its own snapshot comes, that is its card
+        kept.keep(session_id, str(self.home), "auto", 3000, planned=True, begun_at=3000)
+        self.assertTrue(serve.planned_cards(kept, sessions, 6000)[0]["begun"])
+        (sessions / f"{session_id}.json").write_text("{}")
+        self.assertEqual(len(serve.planned_cards(kept, sessions, 7000)), 1)
+        (sessions / f"{session_id}.json").write_text(json.dumps({"turn": {"startedAt": 3500}}))
+        self.assertEqual(serve.planned_cards(kept, sessions, 7000), [])
+        # stopped later, it is resumed as any other
+        terms.cards = []
+        (self.home / "projects" / "p").mkdir(parents=True)
+        (self.home / "projects" / "p" / f"{session_id}.jsonl").write_text(json.dumps({"type": "user", "cwd": str(self.home), "message": {"content": "hi"}}) + "\n")
+        serve.resume_background(terms, kept, inbox, serve.Transcripts(self.home / "projects"), session_id, "go on", program="/bin/claude", trusted=lambda folder: True)
+        self.assertEqual(terms.started[1]["command"][1:3], ["--resume", session_id])
+
+    def test_a_deleted_conversation_is_gone_from_claude_and_kept_in_the_trash(self):
+        claude = self.home / "claude"
+        project = claude / "projects" / "-Users-x"
+        (project / "s1" / "tool-results").mkdir(parents=True)
+        transcript = project / "s1.jsonl"
+        transcript.write_text(json.dumps({"type": "user", "cwd": str(self.home), "message": {"content": "Fix it"}}) + "\n")
+        (project / "s1" / "tool-results" / "out.txt").write_text("output")
+        (claude / "file-history" / "s1").mkdir(parents=True)
+        (claude / "session-env" / "s1").mkdir(parents=True)
+        # another conversation, and one whose id starts the same, stay
+        (project / "s2.jsonl").write_text("{}\n")
+        ccc_sessions, ccc_uploads = self.home / "ccc" / "sessions", self.home / "ccc" / "uploads"
+        (ccc_uploads / "s1").mkdir(parents=True)
+        ccc_sessions.mkdir(parents=True)
+        (ccc_sessions / "s1.json").write_text("{}")
+        (ccc_uploads / "s1" / "shot.png").write_bytes(PNG)
+        transcripts = serve.Transcripts(claude / "projects")
+        trash = self.home / "Trash"
+        moved, folder, problem = serve.delete_conversation("s1", transcripts, "Fix the cart/login?", trash, claude, (ccc_sessions, ccc_uploads), now=lambda: 0)
+        self.assertEqual((moved, problem), (6, ""))
+        self.assertEqual(folder, trash / "Claude conversation Fix the cart_login_ s1")
+        self.assertIsNone(transcripts.find("s1"))
+        self.assertTrue((project / "s2.jsonl").exists())
+        self.assertIn("Fix it", (folder / "s1.jsonl").read_text())
+        self.assertEqual((folder / "s1" / "tool-results" / "out.txt").read_text(), "output")
+        self.assertTrue((folder / "ccc" / "sessions-s1.json").exists() and (folder / "ccc" / "uploads-s1" / "shot.png").exists())
+        self.assertTrue((folder / "file-history-s1").is_dir() and (folder / "session-env-s1").is_dir())
+        # a Claude that was stopping writes its snapshot once more: it follows the rest to the Trash
+        (ccc_sessions / "s1.json").write_text('{"endedAt": 9}')
+        self.assertEqual(serve.move_to_trash("s1", folder, transcripts, claude, (ccc_sessions, ccc_uploads)), 1)
+        self.assertEqual((folder / "ccc" / "sessions-s1 later.json").read_text(), '{"endedAt": 9}')
+        self.assertFalse((ccc_sessions / "s1.json").exists())
+        # a card left with no conversation behind it goes the same way, so it can always be closed
+        (ccc_sessions / "s3.json").write_text("{}")
+        moved, folder, problem = serve.delete_conversation("s3", transcripts, "", trash, claude, (ccc_sessions, ccc_uploads))
+        self.assertEqual((moved, problem, (folder / "ccc" / "sessions-s3.json").exists()), (1, "", True))
+        self.assertEqual(serve.delete_conversation("../x", transcripts, "", trash, claude, ())[2], "That conversation could not be found.")
+
+    def test_a_deleted_conversation_is_never_shown_again(self):
+        deleted = serve.Deleted(self.home / "deleted.json")
+        deleted.add("s1", self.home / "Trash" / "x", 5)
+        sessions = [{"sessionId": "s1"}, {"sessionId": "s2"}]
+        self.assertEqual(serve.without_deleted(sessions, deleted.load()), [{"sessionId": "s2"}])
+        self.assertEqual(deleted.load()["s1"], {"at": 5, "trash": str(self.home / "Trash" / "x")})
+
+    def test_a_conversation_claude_still_runs_is_stopped_or_left_before_it_is_deleted(self):
+        sessions = self.home / "sessions"
+        sessions.mkdir()
+        terms = FakeTerms()
+        # ended, or never on the board: it can go
+        (sessions / "s1.json").write_text(json.dumps({"endedAt": 5}))
+        self.assertEqual(serve.stop_before_deleting(terms, "s1", sessions), "")
+        self.assertEqual(serve.stop_before_deleting(terms, "s9", sessions), "")
+        # still running where it was started: closed there first
+        (sessions / "s2.json").write_text(json.dumps({"updatedAt": 5}))
+        self.assertIn("Close it there first", serve.stop_before_deleting(terms, "s2", sessions))
+        # running in CCC's background: ended first
+        terms.cards = [{"id": "t1", "sessionId": "s2", "endedAt": None}]
+        original = terms.close
+        terms.close = lambda terminal_id: (setattr(terms, "cards", []), original(terminal_id))[1]
+        self.assertEqual(serve.stop_before_deleting(terms, "s2", sessions, wait_s=1), "")
+
+    def test_a_background_claudes_mode_is_read_off_its_own_screen(self):
+        line = lambda words: f"\x1b[2K\x1b[38;5;2m⏵⏵ {words}\x1b[39m (shift+tab to cycle)\r\n".encode()
+        self.assertEqual(serve.screen_mode(line("auto mode on")), "auto")
+        # redrawn in part, with cursor moves between the letters, it still reads
+        self.assertEqual(serve.screen_mode(b"\x1b[2Cplan\x1b[1C mode\x1b[1Con"), "plan")
+        self.assertEqual(serve.screen_mode(line("auto mode on") + "⏸ manual mode on · ? for shortcuts".encode()), "manual")
+        self.assertIsNone(serve.screen_mode(b"Do you want to proceed?"))
+
+    def test_a_box_open_on_a_background_claudes_screen_is_never_missed(self):
+        mode = "⏵⏵ auto mode on (shift+tab to cycle)\r\n".encode()
+        box = "Do you want to proceed?\r\n\x1b[1m❯ 1. Yes\x1b[0m\r\n 2. No\r\n Esc to cancel · Tab to amend\r\n".encode()
+        self.assertTrue(serve.screen_asks(mode + box))
+        # answered: Claude draws its mode line again under it
+        self.assertFalse(serve.screen_asks(mode + box + mode))
+        self.assertFalse(serve.screen_asks(mode))
+        cards = [{"id": "t1", "kind": "claude", "sessionId": "s1", "asking": True}]
+        # an auto mode session whose approval was never noticed by Claude Code's notice: shown now
+        seen = {}
+        [marked] = serve.with_screen_boxes([{"sessionId": "s1", "permissionMode": "auto", "turn": {"isRunning": True, "waiting": {"kind": "approval", "since": 5, "text": "$ ls"}}}], cards, 100, seen)
+        self.assertTrue(marked["turn"]["waiting"]["isShown"])
+        # nothing known waits, yet a box is open: the box itself, first seen then, and kept so
+        [marked] = serve.with_screen_boxes([{"sessionId": "s1", "turn": {"isRunning": True}}], cards, 200, seen)
+        self.assertEqual({key: marked["turn"]["waiting"][key] for key in ("kind", "since", "isShown", "onScreen")}, {"kind": "approval", "since": 200, "isShown": True, "onScreen": True})
+        [again] = serve.with_screen_boxes([{"sessionId": "s1", "turn": {"isRunning": True}}], cards, 900, seen)
+        self.assertEqual(again["turn"]["waiting"]["since"], 200)
+        # answered, nothing is added any more
+        [done] = serve.with_screen_boxes([{"sessionId": "s1", "turn": {"isRunning": True}}], [{**cards[0], "asking": False}], 1000, seen)
+        self.assertNotIn("waiting", done["turn"])
+
+    def test_a_background_claude_is_switched_to_a_mode_as_shift_tab_would(self):
+        class Screen(FakeTerms):
+            order = ["auto", "manual", "acceptEdits", "plan"]
+            words = {"auto": "auto mode on", "manual": "manual mode on", "acceptEdits": "accept edits on", "plan": "plan mode on"}
+
+            def __init__(self, mode):
+                super().__init__()
+                self.cards = [{"id": "t1", "kind": "claude", "sessionId": "s1", "endedAt": None}]
+                self.mode, self.out, self.keys = mode, b"", []
+                self.draw()
+
+            def draw(self):
+                self.out += f"⏵⏵ {self.words[self.mode]} (shift+tab to cycle)\r\n".encode()
+
+            def screen(self, terminal_id):
+                return self.out, len(self.out)
+
+            def type(self, terminal_id, text):
+                self.keys.append(text)
+                self.mode = self.order[(self.order.index(self.mode) + 1) % len(self.order)]
+                self.draw()
+                return True
+
+        terms = Screen("auto")
+        self.assertEqual(serve.switch_mode(terms, "s1", "plan", sleep=lambda s: None), "")
+        self.assertEqual((terms.mode, terms.keys), ("plan", [serve.SHIFT_TAB] * 3))
+        # already there: no key at all
+        self.assertEqual(serve.switch_mode(terms, "s1", "plan", sleep=lambda s: None), "")
+        self.assertEqual(len(terms.keys), 3)
+        self.assertEqual(serve.switch_mode(terms, "s1", "bypassPermissions"), "Pick one of the modes in the list.")
+        self.assertIn("does not run in CCC's background", serve.switch_mode(terms, "s2", "auto"))
+        # its card says the mode its screen shows
+        self.assertEqual(serve.with_screen_modes(terms, terms.cards)[0]["mode"], "plan")
+        # a screen with no mode line (Claude asks something there) is left alone
+        terms.out = b"Do you want to proceed?"
+        self.assertIn("shows no mode right now", serve.switch_mode(terms, "s1", "auto", sleep=lambda s: None))
+
+    def test_a_new_sessions_first_message_names_its_files(self):
+        inbox = serve.Inbox(self.home / "inbox", self.home / "uploads")
+        shot, _ = inbox.receive("new-abc", "image", "shot.png", "image/png", io.BytesIO(PNG), len(PNG), 0)
+        notes, _ = inbox.receive("new-abc", "file", "notes.txt", "text/plain", io.BytesIO(b"hi"), 2, 0)
+        body = json.dumps({"uploadSession": "new-abc", "images": [{"upload": shot}], "files": [{"upload": notes}]}).encode()
+        attached, problem = serve.start_attachments(body, inbox, 1000)
+        self.assertEqual(problem, "")
+        self.assertTrue(attached["images"][0].endswith("-1.png") and attached["files"][0].endswith("-f1-notes.txt"))
+        self.assertEqual(Path(attached["files"][0]).read_bytes(), b"hi")
+        self.assertEqual(serve.start_attachments(b"{}", inbox, 1000), ({"images": [], "files": []}, ""))
+        self.assertIsNone(serve.start_attachments(json.dumps({"uploadSession": "../x", "files": [{"upload": notes}]}).encode(), inbox, 1000)[0])
 
     def test_a_background_claude_is_named_after_its_conversation_and_marked_when_its_card_is_closed(self):
         projects = self.home / "projects" / "p"

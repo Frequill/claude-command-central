@@ -5,6 +5,7 @@ export const LOG_LINES = 15
 const PROTECTED_BRANCHES = new Set(['main', 'master'])
 
 export const STATE_LABEL = {
+  new: 'NEW',
   working: 'WORKING',
   'needs-you': 'NEEDS YOU',
   done: 'DONE',
@@ -73,11 +74,9 @@ export function startState({ folder, where, isStarting, appName = 'Terminal', pr
     app: 'Opens a new session in the Claude app, in this folder, with your first message already written in it. Press Enter there to send it, and it shows up here. (The app never sends a message by itself.)',
     terminal: `Opens ${appName} in this folder and starts claude with your first message. It shows up here as soon as Claude has it.`,
     background:
-      'CCC runs claude itself, with your first message, and nothing opens: it shows up here and keeps working when you close the app, your terminals or CCC. Its card can show its terminal. In a folder Claude was never told to trust, it asks first: its terminal then comes onto the board for your answer.',
+      'Its card comes onto the board now: write your first message there, with any images, videos or files, and sending it starts Claude. CCC runs claude itself and nothing opens; it keeps working when you close the app, your terminals or CCC. Its card can show its terminal. In a folder Claude was never told to trust, it asks first: its terminal then comes onto the board for your answer.',
   }
-  // in the background Claude starts only with a message, and nobody is there to type one
-  const needsPrompt = mode === 'new' && place === 'background' && !String(prompt ?? '').trim()
-  return { where: place, canStart: Boolean(folder) && !isStarting && !needsPrompt, note: notes[place], needsPrompt }
+  return { where: place, canStart: Boolean(folder) && !isStarting, note: notes[place] }
 }
 
 /**
@@ -117,6 +116,33 @@ export function keeperLine(keeper, rows) {
   const shells = rows.length - claude
   if (rows.length === 0) return 'CCC\u2019s keeper is running, with nothing in it. It ends by itself after 15 minutes.'
   return `CCC\u2019s keeper is running: ${[claude && count(claude, 'background session', 'background sessions'), shells && count(shells, 'shell', 'shells')].filter(Boolean).join(' and ')}.`
+}
+
+/**
+ * The background sessions that stopped when CCC's keeper went away without being asked (it
+ * crashed, or was force-quit), as the Stopped list has them; those the person was not told of yet;
+ * and the message's line about them.
+ */
+export function lostSessions(keeper, stopped) {
+  const lost = new Set(Array.isArray(keeper?.lost) ? keeper.lost : [])
+  return (Array.isArray(stopped) ? stopped : []).filter(one => lost.has(one?.sessionId))
+}
+
+export function lostToTell(keeper, stopped) {
+  const seen = new Set(Array.isArray(keeper?.lostSeen) ? keeper.lostSeen : [])
+  return lostSessions(keeper, stopped).filter(one => !seen.has(one.sessionId))
+}
+
+export function lostLine(lost) {
+  // a title's own full stop is left out, so the sentence does not end on two; a long one is cut short
+  const shortened = title => {
+    const bare = String(title ?? '').replace(/[.!?\u2026\s]+$/, '')
+    return bare.length > 60 ? `${bare.slice(0, 57)}\u2026` : bare
+  }
+  const names = lost.map(one => `\u201c${shortened(one.title)}\u201d`)
+  const listed = names.length <= 3 ? names.join(', ') : `${names.slice(0, 2).join(', ')} and ${names.length - 2} more`
+  if (lost.length === 1) return `A background session stopped with it: ${listed}. Its conversation is saved.`
+  return `${lost.length} background sessions stopped with it: ${listed}. Their conversations are saved.`
 }
 
 /** The terminal a session runs in when CCC started it in the background, or null. */
@@ -369,6 +395,8 @@ export const RUN_LABEL = {
 
 /** Where a session stands: ended, gone quiet, needs the person, working, or done for now. */
 export function sessionState(session, now) {
+  // made on the board for its first message: Claude has not started yet
+  if (session.planned && !session.begun) return 'new'
   if (session.endedAt !== undefined) return 'ended'
   if (now - (session.updatedAt ?? 0) > STALE_MS) return 'stale'
   if (waitingFor(session)) return 'needs-you'
@@ -476,12 +504,21 @@ export function openLink(session) {
   return null
 }
 
-/** Why a session's context cannot be cleared from CCC, or '' when it can. */
-export function endProblem(session) {
-  if (!session) return 'This session is no longer on the board.'
-  if (!session.takesMessages) return 'This session runs an older CCC, so CCC cannot clear it. Close it from CCC, and clear it where it runs.'
-  if (session.endedAt !== undefined) return 'This session is not running, so there is nothing to clear. Close it from CCC.'
-  return ''
+/** What Close does to a session, as its choice in the close window says it. */
+export function closeNote(session, isBackground = false) {
+  const resume = 'The conversation stays in Claude\u2019s history: + \u2192 From an existing conversation, or claude --resume, picks it up again.'
+  if (isBackground) return `Claude stops in the background. ${resume}`
+  if (session && session.endedAt === undefined) return `CCC lets go of it; Claude goes on where it was started (the Claude app or a terminal). ${resume}`
+  return resume
+}
+
+/**
+ * Why a session's conversation cannot be deleted from Claude now, or '' when it can: Claude still
+ * running it would write it again. One in CCC's background is ended first, so it can go.
+ */
+export function deleteProblem(session, isBackground = false) {
+  if (!session || isBackground || session.endedAt !== undefined) return ''
+  return 'Claude still runs this session where it was started. Close it there first, then delete it here.'
 }
 
 /** The conversations whose name or folder holds every word searched for. */
@@ -507,7 +544,8 @@ export function timeAgo(at, now) {
 
 /** A chat only opened in the app, never written in, is no work of the day and stays off the board. */
 function isWrittenIn(session) {
-  return Number.isFinite(session.turn?.startedAt)
+  // a card made on the board for its first message is there to be written in
+  return Number.isFinite(session.turn?.startedAt) || session.planned === true
 }
 
 /** The local calendar day of a moment, as YYYY-MM-DD (the mod writes the same). */

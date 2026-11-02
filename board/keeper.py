@@ -15,6 +15,7 @@ same on every system, so only the terminals themselves (terminals.py) differ on 
     python3 keeper.py stop [--file F]  ends the keeper and every terminal it runs
 """
 
+import base64
 import hashlib
 import json
 import os
@@ -89,6 +90,9 @@ class Keeper:
             return {"ok": terms.show(args.get("id"), args.get("hidden"))}
         if call == "close":
             return {"ok": terms.close(args.get("id"))}
+        if call == "screen":
+            seen = terms.screen(args.get("id"))
+            return {"ok": True, "data": terminals.b64(seen[0]), "seq": seen[1]} if seen else {"ok": False}
         if call == "where":
             return {"ok": True, "folder": terms.folder_now(args.get("id"))}
         if call == "stream":
@@ -290,6 +294,12 @@ class KeptTerminals:
                 return {"ok": False, "problem": "CCC's keeper did not answer."}
         return {"ok": False, "problem": "CCC's keeper did not answer."}
 
+    @property
+    def keeper_id(self):
+        """Which keeper the last call reached: another one (or none) means the last one went away."""
+        info = self.info
+        return (info.get("pid"), info.get("port")) if isinstance(info, dict) else None
+
     def list(self) -> list:
         cards = self.call("list").get("terminals")
         return cards if isinstance(cards, list) else []
@@ -309,6 +319,14 @@ class KeptTerminals:
 
     def show(self, terminal_id, is_hidden) -> bool:
         return self.call("show", {"id": terminal_id, "hidden": is_hidden}).get("ok") is True
+
+    def screen(self, terminal_id):
+        """A terminal's newest output and how much it wrote in all, or None. A keeper running older
+        code has no such call: None too."""
+        answer = self.call("screen", {"id": terminal_id})
+        if not answer.get("ok") or not isinstance(answer.get("data"), str):
+            return None
+        return base64.b64decode(answer["data"]), answer.get("seq", 0)
 
     def close(self, terminal_id) -> bool:
         return self.call("close", {"id": terminal_id}).get("ok") is True
