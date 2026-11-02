@@ -428,6 +428,13 @@ body.offline .content {
   transition: opacity 0.4s;
 }
 
+/* while a window (settings, a new session, a question) is open, the board behind it stays where it is.
+   The scroll bar's space is kept, so the cards do not shift sideways when it goes. */
+html:has(dialog[open]) {
+  overflow: hidden;
+  scrollbar-gutter: stable;
+}
+
 /* the hand closes the moment the person presses on a header, and stays closed while they drag */
 body.is-holding,
 body.is-holding *,
