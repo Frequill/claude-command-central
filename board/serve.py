@@ -2957,7 +2957,9 @@ class CommandRuns:
                 if not terminal:
                     return {"ok": False, "problem": problem}
                 replaced = self.close_old(terms, session_id, runs)
-            run = {"id": "r" + secrets.token_hex(6), "command": command, "folder": folder, "terminalId": terminal, "shell": kind, "startedAt": now_ms, "typedAt": None, "from": None, "endedAt": None, "exitCode": None, "output": ""}
+            # in the order the clicks came in, two in the same millisecond too: the terminal runs them so
+            started_at = max([now_ms] + [run["startedAt"] + 1 for run in runs if isinstance(run.get("startedAt"), int)])
+            run = {"id": "r" + secrets.token_hex(6), "command": command, "folder": folder, "terminalId": terminal, "shell": kind, "startedAt": started_at, "typedAt": None, "from": None, "endedAt": None, "exitCode": None, "output": ""}
             self.write(session_id, run)
             self.prune(session_id)
         # typed at once when the shell waits at its prompt; a new one is typed into once it does

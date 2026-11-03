@@ -2691,6 +2691,14 @@ class CommandRunsTest(unittest.TestCase):
         self.runs.settle(terms, 4000)
         self.assertEqual(self.sent, [])
 
+    def test_runs_clicked_in_the_same_millisecond_run_in_the_order_they_came(self):
+        terms = RunTerms()
+        terms.prints("t000000000001", PROMPT)
+        for command in ("first", "second", "third"):
+            self.runs.start(terms, self.transcripts, "s1", command, 1000)
+        self.assertEqual([run["command"] for run in self.runs.shown("s1")], ["first", "second", "third"])
+        self.assertEqual(terms.typed, [("t000000000001", "\x1b[200~first\x1b[201~\r")])
+
     def test_nothing_is_typed_while_the_shell_runs_something_of_its_own(self):
         terms = RunTerms()
         terms.prints("t000000000001", PROMPT + b"npm run dev\r\n\x1b]7770;ccc;start\x07ready on :3000\r\n")
