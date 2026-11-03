@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import answer_from_ccc
+import code_links
 import approve_from_ccc
 import prompt_seen
 import editors
@@ -2831,6 +2832,219 @@ class RunShellTest(unittest.TestCase):
         # the history goes where the person keeps it, never beside CCC's start files
         self.runs.start(self.terms, self.transcripts, "s1", "echo $HISTFILE", int(time.time() * 1000))
         self.assertEqual(self.settled(3)[2]["output"], str(self.home / ".zsh_history"))
+
+class CodeLinkTest(unittest.TestCase):
+    """Code chips in Claude's replies that open in the person's editor: files by their path, and
+    classes, methods and constants where they are made."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.folder = os.path.realpath(self.tmp.name)
+        self.write("src/push/PushCall.java", """package push;
+
+@Getter
+public class PushCall {
+  public static final String SESSION_END = "end";
+  private Date pushSuccess = null;
+
+  public PushCall(String id) {
+    this.id = id;
+  }
+
+  public boolean hasEnded() {
+    return pushSuccess != null;
+  }
+}
+""")
+        self.write("src/push/PushService.java", """package push;
+
+public interface PushService {
+  void releasePushCall(PushCall call);
+}
+""")
+        self.write("src/push/PushServiceImpl.java", """package push;
+
+public class PushServiceImpl implements PushService {
+  @Override
+  public void releasePushCall(PushCall call) {
+    if (call.getPushSuccess() != null && call.hasEnded()) {
+      releasePushCall(call);
+    }
+    PushCall copy = new PushCall("x");
+  }
+
+  public void pushSuccess(String id) {
+  }
+}
+""")
+        self.write("web/inbox.ts", """export function createInbox(io: InboxIo): Inbox {
+  return { check: async () => 0 }
+}
+
+export const promptFor = (message: Message) => message.text
+
+class Board {
+  async draw(view: View): Promise<void> {
+    createInbox(view.io)
+  }
+}
+""")
+        self.write("tool/serve.py", """MOST_PLACES = 8
+
+
+def open_code(data):
+    return open_code(data)
+
+
+class Handler:
+    def draw(self):
+        pass
+""")
+        subprocess.run(["git", "init", "-q", self.folder], check=True)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def write(self, path, text):
+        full = Path(self.folder) / path
+        full.parent.mkdir(parents=True, exist_ok=True)
+        full.write_text(text)
+
+    def places(self, *chips):
+        return code_links.places_for(self.folder, list(chips), mentions.git_files)
+
+    def test_a_chip_is_a_file_a_name_or_neither(self):
+        self.assertEqual(code_links.kind_of("PushCall.java"), ("file", "PushCall.java", None))
+        self.assertEqual(code_links.kind_of("src/push/PushCall.java:12"), ("file", "src/push/PushCall.java", 12))
+        self.assertEqual(code_links.kind_of("web/inbox.ts:4:2"), ("file", "web/inbox.ts", 4))
+        self.assertEqual(code_links.kind_of("releasePushCall"), ("name", "releasePushCall", None))
+        self.assertEqual(code_links.kind_of("call.getPushSuccess()"), ("name", "getPushSuccess", None))
+        self.assertEqual(code_links.kind_of("PushCall#hasEnded"), ("name", "hasEnded", None))
+        self.assertEqual(code_links.kind_of("PushCall::hasEnded(x, y)"), ("name", "hasEnded", None))
+        # a field of something is no file, though it has a dot
+        self.assertEqual(code_links.kind_of("call.pushStatus"), ("name", "pushStatus", None))
+        # a plain word is code only when the chip shows it is
+        self.assertIsNone(code_links.kind_of("grep"))
+        self.assertEqual(code_links.kind_of("draw()"), ("name", "draw", None))
+        self.assertEqual(code_links.kind_of("self.draw()"), ("name", "draw", None))
+        self.assertIsNone(code_links.kind_of("vmx.inbox.any"))
+        self.assertEqual(code_links.kind_of("pushDone"), ("name", "pushDone", None))
+        for neither in ("!= null", "a sentence with words", "null", "id", "x + 1", "", "-v", "ccc", "TQ"):
+            self.assertIsNone(code_links.kind_of(neither), neither)
+
+    def test_a_file_chip_points_at_the_file_by_its_path_or_its_end(self):
+        found = self.places("PushCall.java", "push/PushService.java:4", "src/push/PushServiceImpl.java", "Missing.java")
+        self.assertEqual(found["PushCall.java"], [{"path": "src/push/PushCall.java", "line": 1}])
+        self.assertEqual(found["push/PushService.java:4"], [{"path": "src/push/PushService.java", "line": 4}])
+        self.assertIn("src/push/PushServiceImpl.java", found)
+        self.assertNotIn("Missing.java", found)
+        # a whole path counts only inside the session's folder
+        inside = os.path.join(self.folder, "web/inbox.ts")
+        self.assertEqual(self.places(inside)[inside], [{"path": "web/inbox.ts", "line": 1}])
+        self.assertEqual(self.places("/etc/hosts"), {})
+        self.assertEqual(self.places("../outside.py"), {})
+
+    def test_a_name_points_where_it_is_made_not_where_it_is_used(self):
+        found = self.places("releasePushCall", "hasEnded", "SESSION_END", "createInbox", "promptFor", "open_code", "MOST_PLACES", "Handler")
+        self.assertEqual(found["releasePushCall"], [{"path": "src/push/PushService.java", "line": 4}, {"path": "src/push/PushServiceImpl.java", "line": 5}])
+        self.assertEqual(found["hasEnded"], [{"path": "src/push/PushCall.java", "line": 12}])
+        self.assertEqual(found["SESSION_END"], [{"path": "src/push/PushCall.java", "line": 5}])
+        self.assertEqual(found["createInbox"], [{"path": "web/inbox.ts", "line": 1}])
+        self.assertEqual(found["promptFor"], [{"path": "web/inbox.ts", "line": 5}])
+        self.assertEqual(found["open_code"], [{"path": "tool/serve.py", "line": 4}])
+        self.assertEqual(found["MOST_PLACES"], [{"path": "tool/serve.py", "line": 1}])
+        self.assertEqual(found["Handler"], [{"path": "tool/serve.py", "line": 8}])
+
+    def test_a_name_made_in_code_and_in_a_test_means_the_code(self):
+        self.write("src/test/push/PushCallTest.java", "class FakeCall {\n  public boolean hasEnded() {\n    return true;\n  }\n}\n")
+        self.write("tests/only_here.py", "def only_in_tests():\n    pass\n")
+        found = self.places("hasEnded", "only_in_tests()")
+        self.assertEqual(found["hasEnded"], [{"path": "src/push/PushCall.java", "line": 12}])
+        self.assertEqual(found["only_in_tests()"], [{"path": "tests/only_here.py", "line": 1}])
+
+    def test_a_common_word_never_crowds_out_the_other_names(self):
+        self.write("src/many.py", "".join(f"run = {i}\nrun()\n" for i in range(50)))
+        with unittest.mock.patch.object(code_links, "MOST_GREP_BYTES", 400):
+            found = self.places("run()", "releasePushCall")
+        self.assertNotIn("run()", found)
+        self.assertEqual(len(found["releasePushCall"]), 2)
+
+    def test_a_class_is_its_own_line_not_its_constructors(self):
+        self.assertEqual(self.places("PushCall")["PushCall"], [{"path": "src/push/PushCall.java", "line": 4}])
+
+    def test_a_getter_no_file_writes_out_is_found_at_its_field(self):
+        # Lombok makes getPushSuccess: the field is where it is, not the method named like it
+        found = self.places("call.getPushSuccess()")
+        self.assertEqual(found["call.getPushSuccess()"], [{"path": "src/push/PushCall.java", "line": 6}])
+
+    def test_a_name_made_in_many_places_or_nowhere_gets_no_link(self):
+        # draw is made twice; with a lower limit, that is too many
+        self.assertEqual(len(self.places("draw()")["draw()"]), 2)
+        with unittest.mock.patch.object(code_links, "MOST_PLACES", 1):
+            self.assertEqual(self.places("draw()"), {})
+        self.assertEqual(self.places("nowhereMade", "getNothing"), {})
+
+    def test_outside_a_repository_only_files_are_links(self):
+        with tempfile.TemporaryDirectory() as plain:
+            (Path(plain) / "notes.md").write_text("def made_here():\n")
+            found = code_links.places_for(plain, ["notes.md", "made_here"], mentions.walked_files)
+            self.assertEqual(found, {"notes.md": [{"path": "notes.md", "line": 1}]})
+
+    def test_a_folder_of_projects_searches_each_project_in_it(self):
+        with tempfile.TemporaryDirectory() as projects:
+            projects = os.path.realpath(projects)
+            os.rename(self.folder, os.path.join(projects, "tq"))
+            (Path(projects) / "loose.py").write_text("def hasEnded():\n")
+            found = code_links.places_for(projects, ["hasEnded", "PushCall.java", "web/inbox.ts:5"], mentions.git_files)
+            os.rename(os.path.join(projects, "tq"), self.folder)
+        # only what is in a project counts: the loose file is in none
+        self.assertEqual(found, {
+            "hasEnded": [{"path": "tq/src/push/PushCall.java", "line": 12}],
+            "PushCall.java": [{"path": "tq/src/push/PushCall.java", "line": 1}],
+            "web/inbox.ts:5": [{"path": "tq/web/inbox.ts", "line": 5}],
+        })
+
+    def test_the_session_names_the_folder_and_opening_looks_the_chip_up_again(self):
+        projects = Path(self.folder) / "projects"
+        (projects / "p").mkdir(parents=True)
+        (projects / "p" / "s1.jsonl").write_text(json.dumps({"type": "user", "cwd": self.folder, "message": {"content": "hi"}}) + "\n")
+        transcripts = serve.Transcripts(projects)
+        lists = mentions.FileLists()
+        found = serve.code_places(transcripts, lists, {"sessionId": "s1", "chips": ["releasePushCall", "!= null", 5]}, found=serve.FoundCode())
+        self.assertEqual(list(found["places"]), ["releasePushCall"])
+        self.assertEqual(serve.code_places(transcripts, lists, {"sessionId": "../s1", "chips": ["releasePushCall"]}, found=serve.FoundCode()), {"places": {}})
+        idea = [{"id": "intellij", "name": "IntelliJ IDEA", "app": "/Applications/IntelliJ IDEA.app"}]
+        opened = []
+        opener = lambda editor, path, line: opened.append((path, line)) or ""
+        answer = serve.open_code(transcripts, lists, {"sessionId": "s1", "chip": "releasePushCall", "at": 1, "editor": "intellij"}, open_file=opener, installed=lambda: idea, found=serve.FoundCode())
+        self.assertEqual((answer, opened), ({"ok": True, "editor": "IntelliJ IDEA"}, [(os.path.join(self.folder, "src/push/PushServiceImpl.java"), 5)]))
+        # the page names a chip and which of its places, never a file
+        for bad in ({"chip": "releasePushCall", "at": 2}, {"chip": "releasePushCall", "at": -1}, {"chip": "releasePushCall", "at": True}, {"chip": "/etc/hosts", "at": 0}, {"chip": 5, "at": 0}):
+            self.assertFalse(serve.open_code(transcripts, lists, {"sessionId": "s1", **bad}, open_file=opener, installed=lambda: idea, found=serve.FoundCode())["ok"], bad)
+        self.assertIn("No editor", serve.open_code(transcripts, lists, {"sessionId": "s1", "chip": "hasEnded", "at": 0}, open_file=opener, installed=lambda: [], found=serve.FoundCode())["problem"])
+        self.assertEqual(len(opened), 1)
+
+    def test_a_click_opens_what_the_board_was_just_shown_without_searching_again(self):
+        clock = [100.0]
+        found = serve.FoundCode(clock=lambda: clock[0])
+        found.keep("/f", ["a", "b"], {"a": [{"path": "x.py", "line": 3}]})
+        self.assertEqual(found.places("/f", "a"), [{"path": "x.py", "line": 3}])
+        # a chip that pointed nowhere is kept as nowhere, not looked for again
+        self.assertEqual(found.places("/f", "b"), [])
+        self.assertIsNone(found.places("/other", "a"))
+        clock[0] += serve.FoundCode.FRESH_S + 1
+        self.assertIsNone(found.places("/f", "a"))
+        # found here: opened with no search at all
+        projects = Path(self.folder) / "projects"
+        (projects / "p").mkdir(parents=True)
+        (projects / "p" / "s1.jsonl").write_text(json.dumps({"type": "user", "cwd": self.folder, "message": {"content": "hi"}}) + "\n")
+        kept = serve.FoundCode()
+        kept.keep(self.folder, ["hasEnded"], {"hasEnded": [{"path": "web/inbox.ts", "line": 2}]})
+        opened = []
+        no_search = lambda *args, **kwargs: self.fail("searched again")
+        idea = [{"id": "intellij", "name": "IntelliJ IDEA", "app": "/Applications/IntelliJ IDEA.app"}]
+        answer = serve.open_code(serve.Transcripts(projects), None, {"sessionId": "s1", "chip": "hasEnded", "at": 0}, open_file=lambda editor, path, line: opened.append((path, line)) or "", installed=lambda: idea, run=no_search, found=kept)
+        self.assertEqual((answer["ok"], opened), (True, [(os.path.join(self.folder, "web/inbox.ts"), 2)]))
 
 
 if __name__ == "__main__":
