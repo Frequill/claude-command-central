@@ -46,6 +46,8 @@ APPROVALS_DIR = Path(os.environ.get("CCC_APPROVALS_DIR", CCC_DIR / "approvals"))
 COMMANDS_DIR = Path(os.environ.get("CCC_COMMANDS_DIR", CCC_DIR / "commands"))
 # caveman mode per session, as the person switches it in CCC; the mod reads it (hooks/caveman.ts)
 CAVEMAN_DIR = Path(os.environ.get("CCC_CAVEMAN_DIR", CCC_DIR / "caveman"))
+# the model and effort picked for each session in its card's menu, which the session's mod sends its requests with
+CHOICES_DIR = Path(os.environ.get("CCC_CHOICES_DIR", CCC_DIR / "choices"))
 BACKGROUND_FILE = Path(os.environ.get("CCC_BACKGROUND_FILE", CCC_DIR / "background.json"))
 DELETED_FILE = Path(os.environ.get("CCC_DELETED_FILE", CCC_DIR / "deleted.json"))
 # after a conversation is deleted, what a Claude that was stopping writes late follows it to the Trash
@@ -55,7 +57,7 @@ LATE_SWEEPS_S = (2, 10, 30)
 CLAUDE_HOME = Path(os.environ.get("CCC_CLAUDE_HOME", Path.home() / ".claude"))
 TRASH_DIR = Path(os.environ.get("CCC_TRASH_DIR", Path.home() / ".Trash"))
 # what CCC keeps per session, each named after its id
-CCC_SESSION_DIRS = (SESSIONS_DIR, PROMPTS_DIR, COMMANDS_DIR, CAVEMAN_DIR, ANSWERS_DIR, APPROVALS_DIR, INBOX_DIR, UPLOADS_DIR)
+CCC_SESSION_DIRS = (SESSIONS_DIR, PROMPTS_DIR, COMMANDS_DIR, CAVEMAN_DIR, ANSWERS_DIR, APPROVALS_DIR, INBOX_DIR, UPLOADS_DIR, CHOICES_DIR)
 CAVEMAN_LEVELS = ("off", "lite", "full", "ultra")
 COMMANDS_MAX = 400
 COMMAND_NAME = re.compile(r"^[A-Za-z0-9_:.-]{1,80}$")
@@ -118,6 +120,8 @@ SYSTEM_BLOCK = re.compile(r"<system-reminder>.*?</system-reminder>", re.S)
 # a slash command or skill the person ran, as Claude Code writes it down
 COMMAND_NAME_TAG = re.compile(r"<command-name>\s*(/?[^<\s]+)\s*</command-name>")
 COMMAND_ARGS_TAG = re.compile(r"<command-args>(.*?)</command-args>", re.S)
+# "/model opus", "/effort high": a setting of the session's, shown as a note in the chat
+SETTING_COMMAND = re.compile(r"^/(model|effort)\s+([A-Za-z0-9._\[\]-]{1,80})$")
 # the big base64 strings of a transcript line, which the chat never shows: images, thinking signatures
 PAYLOAD = re.compile(rb'("(?:data|base64|signature)":\s*")[A-Za-z0-9+/=]{1024,}"')
 # how the mod names the images of a message written in CCC (hooks/inbox.ts, promptFor)
@@ -1476,6 +1480,10 @@ def user_items(content, at) -> list:
         return []
     text = SYSTEM_BLOCK.sub("", "\n".join(texts)).strip()
     text = command_line(text) or text
+    # a model or effort picked in CCC's session menu (or typed) is a setting changed, not words to Claude
+    setting = SETTING_COMMAND.match(text)
+    if setting:
+        return [{"kind": "note", "setting": setting.group(1), "value": setting.group(2), "text": f"{setting.group(1).capitalize()} set to {setting.group(2)}", "at": at}]
     sent = SENT_IMAGES.search(text)
     uploads = []
     if sent:
@@ -1922,12 +1930,46 @@ class Inbox:
         return waiting
 
 
-def chat_payload(session_id: str, transcripts: Transcripts, inbox: Inbox) -> dict:
+def chat_payload(session_id: str, transcripts: Transcripts, inbox: Inbox, answers_dir: Path = None, now_ms: float = None) -> dict:
     """The chat window's view of a session: its exchanges, and what waits to be sent to it."""
     if not isinstance(session_id, str) or not SAFE_ID.match(session_id):
         return {"items": [], "pending": []}
     path = transcripts.find(session_id)
-    return {"items": read_chat(path) if path else [], "pending": inbox.pending(session_id)}
+    items = read_chat(path) if path else []
+    if answers_dir is not None:
+        items = with_waiting_question(items, question_note(answers_dir, session_id, time.time() * 1000 if now_ms is None else now_ms))
+    return {"items": items, "pending": inbox.pending(session_id)}
+
+
+def question_note(answers_dir: Path, session_id: str, now_ms: float):
+    """The question box that the session's hook (answer_from_ccc.py) says waits for an answer right
+    now: {box, at, questions}, or None. Its hook renews it while it waits, so an old one is gone."""
+    try:
+        note = json.loads((answers_dir / f"{session_id}.box.json").read_text())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(note, dict) or not isinstance(note.get("box"), str) or not BOX_ID.match(note["box"]):
+        return None
+    at, beat = note.get("at"), note.get("beat")
+    if not all(isinstance(value, (int, float)) and not isinstance(value, bool) for value in (at, beat)) or now_ms - beat > APPROVAL_BEAT_MS:
+        return None
+    item = question_item({"questions": note.get("questions")}, at)
+    return {"box": note["box"], "at": at, "questions": item["questions"]} if item["questions"] else None
+
+
+def with_waiting_question(items: list, note) -> list:
+    """The chat with the question box its hook waits on marked so (it can be answered from CCC). A
+    session in a terminal writes its box down only once it is answered, so until then the box comes
+    from the hook's note, as the last thing in the chat."""
+    if note is None:
+        return items
+    texts = [one["question"] for one in note["questions"]]
+    for at in range(len(items) - 1, -1, -1):
+        item = items[at]
+        # only a box still open is the one the hook waits on: one asked before with the same questions has ended
+        if item.get("kind") == "question" and "answers" not in item and not item.get("isDeclined") and [one["question"] for one in item.get("questions", [])] == texts:
+            return items[:at] + [{**item, "isWaiting": True}] + items[at + 1:]
+    return items + [{"kind": "question", "questions": note["questions"], "at": note["at"], "toolId": f"box-{note['box']}", "isWaiting": True}]
 
 
 # ---------- answers to Claude's question boxes, given in CCC ----------
@@ -1967,7 +2009,8 @@ class Answers:
         """Leaves the answer (one per question, or the person's own words for the whole box); what
         went wrong, or '' when it is on its way."""
         path = self.transcripts.find(session_id)
-        box = next((item for item in read_chat(path) if item.get("kind") == "question" and item.get("toolId") == tool_id), None) if path else None
+        items = with_waiting_question(read_chat(path) if path else [], question_note(self.dir, session_id, now_ms))
+        box = next((item for item in items if item.get("kind") == "question" and item.get("toolId") == tool_id), None)
         if box is None:
             return "That question is no longer in the chat."
         if "answers" in box or box.get("isDeclined"):
@@ -2510,6 +2553,23 @@ def screen_mode(output: bytes):
     return MODE_LINES[found[-1]] if found else None
 
 
+def is_running_background(terms, session_id: str) -> bool:
+    """Whether Claude runs for this session in CCC's background now."""
+    return any(isinstance(card, dict) and card.get("kind") == "claude" and card.get("sessionId") == session_id and not card.get("endedAt") for card in terms.list())
+
+
+def pick_start_mode(backgrounds, session_id: str, mode: str) -> str:
+    """The mode a background session that does not run now starts in, when its first message is sent
+    or it is resumed. '' when kept, else what is wrong."""
+    if mode not in SWITCHED_MODES:
+        return "Pick one of the modes in the list."
+    kept = backgrounds.get(session_id)
+    if not kept:
+        return "This session was not started in CCC's background."
+    backgrounds.keep(session_id, kept.get("folder", ""), mode, kept.get("at") or int(time.time() * 1000), planned=bool(kept.get("planned")), begun_at=kept.get("begunAt"))
+    return ""
+
+
 def switch_mode(terms, session_id: str, mode: str, wait_s: float = MODE_WAIT_S, sleep=time.sleep) -> str:
     """Switches the mode of a Claude CCC runs in the background, as the person would: Shift+Tab in
     its terminal, until its own mode line shows the mode asked for. '' when it does, else why not."""
@@ -2998,6 +3058,66 @@ def open_step_file(transcripts, data: dict, open_file=editors.open_file, install
     return {"ok": not problem, "editor": editor["name"], **({"problem": problem} if problem else {})}
 
 
+# ---------- the model and effort picked for one session ----------
+
+CHOICE_EFFORTS = ("low", "medium", "high", "xhigh", "max")
+# an alias (opus, opus[1m], opusplan) or a full id (claude-opus-5-5), as the mod takes them
+CHOICE_MODEL = re.compile(r"^[A-Za-z0-9._-]{1,80}(\[1m\])?$")
+
+
+def read_choice(choices_dir: Path, session_id) -> dict:
+    """The model and effort picked for the session in its card's menu: {model?, effort?}, {} for none."""
+    if not isinstance(session_id, str) or not SAFE_ID.match(session_id):
+        return {}
+    try:
+        data = json.loads((choices_dir / f"{session_id}.json").read_text())
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    model, effort = data.get("model"), data.get("effort")
+    return {**({"model": model} if isinstance(model, str) and CHOICE_MODEL.match(model) else {}), **({"effort": effort} if effort in CHOICE_EFFORTS else {})}
+
+
+def choose(choices_dir: Path, session_id, data: dict) -> str:
+    """Keeps a model or effort picked for one session, for its mod to send its requests with: that
+    session alone, nothing saved as the default for others. A model of "default" (or None) takes the
+    pick away, so the session runs its own model again. '' when kept, else what is wrong."""
+    if not isinstance(session_id, str) or not SAFE_ID.match(session_id):
+        return "That session could not be found."
+    choice = read_choice(choices_dir, session_id)
+    if "model" in data:
+        model = data["model"]
+        if model in (None, "default"):
+            choice.pop("model", None)
+        elif isinstance(model, str) and CHOICE_MODEL.match(model):
+            choice["model"] = model
+        else:
+            return "Pick a model in the list."
+    if "effort" in data:
+        if data["effort"] not in CHOICE_EFFORTS:
+            return "Pick an effort in the list."
+        choice["effort"] = data["effort"]
+    choices_dir.mkdir(parents=True, exist_ok=True)
+    target = choices_dir / f"{session_id}.json"
+    if not choice:
+        target.unlink(missing_ok=True)
+        return ""
+    temporary = choices_dir / f".{session_id}.{secrets.token_hex(4)}.tmp"
+    temporary.write_text(json.dumps(choice))
+    os.replace(temporary, target)
+    return ""
+
+
+def with_choices(sessions: list, choices_dir: Path) -> list:
+    """Each session with the model and effort picked for it in its card's menu, when there is a pick."""
+    marked = []
+    for session in sessions:
+        choice = read_choice(choices_dir, session.get("sessionId")) if isinstance(session, dict) else {}
+        marked.append({**session, "choice": choice} if choice else session)
+    return marked
+
+
 def session_folder(transcripts, session_id):
     """The folder a session works in, from its own transcript; None when that cannot be told."""
     path = transcripts.find(session_id) if isinstance(session_id, str) and SAFE_ID.match(session_id) else None
@@ -3088,7 +3208,7 @@ class Handler(SimpleHTTPRequestHandler):
             editor_apps = [{"id": editor["id"], "name": editor["name"]} for editor in editors.installed_editors()]
             now_ms = int(time.time() * 1000)
             cards = with_screen_modes(TERMINALS, named_backgrounds(reveal_waiting(TERMINALS, TERMINALS.list(), SESSIONS_DIR, now_ms), TRANSCRIPTS, REMOVALS.load()))
-            payload["sessions"] = with_designs(with_screen_boxes(payload["sessions"], cards, now_ms, SCREEN_BOXES), TRANSCRIPTS)
+            payload["sessions"] = with_choices(with_designs(with_screen_boxes(payload["sessions"], cards, now_ms, SCREEN_BOXES), TRANSCRIPTS), CHOICES_DIR)
             lost, seen = KEEPER_WATCH.look(TERMINALS.keeper_id, cards, now_ms)
             stopped = stopped_backgrounds(BACKGROUNDS, cards, SESSIONS_DIR, TRANSCRIPTS, now_ms, lost)
             lost_now = [one["sessionId"] for one in stopped if one["sessionId"] in lost]
@@ -3137,7 +3257,7 @@ class Handler(SimpleHTTPRequestHandler):
             return self.send_json(session_files(query.get("session", [""])[0], query.get("q", [""])[0], TRANSCRIPTS, FILE_LISTS))
         if route == "/api/chat":
             session_id = parse_qs(urlsplit(self.path).query).get("session", [""])[0]
-            return self.send_json(chat_payload(session_id, TRANSCRIPTS, INBOX))
+            return self.send_json(chat_payload(session_id, TRANSCRIPTS, INBOX, ANSWERS_DIR))
         if route == "/api/step":
             query = parse_qs(urlsplit(self.path).query)
             session_id, tool_id = query.get("session", [""])[0], query.get("tool", [""])[0]
@@ -3165,10 +3285,10 @@ class Handler(SimpleHTTPRequestHandler):
 
     def do_POST(self):
         route = self.path.split("?", 1)[0]
-        action = {"/api/remove": "remove", "/api/notes": "notes", "/api/send": "send", "/api/answer": "answer", "/api/approve": "approve", "/api/start": "start", "/api/pick-folder": "pick", "/api/interrupt": "interrupt", "/api/add": "add", "/api/hurry": "hurry", "/api/open-file": "open-file", "/api/code-links": "code-links", "/api/open-code": "open-code", "/api/caveman": "caveman", "/api/background/resume": "background-resume", "/api/background/forget": "background-forget", "/api/background/dismiss": "background-dismiss", "/api/background/mode": "background-mode", "/api/stop-run": "stop-run", "/api/upload": "upload", "/api/delete": "delete", **TERMINAL_ROUTES}.get(route)
+        action = {"/api/remove": "remove", "/api/notes": "notes", "/api/send": "send", "/api/answer": "answer", "/api/approve": "approve", "/api/start": "start", "/api/pick-folder": "pick", "/api/interrupt": "interrupt", "/api/add": "add", "/api/hurry": "hurry", "/api/open-file": "open-file", "/api/code-links": "code-links", "/api/open-code": "open-code", "/api/caveman": "caveman", "/api/background/resume": "background-resume", "/api/background/forget": "background-forget", "/api/background/dismiss": "background-dismiss", "/api/background/mode": "background-mode", "/api/stop-run": "stop-run", "/api/upload": "upload", "/api/delete": "delete", "/api/choose": "choose", **TERMINAL_ROUTES}.get(route)
         if not is_local_host(self.headers.get("Host", ""), PORT) or action is None or not is_from_board(self.headers, PORT, action):
             return self.send_error(403 if action else 404)
-        limits = {"remove": MAX_BODY_BYTES, "notes": MAX_NOTES_BODY_BYTES, "send": MAX_SEND_BODY_BYTES, "answer": MAX_ANSWER_BODY_BYTES, "approve": MAX_BODY_BYTES, "start": MAX_START_BODY_BYTES, "pick": MAX_BODY_BYTES, "interrupt": MAX_BODY_BYTES, "add": MAX_BODY_BYTES, "hurry": MAX_BODY_BYTES, "open-file": MAX_BODY_BYTES, "code-links": MAX_CODE_LINKS_BODY_BYTES, "open-code": MAX_BODY_BYTES * 2, "caveman": MAX_BODY_BYTES, "background-resume": MAX_START_BODY_BYTES, "background-forget": MAX_BODY_BYTES, "background-dismiss": MAX_BODY_BYTES, "background-mode": MAX_BODY_BYTES, "stop-run": MAX_BODY_BYTES, "delete": MAX_BODY_BYTES}
+        limits = {"remove": MAX_BODY_BYTES, "notes": MAX_NOTES_BODY_BYTES, "send": MAX_SEND_BODY_BYTES, "answer": MAX_ANSWER_BODY_BYTES, "approve": MAX_BODY_BYTES, "start": MAX_START_BODY_BYTES, "pick": MAX_BODY_BYTES, "interrupt": MAX_BODY_BYTES, "add": MAX_BODY_BYTES, "hurry": MAX_BODY_BYTES, "open-file": MAX_BODY_BYTES, "code-links": MAX_CODE_LINKS_BODY_BYTES, "open-code": MAX_BODY_BYTES * 2, "caveman": MAX_BODY_BYTES, "background-resume": MAX_START_BODY_BYTES, "background-forget": MAX_BODY_BYTES, "background-dismiss": MAX_BODY_BYTES, "background-mode": MAX_BODY_BYTES, "stop-run": MAX_BODY_BYTES, "delete": MAX_BODY_BYTES, "choose": MAX_BODY_BYTES}
         if action.startswith("terminal-"):
             if not has_terminal_key(self.headers, TERMINALS.key):
                 return self.send_error(403)
@@ -3284,6 +3404,10 @@ class Handler(SimpleHTTPRequestHandler):
             session_id, mode = data.get("sessionId"), data.get("mode")
             if not isinstance(session_id, str) or not SAFE_ID.match(session_id) or not isinstance(mode, str):
                 return self.send_error(400)
+            # not running now (its first message not sent yet, or stopped): it starts in the mode picked
+            if not is_running_background(TERMINALS, session_id) and BACKGROUNDS.get(session_id):
+                problem = pick_start_mode(BACKGROUNDS, session_id, mode)
+                return self.send_json({"ok": not problem, **({"problem": problem} if problem else {})})
             problem = switch_mode(TERMINALS, session_id, mode)
             if not problem:
                 # resumed later, it starts in this mode again
@@ -3330,6 +3454,10 @@ class Handler(SimpleHTTPRequestHandler):
             return self.send_json({"ok": is_hurried, **({} if is_hurried else {"problem": "It has gone in already."})})
         if action == "open-file":
             return self.send_json(open_step_file(TRANSCRIPTS, json_object(body) or {}))
+        if action == "choose":
+            data = json_object(body) or {}
+            problem = choose(CHOICES_DIR, data.get("sessionId"), data)
+            return self.send_json({"ok": not problem, **({"problem": problem} if problem else {}), "choice": read_choice(CHOICES_DIR, data.get("sessionId"))})
         if action == "code-links":
             return self.send_json(code_places(TRANSCRIPTS, FILE_LISTS, json_object(body) or {}))
         if action == "open-code":

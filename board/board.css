@@ -6136,9 +6136,16 @@ body.theme-inferno .live-reply {
 
 .side-toggle[aria-pressed='true'],
 .caveman-toggle[aria-pressed='true'],
-.terminal-toggle[aria-pressed='true'] {
+.terminal-toggle[aria-pressed='true'],
+.chat-head .setup-toggle[aria-expanded='true'] {
   border-color: var(--accent);
   color: var(--accent);
+}
+
+/* a background session's terminal before Claude runs in it: shown, but nothing to open yet */
+.terminal-toggle:disabled {
+  opacity: 0.4;
+  cursor: default;
 }
 
 /* hovered, the panel leaves the wheel to the page; clicked, it scrolls what it holds (chat.js) */
@@ -6489,13 +6496,14 @@ body.theme-inferno .live-reply {
 
 .setup-row {
   display: grid;
-  grid-template-columns: 64px 1fr;
+  grid-template-columns: 72px 1fr;
   align-items: start;
   gap: 12px;
 }
 
+/* the label sits on the middle of the first row of buttons beside it */
 .setup-label {
-  padding-top: 5px;
+  padding-top: 6px;
   color: var(--ink-3);
   font-size: 12px;
   font-weight: 700;
@@ -6527,6 +6535,15 @@ body.theme-inferno .live-reply {
   background: var(--accent);
   border-color: var(--accent);
   color: var(--panel-solid);
+}
+
+/* "1M context": a switch beside the models, not one of them */
+.setup-long {
+  border-style: dashed;
+}
+
+.setup-long.on {
+  border-style: solid;
 }
 
 .setup-mode {
@@ -7634,6 +7651,11 @@ body.theme-inferno .live-reply {
   display: flex;
   flex-direction: column;
   gap: 8px;
+}
+
+/* a question box drawn in the live part, after Claude's words, as one in the chat */
+.chat-live > li {
+  list-style: none;
 }
 
 .live-status {
@@ -9933,7 +9955,8 @@ body.theme-cyberpunk .chat-close:hover {
 /* a toggle that is on (caveman mode, the side panel) is filled, so it reads apart from one that is off */
 body.theme-cyberpunk .caveman-toggle[aria-pressed='true'],
 body.theme-cyberpunk .side-toggle[aria-pressed='true'],
-body.theme-cyberpunk .terminal-toggle[aria-pressed='true'] {
+body.theme-cyberpunk .terminal-toggle[aria-pressed='true'],
+body.theme-cyberpunk .chat-head .setup-toggle[aria-expanded='true'] {
   border-color: #f75049;
   background: #f75049;
   color: #05060a;
@@ -11086,4 +11109,21 @@ body.side-off .sidebar {
 .design-empty {
   margin: auto;
   color: var(--ink-3);
+}
+
+/* the session menu: every button one height, so the rows line up; a row's note sits under its buttons */
+.chat-setup .setup-choice {
+  min-height: 28px;
+  display: inline-flex;
+  align-items: center;
+  white-space: nowrap;
+}
+
+.chat-setup .setup-note {
+  flex-basis: 100%;
+  margin-top: 2px;
+}
+
+.chat-setup .setup-mode {
+  padding-top: 5px;
 }

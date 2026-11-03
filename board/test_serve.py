@@ -134,6 +134,83 @@ class CommandLineTest(unittest.TestCase):
     def test_plain_words_are_no_command(self):
         self.assertIsNone(serve.command_line("Fix the <command-args> parser"))
 
+    def test_a_model_or_effort_picked_is_a_setting_note_not_words(self):
+        model = "<command-name>/model</command-name>\n<command-message>model</command-message>\n<command-args>opus[1m]</command-args>"
+        self.assertEqual(serve.user_items(model, 5), [{"kind": "note", "setting": "model", "value": "opus[1m]", "text": "Model set to opus[1m]", "at": 5}])
+        effort = "<command-name>/effort</command-name>\n<command-args>high</command-args>"
+        self.assertEqual(serve.user_items(effort, 5)[0]["setting"], "effort")
+        # typed as words, or /model with nothing after it (the picker in a terminal), it stays as written
+        self.assertEqual(serve.user_items("/model opus", 5)[0]["kind"], "note")
+        self.assertEqual(serve.user_items("<command-name>/model</command-name>\n<command-args></command-args>", 5)[0]["kind"], "you")
+        self.assertEqual(serve.user_items("/model opus please and thank you", 5)[0]["kind"], "you")
+
+
+class ChoiceTest(unittest.TestCase):
+    """A model or effort picked for one session in its card's menu, kept for that session's mod alone."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name) / "choices"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_a_pick_is_kept_for_that_session_alone(self):
+        self.assertEqual(serve.choose(self.dir, "a1", {"model": "opus"}), "")
+        self.assertEqual(serve.choose(self.dir, "a1", {"effort": "max"}), "")
+        self.assertEqual(serve.read_choice(self.dir, "a1"), {"model": "opus", "effort": "max"})
+        # card B is not touched by card A's pick
+        self.assertEqual(serve.read_choice(self.dir, "b2"), {})
+        self.assertEqual(serve.choose(self.dir, "b2", {"model": "haiku"}), "")
+        self.assertEqual((serve.read_choice(self.dir, "a1")["model"], serve.read_choice(self.dir, "b2")["model"]), ("opus", "haiku"))
+        # the mod reads the very file the server writes
+        self.assertEqual(json.loads((self.dir / "a1.json").read_text()), {"model": "opus", "effort": "max"})
+
+    def test_default_takes_the_model_pick_away_and_an_empty_choice_leaves_no_file(self):
+        serve.choose(self.dir, "a1", {"model": "opus[1m]"})
+        self.assertEqual(serve.read_choice(self.dir, "a1"), {"model": "opus[1m]"})
+        self.assertEqual(serve.choose(self.dir, "a1", {"model": "default"}), "")
+        self.assertFalse((self.dir / "a1.json").exists())
+        serve.choose(self.dir, "a1", {"model": "claude-opus-5-5", "effort": "low"})
+        serve.choose(self.dir, "a1", {"model": None})
+        self.assertEqual(serve.read_choice(self.dir, "a1"), {"effort": "low"})
+
+    def test_odd_picks_are_refused(self):
+        self.assertEqual(serve.choose(self.dir, "../x", {"model": "opus"}), "That session could not be found.")
+        self.assertEqual(serve.choose(self.dir, "a1", {"model": "opus; rm -rf /"}), "Pick a model in the list.")
+        self.assertEqual(serve.choose(self.dir, "a1", {"effort": "huge"}), "Pick an effort in the list.")
+        self.assertEqual(serve.read_choice(self.dir, "a1"), {})
+        self.dir.mkdir(parents=True, exist_ok=True)
+        (self.dir / "a1.json").write_text('{"model": "x y", "effort": "max"}')
+        self.assertEqual(serve.read_choice(self.dir, "a1"), {"effort": "max"})
+
+    def test_each_session_on_the_board_carries_its_pick(self):
+        serve.choose(self.dir, "a1", {"model": "opus"})
+        marked = serve.with_choices([{"sessionId": "a1"}, {"sessionId": "b2"}], self.dir)
+        self.assertEqual(marked, [{"sessionId": "a1", "choice": {"model": "opus"}}, {"sessionId": "b2"}])
+        self.assertIn(serve.CHOICES_DIR, serve.CCC_SESSION_DIRS)
+
+
+class StartModeTest(unittest.TestCase):
+    """The mode a background session that does not run now starts in, picked in its card's menu."""
+
+    def test_a_session_waiting_to_run_starts_in_the_mode_picked(self):
+        with tempfile.TemporaryDirectory() as folder:
+            backgrounds = serve.Backgrounds(Path(folder) / "background.json")
+            backgrounds.keep("s1", "/repo", "auto", 1000, planned=True, begun_at=1000)
+            self.assertEqual(serve.pick_start_mode(backgrounds, "s1", "plan"), "")
+            self.assertEqual(backgrounds.get("s1"), {"folder": "/repo", "mode": "plan", "at": 1000, "planned": True, "begunAt": 1000})
+            self.assertEqual(serve.pick_start_mode(backgrounds, "s1", "bypassPermissions"), "Pick one of the modes in the list.")
+            self.assertEqual(serve.pick_start_mode(backgrounds, "nobody", "plan"), "This session was not started in CCC's background.")
+            self.assertEqual(backgrounds.get("s1")["mode"], "plan")
+
+    def test_only_a_claude_that_has_not_ended_runs(self):
+        class Terms:
+            def list(self):
+                return [{"kind": "claude", "sessionId": "s1", "endedAt": 5}, {"kind": "shell", "sessionId": "s2"}, {"kind": "claude", "sessionId": "s3"}]
+
+        self.assertEqual([serve.is_running_background(Terms(), one) for one in ("s1", "s2", "s3")], [False, False, True])
+
 
 class BoardFilesTest(unittest.TestCase):
     def test_every_module_the_board_imports_is_served(self):
@@ -565,6 +642,54 @@ class AnswerTest(unittest.TestCase):
         self.assertEqual(read, {"message": "Neither, use main"})
         self.assertEqual(answer_from_ccc.decision({}, read)["hookSpecificOutput"]["decision"], {"behavior": "deny", "message": answer_from_ccc.FEEDBACK + "Neither, use main"})
 
+    def note(self, beat=5000, questions=None, box="0123456789abcdef"):
+        folder = Path(self.tmp.name) / "answers"
+        folder.mkdir(exist_ok=True)
+        given = questions or [{"question": "Season?", "header": "Season", "options": [{"label": "Spring", "description": "Green"}, {"label": "Autumn"}]}]
+        (folder / "s1.box.json").write_text(json.dumps({"box": box, "at": 4000, "beat": beat, "questions": given}))
+
+    def test_a_box_a_terminal_has_not_written_down_yet_comes_from_its_hook(self):
+        self.note()
+        items = serve.chat_payload("s1", serve.Transcripts(self.projects), serve.Inbox(Path(self.tmp.name) / "inbox", Path(self.tmp.name) / "uploads"), Path(self.tmp.name) / "answers", now_ms=6000)["items"]
+        self.assertEqual(items[-1], {"kind": "question", "toolId": "box-0123456789abcdef", "at": 4000, "isWaiting": True,
+                                     "questions": [{"question": "Season?", "header": "Season", "multiSelect": False, "options": [{"label": "Spring", "description": "Green"}, {"label": "Autumn", "description": ""}]}]})
+        # it is answered like any other box, keyed by its question
+        self.assertEqual(self.answers.give("s1", "box-0123456789abcdef", ["Autumn"], 6000), "")
+        left = json.loads((Path(self.tmp.name) / "answers" / "s1.json").read_text())
+        self.assertEqual(answer_from_ccc.read_answer(Path(self.tmp.name) / "answers" / "s1.json", ["Season?"], 4000), {"Season?": "Autumn"})
+        self.assertEqual(left["toolId"], "box-0123456789abcdef")
+
+    def test_a_box_already_in_the_chat_is_marked_waiting_not_shown_twice(self):
+        self.note(questions=QuestionTest.ASK["message"]["content"][0]["input"]["questions"])
+        items = serve.chat_payload("s1", serve.Transcripts(self.projects), serve.Inbox(Path(self.tmp.name) / "inbox", Path(self.tmp.name) / "uploads"), Path(self.tmp.name) / "answers", now_ms=6000)["items"]
+        boxes = [item for item in items if item["kind"] == "question"]
+        self.assertEqual([(box["toolId"], box.get("isWaiting")) for box in boxes], [("toolu_q1", True)])
+
+    def test_the_same_question_asked_again_in_a_terminal_is_a_new_box(self):
+        # the first box was stopped; the terminal has not written down the second, the same questions again
+        with self.transcript.open("a") as handle:
+            handle.write(json.dumps({"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "toolu_q1", "is_error": True, "content": "stopped"}]}}) + "\n")
+        self.note(questions=QuestionTest.ASK["message"]["content"][0]["input"]["questions"])
+        items = serve.chat_payload("s1", serve.Transcripts(self.projects), serve.Inbox(Path(self.tmp.name) / "inbox", Path(self.tmp.name) / "uploads"), Path(self.tmp.name) / "answers", now_ms=6000)["items"]
+        boxes = [item for item in items if item["kind"] == "question"]
+        self.assertEqual([(box["toolId"], box.get("isDeclined"), box.get("isWaiting")) for box in boxes], [("toolu_q1", True, None), ("box-0123456789abcdef", None, True)])
+
+    def test_a_note_its_hook_stopped_renewing_or_that_is_broken_is_no_box(self):
+        answers = Path(self.tmp.name) / "answers"
+        self.note(beat=5000)
+        self.assertIsNone(serve.question_note(answers, "s1", 5000 + serve.APPROVAL_BEAT_MS + 1))
+        self.assertIsNotNone(serve.question_note(answers, "s1", 5000 + serve.APPROVAL_BEAT_MS))
+        self.note(questions=[{"question": ""}])
+        self.assertIsNone(serve.question_note(answers, "s1", 6000))
+        self.note(box="../x")
+        self.assertIsNone(serve.question_note(answers, "s1", 6000))
+        (answers / "s1.box.json").write_text("{nope")
+        self.assertIsNone(serve.question_note(answers, "s1", 6000))
+        self.assertIsNone(serve.question_note(answers, "nobody", 6000))
+        # with no note the chat is as the transcript has it
+        items = serve.chat_payload("s1", serve.Transcripts(self.projects), serve.Inbox(Path(self.tmp.name) / "inbox", Path(self.tmp.name) / "uploads"), answers, now_ms=6000)["items"]
+        self.assertNotIn("isWaiting", items[-1])
+
     def test_an_answer_for_a_box_that_is_gone_answered_or_short_is_refused(self):
         self.assertEqual(self.answers.give("s1", "toolu_other", ["a", "b"], 1), "That question is no longer in the chat.")
         self.assertEqual(self.answers.give("nobody", "toolu_q1", ["a", "b"], 1), "That question is no longer in the chat.")
@@ -615,6 +740,23 @@ class AnswerHookTest(unittest.TestCase):
         self.assertFalse((self.dir / "s1.json").exists())
         self.assertTrue((self.dir / "s1.taken").exists())
 
+    def test_an_answer_written_after_the_hook_began_counts_wherever_the_box_was_written(self):
+        transcript = self.dir / "t.jsonl"
+        ask = {"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "toolu_x", "name": "AskUserQuestion", "input": self.NOTICE["tool_input"]}]}}
+        done = {"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "toolu_x", "content": "answered"}]}}
+        # the app writes the box before the hook begins, and its answer after
+        transcript.write_text(json.dumps(ask) + "\n")
+        since = transcript.stat().st_size
+        with transcript.open("a") as handle:
+            handle.write(json.dumps(done) + "\n")
+        self.assertTrue(answer_from_ccc.answered_elsewhere(str(transcript), ["Colour?"], since))
+        # a terminal writes both only once it is answered, after an older box with the same questions
+        since = transcript.stat().st_size
+        self.assertFalse(answer_from_ccc.answered_elsewhere(str(transcript), ["Colour?"], since))
+        with transcript.open("a") as handle:
+            handle.write(json.dumps(ask).replace("toolu_x", "toolu_z") + "\n" + json.dumps(done).replace("toolu_x", "toolu_z") + "\n")
+        self.assertTrue(answer_from_ccc.answered_elsewhere(str(transcript), ["Colour?"], since))
+
     def test_it_stops_when_the_box_was_answered_in_the_app(self):
         transcript = self.dir / "t.jsonl"
         ask = {"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "toolu_x", "name": "AskUserQuestion", "input": self.NOTICE["tool_input"]}]}}
@@ -626,22 +768,78 @@ class AnswerHookTest(unittest.TestCase):
         self.assertTrue(answer_from_ccc.answered_elsewhere(str(transcript), ["Colour?"]))
         self.assertFalse(answer_from_ccc.answered_elsewhere(str(transcript), ["Annan?"]))
         self.assertFalse(answer_from_ccc.answered_elsewhere("/no/such/file", ["Colour?"]))
+        # ended before the hook began: a terminal asking the same again has not written its box yet
+        self.assertFalse(answer_from_ccc.answered_elsewhere(str(transcript), ["Colour?"], transcript.stat().st_size))
+        self.assertEqual(answer_from_ccc.size_of(str(transcript)), transcript.stat().st_size)
+        self.assertEqual(answer_from_ccc.size_of("/no/such/file"), 0)
+        # answered in the app while the hook waits: it stops
         clock = [0.0]
 
         def tick(_):
             clock[0] += 1
+            if clock[0] == 3:
+                with transcript.open("a") as handle:
+                    handle.write(json.dumps(ask).replace("toolu_x", "toolu_w") + "\n" + json.dumps(done).replace("toolu_x", "toolu_w") + "\n")
 
         self.assertIsNone(answer_from_ccc.wait_for_answer("s1", self.NOTICE["tool_input"], ["Colour?"], str(transcript), clock=lambda: clock[0], sleep=tick))
         self.assertLess(clock[0], 10)
 
-    def test_the_hook_ends_at_once_outside_the_app_and_vs_code_and_never_fails(self):
+    def test_the_hook_ends_at_once_on_anything_else_and_never_fails(self):
         script = str(Path(__file__).resolve().parent / "answer_from_ccc.py")
-        for entry, given in (("cli", json.dumps(self.NOTICE)), ("claude-desktop", "not json"), ("claude-desktop", json.dumps({**self.NOTICE, "tool_name": "Bash"}))):
+        for entry, given in (("claude-desktop", "not json"), ("cli", json.dumps({**self.NOTICE, "tool_name": "Bash"}))):
             env = {**os.environ, "CLAUDE_CODE_ENTRYPOINT": entry, "CCC_ANSWERS_DIR": str(self.dir)}
             started = time.time()
             done = subprocess.run(["/usr/bin/python3", script], input=given, text=True, env=env, capture_output=True, timeout=20)
             self.assertEqual((done.returncode, done.stdout, done.stderr), (0, "", ""))
             self.assertLess(time.time() - started, 5)
+
+    def test_while_the_box_waits_its_note_is_up_and_renewed_then_taken_down(self):
+        clock = [1000.0]
+        notes = []
+
+        def tick(_):
+            clock[0] += 1
+            note = self.dir / "s1.box.json"
+            notes.append(json.loads(note.read_text()) if note.exists() else None)
+            if clock[0] == 1006:
+                self.leave({"Colour?": "Red"}, 1_000_000)
+
+        answer = answer_from_ccc.wait_for_answer("s1", self.NOTICE["tool_input"], ["Colour?"], "/none", clock=lambda: clock[0], sleep=tick)
+        self.assertEqual(answer["hookSpecificOutput"]["decision"]["updatedInput"]["answers"], {"Colour?": "Red"})
+        # the note holds the whole box, as the board draws it, and its hook renews it while it waits
+        self.assertEqual(notes[0]["questions"], self.NOTICE["tool_input"]["questions"])
+        self.assertEqual((notes[0]["at"], notes[0]["beat"]), (1_000_000, 1_000_000))
+        self.assertGreater(max(note["beat"] for note in notes if note), 1_000_000)
+        self.assertFalse((self.dir / "s1.box.json").exists())
+
+    def test_a_note_another_box_put_up_since_is_left_alone(self):
+        clock = [1000.0]
+
+        def tick(_):
+            clock[0] += 1
+            if clock[0] == 1003:
+                (self.dir / "s1.box.json").write_text(json.dumps({"box": "ffffffffffffffff"}))
+            if clock[0] == 1006:
+                self.leave({"Colour?": "Blue"}, 1_000_000)
+
+        answer_from_ccc.wait_for_answer("s1", self.NOTICE["tool_input"], ["Colour?"], "/none", clock=lambda: clock[0], sleep=tick)
+        self.assertEqual(json.loads((self.dir / "s1.box.json").read_text())["box"], "ffffffffffffffff")
+
+    def test_in_a_terminal_it_waits_as_in_the_app_and_a_signal_takes_the_note_down(self):
+        # a terminal shows its box while the hook waits and takes the hook's answer too (Claude Code 2.1.317)
+        for entry in ("cli", "claude-desktop"):
+            process = subprocess.Popen(["/usr/bin/python3", str(Path(answer_from_ccc.__file__))], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                       env={**os.environ, "CLAUDE_CODE_ENTRYPOINT": entry, "CCC_ANSWERS_DIR": str(self.dir)})
+            process.stdin.write(json.dumps(self.NOTICE).encode())
+            process.stdin.close()
+            deadline = time.time() + 5
+            while not (self.dir / "s1.box.json").exists() and time.time() < deadline:
+                time.sleep(0.05)
+            self.assertTrue((self.dir / "s1.box.json").exists(), entry)
+            process.terminate()
+            out, _ = process.communicate(timeout=5)
+            self.assertEqual((process.returncode, out), (0, b""))
+            self.assertFalse((self.dir / "s1.box.json").exists())
 
 
 class StartTest(unittest.TestCase):
@@ -1641,16 +1839,22 @@ class ApprovalHookTest(unittest.TestCase):
         self.assertTrue(approve_from_ccc.answered_elsewhere(str(transcript), "Bash", given))
         self.assertFalse(approve_from_ccc.answered_elsewhere(str(transcript), "Bash", {"command": "other"}))
         self.assertFalse(approve_from_ccc.answered_elsewhere("/no/such/file", "Bash", given))
+        # the same call made and done before the hook began is not this one
+        self.assertFalse(approve_from_ccc.answered_elsewhere(str(transcript), "Bash", given, transcript.stat().st_size))
         # the same command asked again is a new box, waiting until its own result comes
         with transcript.open("a") as handle:
             handle.write(json.dumps({**call, "message": {"content": [{**call["message"]["content"][0], "id": "toolu_y"}]}}) + "\n")
         self.assertFalse(approve_from_ccc.answered_elsewhere(str(transcript), "Bash", given))
         with transcript.open("a") as handle:
             handle.write(json.dumps(done).replace("toolu_x", "toolu_y") + "\n")
+        # answered in the app while the hook waits: it stops
         clock = [0.0]
 
         def tick(_):
             clock[0] += 1
+            if clock[0] == 3:
+                with transcript.open("a") as handle:
+                    handle.write(json.dumps({**call, "message": {"content": [{**call["message"]["content"][0], "id": "toolu_w"}]}}) + "\n" + json.dumps(done).replace("toolu_x", "toolu_w") + "\n")
 
         self.assertIsNone(approve_from_ccc.wait_for_decision("s1", "Bash", given, str(transcript), clock=lambda: clock[0], sleep=tick))
         self.assertLess(clock[0], 10)
@@ -1674,25 +1878,21 @@ class ApprovalHookTest(unittest.TestCase):
         self.assertEqual(json.loads((self.dir / "s1.box.json").read_text())["box"], "ffffffffffffffff")
         self.assertFalse((self.dir / "s1.ended.json").exists())
 
-    def test_outside_the_app_and_vs_code_it_ends_at_once(self):
-        result = subprocess.run(["/usr/bin/python3", str(Path(approve_from_ccc.__file__))], input=json.dumps(self.NOTICE).encode(), capture_output=True, timeout=10,
-                                env={**{k: v for k, v in os.environ.items() if k != "CLAUDE_CODE_ENTRYPOINT"}, "CLAUDE_CODE_ENTRYPOINT": "cli", "CCC_APPROVALS_DIR": str(self.dir)})
-        self.assertEqual((result.returncode, result.stdout), (0, b""))
-        self.assertEqual(list(self.dir.iterdir()), [])
-
-    def test_a_signal_from_claude_code_takes_the_note_down(self):
-        process = subprocess.Popen(["/usr/bin/python3", str(Path(approve_from_ccc.__file__))], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                   env={**os.environ, "CLAUDE_CODE_ENTRYPOINT": "claude-desktop", "CCC_APPROVALS_DIR": str(self.dir)})
-        process.stdin.write(json.dumps(self.NOTICE).encode())
-        process.stdin.close()
-        deadline = time.time() + 5
-        while not (self.dir / "s1.box.json").exists() and time.time() < deadline:
-            time.sleep(0.05)
-        self.assertTrue((self.dir / "s1.box.json").exists())
-        process.terminate()
-        out, _ = process.communicate(timeout=5)
-        self.assertEqual((process.returncode, out), (0, b""))
-        self.assertFalse((self.dir / "s1.box.json").exists())
+    def test_a_signal_from_claude_code_takes_the_note_down_in_the_app_and_in_a_terminal(self):
+        # a terminal shows its box while the hook waits and takes the hook's decision too (Claude Code 2.1.317)
+        for entry in ("claude-desktop", "cli"):
+            process = subprocess.Popen(["/usr/bin/python3", str(Path(approve_from_ccc.__file__))], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                       env={**os.environ, "CLAUDE_CODE_ENTRYPOINT": entry, "CCC_APPROVALS_DIR": str(self.dir)})
+            process.stdin.write(json.dumps(self.NOTICE).encode())
+            process.stdin.close()
+            deadline = time.time() + 5
+            while not (self.dir / "s1.box.json").exists() and time.time() < deadline:
+                time.sleep(0.05)
+            self.assertTrue((self.dir / "s1.box.json").exists(), entry)
+            process.terminate()
+            out, _ = process.communicate(timeout=5)
+            self.assertEqual((process.returncode, out), (0, b""))
+            self.assertFalse((self.dir / "s1.box.json").exists())
 
 
 class AddedConversationTest(unittest.TestCase):

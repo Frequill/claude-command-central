@@ -71,6 +71,10 @@ In Activity Monitor the board's server shows as **Claude Command Central** and t
 
 Every working agent and background command on the agent map has a **Stop**: click it, then click again within a few seconds, and that one ends while its session's turn goes on.
 
+## A session's model and effort
+
+The settings button in a card's header opens its menu: the model, named as Claude's own picker names it (Opus 5.5, Sonnet 5.5, Default and the rest, with **1M context** as a switch of its own), and the effort. A pick is for that session alone and counts from Claude's very next request: CCC's mod sends the session's requests with it. It is not a `/model` or `/effort` command, so nothing is saved as the default for new sessions, no other card changes, and no "Switch model?" box waits in a terminal. **Default** takes the pick away, and the session runs its own model again. The Claude app's or terminal's own model menu still shows the model the session was started with. A `/model` or `/effort` typed in a chat shows there as a short note.
+
 ## Opening code in your editor
 
 With **Settings → Terminal & editor → Open Claude's files and code in** set to an editor (IntelliJ IDEA or VS Code), the files, classes, methods and constants Claude names in its replies (`AbstractDuoNode.java`, `releasePushCall`, `pushCall.getPushSuccess()`) open in it where they are made: click one. A name made in a few places (an interface and its implementation) asks which. CCC looks for them in the session's folder, or in each repository in it for a folder of projects, with `git grep`; a chip that points nowhere, or at more than 8 places, stays plain text, and so does a plain word such as `run` unless it is called, `run()`. A getter that Lombok makes opens at its field. A file a step changed opens from that step too.

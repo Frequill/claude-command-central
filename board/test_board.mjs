@@ -556,10 +556,31 @@ test('a box answered here: one pick replaces the last, many go in and out, Other
   assert.equal(C.isDraftReady([], draft), false)
 })
 
-test('only boxes in the Claude app and VS Code can be answered from CCC', () => {
-  assert.equal(C.ANSWERS_FROM_CCC.has('claude-desktop'), true)
-  assert.equal(C.ANSWERS_FROM_CCC.has('claude-vscode'), true)
-  assert.equal(C.ANSWERS_FROM_CCC.has('cli'), false)
+test('a box is answered from CCC wherever the session runs, while its hook waits with it', () => {
+  const box = { kind: 'question', toolId: 'toolu_q1', questions: [] }
+  // a box in the app's or VS Code's transcript, as before
+  assert.equal(C.canAnswerQuestion(box, { entrypoint: 'claude-desktop' }), true)
+  assert.equal(C.canAnswerQuestion(box, { entrypoint: 'claude-vscode' }), true)
+  // a terminal's box, CCC's background ones too, once its hook says it waits
+  assert.equal(C.canAnswerQuestion(box, { entrypoint: 'cli' }), false)
+  assert.equal(C.canAnswerQuestion({ ...box, toolId: 'box-0123456789abcdef', isWaiting: true }, { entrypoint: 'cli' }), true)
+  assert.equal(C.canAnswerQuestion({ ...box, toolId: undefined, isWaiting: true }, { entrypoint: 'cli' }), false)
+  assert.equal(C.canAnswerQuestion(undefined, { entrypoint: 'claude-desktop' }), false)
+})
+
+test('a box only its hook knows of is told from one in the transcript', () => {
+  assert.equal(C.isHookBox({ kind: 'question', toolId: 'box-0123456789abcdef' }), true)
+  assert.equal(C.isHookBox({ kind: 'question', toolId: 'toolu_q1' }), false)
+  assert.equal(C.isHookBox({ kind: 'tool', toolId: 'box-0123456789abcdef' }), false)
+  assert.equal(C.isHookBox(null), false)
+})
+
+test('the box says where else it can be answered', () => {
+  assert.equal(C.answerPlace({ entrypoint: 'claude-desktop' }), 'the app')
+  assert.equal(C.answerPlace({ entrypoint: 'claude-vscode' }), 'VS Code')
+  assert.equal(C.answerPlace({ entrypoint: 'cli' }), 'its terminal')
+  assert.equal(C.answerPlace(undefined), 'its terminal')
+  assert.equal(C.approvalStatus(undefined, 'its terminal'), 'Answer here, or in its terminal.')
 })
 
 test('the next-step box offers its buttons while its question waits, in a session that takes messages', () => {
@@ -1139,8 +1160,8 @@ test('the "/" menu opens on the first word and narrows to what is typed', () => 
 })
 
 test('the session settings mark what the session runs now', () => {
-  assert.deepEqual(C.sessionSetup({ stats: { model: 'claude-opus-5-5', effort: 'high', mode: 'auto' } }), { modelId: 'claude-opus-5-5', effort: 'high', mode: 'auto' })
-  assert.deepEqual(C.sessionSetup(undefined), { modelId: '', effort: '', mode: '' })
+  assert.deepEqual(C.sessionSetup({ stats: { model: 'claude-opus-5-5', effort: 'high', mode: 'auto' } }), { modelId: 'claude-opus-5-5', picked: null, effort: 'high', mode: 'auto' })
+  assert.deepEqual(C.sessionSetup(undefined), { modelId: '', picked: null, effort: '', mode: '' })
   assert.equal(C.sessionSetup({ stats: {}, permissionMode: 'auto' }).mode, 'auto')
   assert.equal(C.sessionSetup({ stats: { mode: 'plan' }, permissionMode: 'auto' }).mode, 'plan')
   // in CCC's background its own screen says the mode; Claude's default mode is named manual
@@ -1164,6 +1185,55 @@ test('the session settings mark what the session runs now', () => {
   assert.equal(C.sameChoice('high', 'high'), true)
   assert.deepEqual(C.modelChoices([]), ['default', 'sonnet', 'opus', 'haiku', 'fable', 'best', 'opusplan'])
   assert.deepEqual(C.modelChoices(['opus', 5]), ['opus'])
+})
+
+test('the model menu names each model as Claude\'s picker does, with its version from the sessions', () => {
+  const sessions = [{ stats: { model: 'claude-opus-5-5' } }, { stats: { model: 'claude-opus-4-1' } }, { stats: { model: 'claude-sonnet-4-5-20250929' } }, { stats: { model: 'claude-fable-5-1[1m]' } }, { stats: {} }, null]
+  const versions = C.modelVersions(sessions)
+  assert.deepEqual(versions, { opus: '5.5', sonnet: '4.5', fable: '5.1' })
+  assert.equal(C.modelLabel('opus', versions), 'Opus 5.5')
+  assert.equal(C.modelLabel('haiku', versions), 'Haiku')
+  assert.equal(C.modelLabel('sonnet[1m]', versions), 'Sonnet 4.5 · 1M')
+  assert.equal(C.modelLabel('default', versions), 'Default')
+  assert.equal(C.modelLabel('opusplan'), 'Opus Plan')
+  assert.equal(C.modelLabel('claude-opus-5-5[1m]'), 'Opus 5.5 · 1M')
+  assert.equal(C.modelLabel('something-else'), 'something-else')
+  assert.equal(C.modelAbout('best'), 'The most capable model there is')
+  assert.equal(C.modelAbout('opus'), '')
+  // the 1M versions are a switch of their own, not five more models
+  const options = ['default', 'sonnet', 'opus', 'haiku', 'fable', 'best', 'sonnet[1m]', 'opus[1m]', 'fable[1m]', 'opusplan']
+  const menu = C.modelMenu(options, 'opus', versions)
+  assert.deepEqual(menu.choices.map(choice => choice.label), ['Default', 'Sonnet 4.5', 'Opus 5.5', 'Haiku', 'Fable 5.1', 'Best', 'Opus Plan'])
+  assert.deepEqual(menu.choices.filter(choice => choice.isOn).map(choice => choice.option), ['opus'])
+  assert.deepEqual(menu.long, { isOn: false, canSwitch: true, option: 'opus[1m]' })
+  const long = C.modelMenu(options, 'opus[1m]', versions)
+  assert.deepEqual(long.choices.filter(choice => choice.isOn).map(choice => choice.option), ['opus'])
+  assert.deepEqual(long.long, { isOn: true, canSwitch: true, option: 'opus' })
+  // nothing picked for the session in CCC: Default, the session's own model
+  const own = C.modelMenu(options, null, versions)
+  assert.deepEqual(own.choices.filter(choice => choice.isOn).map(choice => choice.option), ['default'])
+  assert.deepEqual(own.long, { isOn: false, canSwitch: false, option: null })
+  // Haiku has no 1M version: the switch waits for a model that has one
+  assert.deepEqual(C.modelMenu(options, 'haiku', versions).long, { isOn: false, canSwitch: false, option: null })
+  assert.equal(C.modelMenu(['opus', 'haiku'], 'opus').long, null)
+})
+
+test('a model or effort picked in CCC for one session shows on that card at once, over what it ran last', () => {
+  const session = { stats: { model: 'claude-fable-5-1', effort: 'high' }, choice: { model: 'opus', effort: 'max' } }
+  assert.deepEqual([C.sessionSetup(session).modelId, C.sessionSetup(session).picked, C.sessionSetup(session).effort], ['opus', 'opus', 'max'])
+  const own = { stats: { model: 'claude-fable-5-1', effort: 'high' } }
+  assert.deepEqual([C.sessionSetup(own).modelId, C.sessionSetup(own).picked, C.sessionSetup(own).effort], ['claude-fable-5-1', null, 'high'])
+  assert.equal(C.modelLabel(C.sessionSetup(session).modelId, { opus: '5.5' }), 'Opus 5.5')
+})
+
+test('a model or effort changed shows as a note, and waits as one while Claude works', () => {
+  assert.equal(C.settingNote({ setting: 'model', value: 'opus' }, { opus: '5.5' }), 'Model set to Opus 5.5')
+  assert.equal(C.settingNote({ setting: 'effort', value: 'high' }), 'Effort set to high')
+  assert.equal(C.settingNote({ text: 'Background work reported back' }), 'Background work reported back')
+  assert.deepEqual(C.settingCommand('/model opus[1m]'), { setting: 'model', value: 'opus[1m]' })
+  assert.deepEqual(C.settingCommand(' /effort max '), { setting: 'effort', value: 'max' })
+  assert.equal(C.settingCommand('/model'), null)
+  assert.equal(C.settingCommand('please /model opus'), null)
 })
 
 

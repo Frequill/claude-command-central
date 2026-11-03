@@ -2,7 +2,7 @@ import * as L from './board-logic.js'
 import { startDecor } from './decor.js'
 import { welcome } from './arrivals.js'
 import { chatCard, dropChat, focusChat, redrawChats, sendText, sentChoices, setupChat, updateChat, uploadFiles } from './chat.js'
-import { cavemanOf, fileProblem, fileSize, isImage } from './chat-logic.js'
+import { cavemanOf, fileProblem, fileSize, isImage, modelVersions } from './chat-logic.js'
 import { carryAway } from './dragon.js'
 import { jelly, loadLayout, makeResizable, makeSortable, saveLayout, watchWindowMoves } from './layout.js'
 import { setupNotes } from './notes.js'
@@ -2554,6 +2554,8 @@ setupLost()
 document.querySelector('#map-clear').addEventListener('click', clearFinishedRuns)
 setupChat({
   sessionOf: id => view.byId.get(id),
+  // the version each model family runs now ("opus" is Opus 5.5), from the models the board's sessions ran
+  modelVersions: () => modelVersions([...view.byId.values()]),
   // the editor a step's file opens in, or null while the setting is off
   editorOf: () => L.editorChoice(view.settings.editor, view.editorApps),
   titleOf: id => view.tags.get(id),
