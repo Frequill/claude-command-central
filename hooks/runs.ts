@@ -4,11 +4,11 @@ import { isSafeSessionId } from './snapshot'
 
 /**
  * A command the person ran from a code block in CCC's chat (its Run button), as the board's server
- * keeps it (serve.py CommandRuns): in a terminal of its own, in the session's folder, with the last
- * lines it printed and how it ended. No `endedAt` while it still runs; no `exitCode` when its
- * terminal was closed before it ended.
+ * keeps it (serve.py CommandRuns): typed into the session's terminal, with the folder it ran in, the
+ * last lines it printed and how it ended. No `typedAt` while it waits for the one before it; no
+ * `endedAt` while it still runs; no `exitCode` when its terminal was closed before it ended.
  */
-export type CommandRun = { id: string; command: string; folder: string; startedAt: number; endedAt?: number; exitCode?: number; output: string }
+export type CommandRun = { id: string; command: string; folder: string; startedAt: number; typedAt?: number; endedAt?: number; exitCode?: number; output: string }
 
 /** What Claude was told of a run: that it ran, or also how it ended. */
 export type Told = { ended: boolean }
@@ -37,13 +37,14 @@ export function readRun(text: string): CommandRun | undefined {
     return undefined
   }
   if (!data || typeof data !== 'object') return undefined
-  const { id, command, folder, startedAt, endedAt, exitCode, output } = data as Record<string, unknown>
+  const { id, command, folder, startedAt, typedAt, endedAt, exitCode, output } = data as Record<string, unknown>
   if (typeof id !== 'string' || !RUN_ID.test(id) || typeof command !== 'string' || !command.trim() || typeof startedAt !== 'number') return undefined
   return {
     id,
     command,
     folder: typeof folder === 'string' ? folder : '',
     startedAt,
+    ...(typeof typedAt === 'number' ? { typedAt } : {}),
     ...(typeof endedAt === 'number' ? { endedAt } : {}),
     ...(Number.isInteger(exitCode) ? { exitCode: exitCode as number } : {}),
     output: typeof output === 'string' ? output : '',
@@ -77,6 +78,8 @@ export function runsNote(runs: readonly CommandRun[]): string | undefined {
     .sort((a, b) => a.startedAt - b.startedAt)
     .map(run => {
       const where = run.folder ? `In ${run.folder}, it` : 'It'
+      if (run.typedAt === undefined && run.endedAt === undefined) return `$ ${run.command}\nIt waits for the one before it to end, and has not run yet.`
+      if (run.typedAt === undefined) return `$ ${run.command}\nIts terminal was closed before it ran.`
       const how =
         run.endedAt === undefined
           ? 'is still running. What it printed so far:'
@@ -87,7 +90,7 @@ export function runsNote(runs: readonly CommandRun[]): string | undefined {
       return `$ ${run.command}\n${where} ${how}\n${output ? fenced(output) : '(nothing)'}`
     })
   return [
-    "The person ran these commands from CCC's chat, with Run on a code block of yours, each in a terminal of its own in this session's folder. Oldest first:",
+    "The person ran these commands from CCC's chat, with Run on a code block of yours, one after another in this session's terminal on CCC's board. Oldest first:",
     ...parts,
   ].join('\n\n')
 }

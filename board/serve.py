@@ -2815,14 +2815,19 @@ class Notes:
 RUN_ID = re.compile(r"^r[0-9a-f]{12}$")
 RUN_COMMAND_MAX = 16_000
 RUN_SIZE = (120, 32)
-# the runs a session keeps, newest first; older ones go, their terminals long closed
+# the runs a session keeps, newest first; older ones go
 RUNS_KEPT = 20
 # what the chat shows of a run's output, and the mod tells Claude of it: its last lines
 RUN_OUTPUT_MAX = 24_000
 RUN_LINES_MAX = 300
-# how many looks in a row a run's terminal must be missing before the run counts as closed: a look
+# how many looks in a row a session's terminal must be missing before it counts as closed: a look
 # the keeper did not answer in time finds no terminals at all
 RUN_MISSES = 3
+# the start files of the terminal Run types into, which mark where each command starts and where the
+# shell is back at its prompt, with its exit code, in codes a terminal does not show
+SHELL_DIR = BOARD_DIR / "shell"
+RUN_MARK = re.compile(rb"\x1b\]7770;ccc;(?:start|done;(-?\d+))\x07")
+PARTIAL_MARK = re.compile(rb"\x1b\][^\x07\x1b]*$")
 # what a terminal prints that is not text: colours, cursor moves, window titles
 TERMINAL_CODES = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[P^_X][^\x1b]*\x1b\\|\x1b\[[0-?]*[ -/]*[@-~]|\x1b[()*+][0-9A-Za-z]|\x1b[@-Z\\-_=>78]")
 BACKSPACED = re.compile(r"[^\x08]\x08")
@@ -2847,21 +2852,72 @@ def plain_output(data: bytes, max_chars: int = RUN_OUTPUT_MAX, max_lines: int = 
     return "\n".join(lines[-max_lines:])[-max_chars:]
 
 
-class CommandRuns:
-    """The commands the person ran from the chat's code blocks (Run), each in a terminal of its own
-    on the board, in the session's folder. A folder per session, a file per run, kept up to date
-    with what its terminal prints and how it ended. The session's mod leaves `<run id>.told` beside
-    a run once Claude was told of it (hooks/runs.ts)."""
+def run_shell(shell: str, environ=os.environ) -> tuple:
+    """How a session's terminal for Run starts: (the program and its arguments, the shell's kind).
+    The person's own shell reads their own start files, then CCC's marks (shell/); a shell that is
+    neither zsh nor bash is zsh here."""
+    if os.path.basename(shell) == "bash":
+        return [shell, "--rcfile", str(SHELL_DIR / "bashrc"), "-i"], "bash"
+    zsh = shell if os.path.basename(shell) == "zsh" else "/bin/zsh"
+    return ["/usr/bin/env", f"ZDOTDIR={SHELL_DIR / 'zsh'}", f"CCC_USER_ZDOTDIR={environ.get('ZDOTDIR', '')}", zsh, "-i"], "zsh"
 
-    def __init__(self, folder: Path):
+
+def typed_command(command: str, kind: str) -> str:
+    """What is typed into the terminal to run a command: in zsh a paste, so a block of several lines
+    runs as one command line; bash (the Mac's own has no pasting) gets it on one line."""
+    if kind == "bash":
+        return (f"eval {shlex.quote(command)}" if "\n" in command else command) + "\r"
+    return f"\x1b[200~{command}\x1b[201~\r"
+
+
+def marks_in(data: bytes, start: int = 0) -> list:
+    """The marks a terminal printed from `start` on: (where each begins, where it ends, the exit
+    code it gives, or None for the start of a command)."""
+    return [(mark.start(), mark.end(), None if mark.group(1) is None else int(mark.group(1))) for mark in RUN_MARK.finditer(data, max(0, start))]
+
+
+def is_at_prompt(data: bytes) -> bool:
+    """Whether the shell waits at its prompt: the last mark it printed is one. A shell still starting,
+    or running something long that printed past what is kept, is not."""
+    marks = marks_in(data)
+    return bool(marks) and marks[-1][2] is not None
+
+
+def followed(run: dict, data: bytes, seq: int, now_ms: int) -> dict:
+    """A run typed into its terminal, brought up to date with what the terminal printed since: what
+    the command printed between its marks, and its exit code once the shell is back at its prompt."""
+    typed_at = len(data) - (seq - run["from"])
+    marks = marks_in(data, typed_at)
+    start = next((mark for mark in marks if mark[2] is None), None)
+    begin = start[1] if start else max(0, typed_at)
+    done = next((mark for mark in marks if mark[2] is not None and mark[0] >= begin), None)
+    # a mark only half printed yet is left for the next look
+    partial = PARTIAL_MARK.search(data, begin)
+    end = done[0] if done else partial.start() if partial else len(data)
+    now = {**run, "output": plain_output(data[begin:end])}
+    if done:
+        now.update(endedAt=now_ms, exitCode=done[2])
+    return now
+
+
+class CommandRuns:
+    """The commands the person ran from the chat's code blocks (Run). As in the Claude app, each
+    session has one terminal for them, on the board in its folder: the first Run starts it, and each
+    Run types its command into it once the one before is done. A folder per session, a file per run,
+    kept up to date with what it printed and how it ended. The session's mod leaves `<run id>.told`
+    beside a run once Claude was told of it (hooks/runs.ts)."""
+
+    def __init__(self, folder: Path, shell=None, send=None):
         self.folder = folder
+        self.shell = shell
+        # how Claude gets a message from CCC's chat: send(session id, text, time), through its inbox
+        self.send = send
         self.lock = threading.Lock()
         self.misses = {}
 
-    def start(self, terms, transcripts, session_id, command, now_ms: int, shell=None) -> dict:
-        """Runs a command in the session's folder, in the person's own shell as their terminal opens
-        it (so their PATH, aliases and functions are there too). The folder comes from the session's
-        transcript, never from the page. Closes the terminals of the session's runs that ended."""
+    def start(self, terms, transcripts, session_id, command, now_ms: int) -> dict:
+        """Runs a command in the session's terminal, starting it in the session's folder when it has
+        none. The folder comes from the session's transcript, never from the page."""
         if not isinstance(session_id, str) or not SAFE_ID.match(session_id):
             return {"ok": False, "problem": "That session could not be found."}
         if not isinstance(command, str) or not command.strip() or len(command) > RUN_COMMAND_MAX:
@@ -2870,53 +2926,107 @@ class CommandRuns:
         folder = folder_of(path) if path else None
         if not folder or not os.path.isdir(folder):
             return {"ok": False, "problem": "This session's folder is not known yet."}
-        terminal_id, problem = terms.start(folder, *RUN_SIZE, command=[shell or terminals.shell_of(os.environ), "-i", "-c", command])
-        if not terminal_id:
-            return {"ok": False, "problem": problem}
-        replaced = self.close_ended(terms, session_id)
-        run = {"id": "r" + secrets.token_hex(6), "command": command, "folder": folder, "terminalId": terminal_id, "startedAt": now_ms, "endedAt": None, "exitCode": None, "output": ""}
         with self.lock:
+            runs = self.runs_of(session_id)
+            listed = {card.get("id"): card for card in terms.list() if isinstance(card, dict)}
+            terminal, kind = self.terminal_of(runs, listed)
+            replaced = []
+            if terminal is None:
+                program, kind = run_shell(self.shell or terminals.shell_of(os.environ))
+                terminal, problem = terms.start(folder, *RUN_SIZE, command=program)
+                if not terminal:
+                    return {"ok": False, "problem": problem}
+                replaced = self.close_old(terms, session_id, runs)
+            run = {"id": "r" + secrets.token_hex(6), "command": command, "folder": folder, "terminalId": terminal, "shell": kind, "startedAt": now_ms, "typedAt": None, "from": None, "endedAt": None, "exitCode": None, "output": ""}
             self.write(session_id, run)
             self.prune(session_id)
-        return {"ok": True, "runId": run["id"], "terminalId": terminal_id, "replaced": replaced}
+        # typed at once when the shell waits at its prompt; a new one is typed into once it does
+        self.settle(terms, now_ms, session_id=session_id)
+        return {"ok": True, "runId": run["id"], "terminalId": terminal, "replaced": replaced}
 
-    def close_ended(self, terms, session_id: str) -> list:
-        """Closes the terminals of a session's runs that ended, so each Run leaves one on the board;
-        what they printed stays in the chat. The ids of those it closed."""
+    def terminal_of(self, runs: list, listed: dict) -> tuple:
+        """The session's terminal, while it still runs a shell: (its id, the shell's kind), or (None, None)."""
+        for run in reversed(runs):
+            card = listed.get(run.get("terminalId"))
+            if not run.get("terminalGone") and card is not None:
+                return (run["terminalId"], run.get("shell", "zsh")) if not card.get("endedAt") else (None, None)
+        return None, None
+
+    def close_old(self, terms, session_id: str, runs: list) -> list:
+        """Closes the session's terminal that ended, before a new one takes its place; what its runs
+        printed stays in the chat. The ids of those it closed."""
         closed = []
-        with self.lock:
-            for run in self.runs_of(session_id):
-                if run.get("endedAt") is not None and not run.get("terminalGone"):
-                    if terms.close(run.get("terminalId")):
-                        closed.append(run["terminalId"])
-                    self.write(session_id, {**run, "terminalGone": True})
+        for terminal in dict.fromkeys(run.get("terminalId") for run in runs if not run.get("terminalGone")):
+            if terms.close(terminal):
+                closed.append(terminal)
+        for run in runs:
+            if not run.get("terminalGone"):
+                self.write(session_id, {**run, "terminalGone": True})
         return closed
 
     def settle(self, terms, now_ms: int, cards=None, session_id=None):
-        """Brings each run still going up to date with its terminal: what it printed so far, and its
-        exit code once it ended. One whose terminal was closed first ends with no exit code."""
+        """Brings each run not done yet up to date with its terminal, and types the next one waiting
+        into a terminal back at its prompt. Runs whose terminal ended or was closed end with it."""
         with self.lock:
-            going = [(owner, run) for owner, run in self.every_run(session_id) if run.get("endedAt") is None]
+            going = {}
+            for owner, run in self.every_run(session_id):
+                if run.get("endedAt") is None:
+                    going.setdefault((owner, run.get("terminalId")), []).append(run)
             if not going:
                 return
             listed = {card.get("id"): card for card in (terms.list() if cards is None else cards) if isinstance(card, dict)}
-            for owner, run in going:
-                card = listed.get(run.get("terminalId"))
-                now = dict(run)
-                if card is None:
-                    self.misses[run["id"]] = self.misses.get(run["id"], 0) + 1
-                    if self.misses[run["id"]] >= RUN_MISSES:
-                        self.misses.pop(run["id"], None)
-                        now.update(endedAt=now_ms, terminalGone=True)
-                else:
-                    self.misses.pop(run["id"], None)
-                    seen = terms.screen(run["terminalId"]) if hasattr(terms, "screen") else None
-                    if seen:
-                        now["output"] = plain_output(seen[0])
-                    if card.get("endedAt"):
-                        now.update(endedAt=card["endedAt"], exitCode=card.get("exitCode"))
-                if now != run:
-                    self.write(owner, now)
+            for (owner, terminal), runs in going.items():
+                self.settle_terminal(terms, owner, terminal, runs, listed.get(terminal), now_ms)
+            for owner in dict.fromkeys(owner for owner, _ in going):
+                self.report(owner, now_ms)
+
+    def report(self, owner: str, now_ms: int):
+        """Once none of a session's runs waits or runs any more, Claude gets how the ones that ended
+        went in one message, as in the Claude app: it looks at what they printed and answers. It
+        waits in the inbox while Claude works. What they printed goes in beside it, from the mod
+        (hooks/runs.ts); runs Claude heard of already, or that never ran, are not sent."""
+        runs = self.runs_of(owner)
+        if self.send is None or any(run.get("endedAt") is None for run in runs):
+            return
+        due = [run for run in runs if run.get("typedAt") and isinstance(run.get("exitCode"), int) and not run.get("sentAt") and not (self.folder / owner / f"{run['id']}.told").exists()]
+        if not due:
+            return
+        self.send(owner, run_message(due), now_ms)
+        for run in due:
+            self.write(owner, {**run, "sentAt": now_ms})
+
+    def settle_terminal(self, terms, owner: str, terminal: str, runs: list, card, now_ms: int):
+        if card is None:
+            self.misses[terminal] = self.misses.get(terminal, 0) + 1
+            if self.misses[terminal] >= RUN_MISSES:
+                self.misses.pop(terminal, None)
+                for run in runs:
+                    self.write(owner, {**run, "endedAt": now_ms, "terminalGone": True})
+            return
+        self.misses.pop(terminal, None)
+        seen = terms.screen(terminal) if hasattr(terms, "screen") else None
+        data, seq = seen if seen else (b"", 0)
+        waiting = []
+        for run in runs:
+            if run.get("typedAt") is None:
+                waiting.append(run)
+                continue
+            now = followed(run, data, seq, now_ms) if seen else run
+            if card.get("endedAt") and now.get("endedAt") is None:
+                now = {**now, "endedAt": card["endedAt"]}
+            if now != run:
+                self.write(owner, now)
+            if now.get("endedAt") is None:
+                # one at a time: the next waits for this one
+                return
+        if not waiting:
+            return
+        if card.get("endedAt"):
+            for run in waiting:
+                self.write(owner, {**run, "endedAt": card["endedAt"]})
+            return
+        if seen and is_at_prompt(data) and terms.type(terminal, typed_command(waiting[0]["command"], waiting[0].get("shell", "zsh"))):
+            self.write(owner, {**waiting[0], "typedAt": now_ms, "from": seq, "folder": card.get("where") or waiting[0]["folder"]})
 
     def shown(self, session_id) -> list:
         """A session's runs for its chat, oldest first, each marked `told` once Claude was told of it."""
@@ -2924,9 +3034,8 @@ class CommandRuns:
             return []
         shown = []
         for run in self.runs_of(session_id):
-            told = self.told(session_id, run)
             terminal = {} if run.get("terminalGone") else {"terminalId": run.get("terminalId")}
-            shown.append({key: run.get(key) for key in ("id", "command", "startedAt", "endedAt", "exitCode", "output")} | terminal | {"told": told})
+            shown.append({key: run.get(key) for key in ("id", "command", "startedAt", "typedAt", "endedAt", "exitCode", "output", "sentAt")} | terminal | {"told": self.told(session_id, run)})
         return shown
 
     def told(self, session_id: str, run: dict) -> bool:
@@ -2941,8 +3050,8 @@ class CommandRuns:
         return run.get("endedAt") is None or not isinstance(told, dict) or told.get("ended") is not False
 
     def terminals(self) -> dict:
-        """Each run's terminal still on the board: {terminal id: {"sessionId", "command"}}."""
-        return {run["terminalId"]: {"sessionId": owner, "command": run.get("command", "")} for owner, run in self.every_run() if not run.get("terminalGone") and isinstance(run.get("terminalId"), str)}
+        """Each session's terminal for Run still on the board: {terminal id: {"sessionId"}}."""
+        return {run["terminalId"]: {"sessionId": owner} for owner, run in self.every_run() if not run.get("terminalGone") and isinstance(run.get("terminalId"), str)}
 
     def every_run(self, session_id=None) -> list:
         try:
@@ -2980,8 +3089,22 @@ class CommandRuns:
                 (self.folder / session_id / f"{run['id']}{suffix}").unlink(missing_ok=True)
 
 
+def run_message(runs: list) -> str:
+    """The message that tells Claude some runs from the chat ended: what they were and how they
+    went, in a line, the way the person would say it. What they printed goes in beside it."""
+    def named(command: str) -> str:
+        line = command.strip().split("\n")[0]
+        return line if len(line) <= 80 and "\n" not in command.strip() else line[:80].rstrip() + "…"
+    failed = [run for run in runs if run.get("exitCode") != 0]
+    if len(runs) == 1:
+        how = "done" if not failed else f"failed, exit {runs[0]['exitCode']}"
+        return f"Ran `{named(runs[0]['command'])}` from the chat: {how}. Have a look at what it printed."
+    how = f"{len(runs) - len(failed)} done, {len(failed)} failed" if failed else "all done"
+    return f"Ran {len(runs)} commands from the chat ({how}). Have a look at what they printed."
+
+
 def with_run_labels(cards: list, runs: dict) -> list:
-    """Each terminal card that runs a command from a chat, marked with that command and its session."""
+    """Each terminal card that is a session's terminal for Run, marked with its session."""
     return [{**card, "run": runs[card.get("id")]} if card.get("id") in runs else card for card in cards]
 
 
@@ -2998,7 +3121,7 @@ DELETED = Deleted(DELETED_FILE)
 SCREEN_BOXES = {}
 CAVEMAN = Caveman(CAVEMAN_DIR)
 NOTES = Notes(NOTES_FILE)
-RUNS = CommandRuns(RUNS_DIR)
+RUNS = CommandRuns(RUNS_DIR, send=lambda session_id, text, now_ms: INBOX.send(session_id, text, [], "queue", now_ms))
 TERMINALS = keeper.KeptTerminals()
 BACKGROUNDS = Backgrounds(BACKGROUND_FILE)
 KEEPER_WATCH = KeeperWatch()

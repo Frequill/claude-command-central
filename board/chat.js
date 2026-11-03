@@ -1867,8 +1867,8 @@ function drawBlock(block, chat) {
 
 /**
  * A code block with its language and a button that copies it whole, as an editor's chat has. A shell
- * command also gets Run, as in the Claude app: it runs in a terminal on the board, in the session's
- * folder, and how it went shows under the block (drawRuns).
+ * command also gets Run, as in the Claude app: it runs in the session's terminal on the board, how it
+ * went shows under the block (drawRuns), and Claude gets what it printed once it ends.
  */
 function codeBlock(block, chat) {
   const run = chat && C.isRunnable(block) ? runButton(chat, block.text) : null
@@ -1890,7 +1890,7 @@ function codeBlock(block, chat) {
 
 /** A Run button and the place under its block where the run's result goes, kept for drawRuns. */
 function runButton(chat, command) {
-  const button = el('button', { type: 'button', class: 'code-copy code-run', title: 'Run in a terminal on the board, in this session’s folder. Claude sees what it printed with your next message.' }, icon('M5 3.5v9l7-4.5z', 12), el('span', {}, 'Run'))
+  const button = el('button', { type: 'button', class: 'code-copy code-run', title: 'Run in this session’s terminal on the board. Claude gets what it printed once it ends.' }, icon('M5 3.5v9l7-4.5z', 12), el('span', {}, 'Run'))
   const result = el('div', { class: 'md-run', role: 'status', hidden: true })
   const slot = { button, result, signature: '' }
   button.addEventListener('click', () => startRun(chat, command))
@@ -1931,7 +1931,7 @@ function drawRuns(chat) {
 }
 
 function drawRun(slot, run, asked) {
-  const isRunning = Boolean(run) && C.runState(run) === 'running'
+  const isRunning = Boolean(run) && ['waiting', 'running'].includes(C.runState(run))
   slot.button.disabled = Boolean(asked.isStarting) || isRunning
   slot.button.lastChild.textContent = run && !isRunning ? 'Run again' : 'Run'
   if (!run && !asked.isStarting && !asked.problem) {
@@ -1942,7 +1942,7 @@ function drawRun(slot, run, asked) {
   const label = asked.isStarting ? 'Starting…' : asked.problem || C.runLabel(run)
   const show = run?.terminalId ? el('button', { type: 'button', class: 'md-run-show', title: 'Show its terminal on the board' }, '>_ Terminal') : null
   show?.addEventListener('click', () => window.dispatchEvent(new CustomEvent('ccc:show-session', { detail: { sessionId: run.terminalId } })))
-  const told = run && !asked.isStarting && !asked.problem ? el('span', { class: 'md-run-told' }, run.told ? 'Claude has seen this' : 'Claude sees this with your next message') : null
+  const told = run && !asked.isStarting && !asked.problem ? el('span', { class: 'md-run-told' }, C.runHeard(run)) : null
   const output = run?.output ? el('pre', { class: 'md-run-output' }, run.output) : null
   slot.result.className = `md-run md-run-${state}`
   slot.result.replaceChildren(...[el('div', { class: 'md-run-head' }, el('span', { class: 'md-run-dot', 'aria-hidden': 'true' }), el('span', { class: 'md-run-label' }, label), told, show), output].filter(Boolean))

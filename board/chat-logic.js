@@ -548,9 +548,12 @@ export function runOf(runs, command) {
   return (runs ?? []).filter(run => run?.command === command).at(-1)
 }
 
-/** How a run went, in a word for its pill: running, done (exit 0), failed (another exit) or closed. */
+/**
+ * How a run went, in a word for its pill: waiting (for the one before it in the session's terminal),
+ * running, done (exit 0), failed (another exit) or closed (its terminal went first).
+ */
 export function runState(run) {
-  if (!run?.endedAt) return 'running'
+  if (!run?.endedAt) return run?.typedAt ? 'running' : 'waiting'
   if (!Number.isInteger(run.exitCode)) return 'closed'
   return run.exitCode === 0 ? 'done' : 'failed'
 }
@@ -558,9 +561,21 @@ export function runState(run) {
 /** The words of a run's status line. */
 export function runLabel(run) {
   const state = runState(run)
+  if (state === 'waiting') return 'Waiting for the terminal…'
   if (state === 'running') return 'Running…'
-  if (state === 'closed') return 'Closed before it ended'
+  if (state === 'closed') return run.typedAt ? 'Closed before it ended' : 'Its terminal closed before it ran'
   return state === 'done' ? 'Done' : `Failed, exit ${run.exitCode}`
+}
+
+/**
+ * Where Claude is with a run: it gets how it went once it ends (sent in a message of its own), or
+ * hears of it with the next message when it did not end by itself.
+ */
+export function runHeard(run) {
+  if (run?.told) return 'Claude has seen this'
+  if (run?.sentAt) return 'Sent to Claude'
+  const state = runState(run)
+  return state === 'waiting' || state === 'running' ? 'Goes to Claude when it ends' : 'Claude sees this with your next message'
 }
 
 // ---------- emoji ----------

@@ -1713,12 +1713,23 @@ test('a code block shows the newest run of its command and how it went', () => {
   const runs = [
     { id: 'r1', command: 'ls', startedAt: 1, endedAt: 2, exitCode: 0 },
     { id: 'r2', command: 'npm test', startedAt: 3, endedAt: 4, exitCode: 1 },
-    { id: 'r3', command: 'ls', startedAt: 5, endedAt: null, exitCode: null },
+    { id: 'r3', command: 'ls', startedAt: 5, typedAt: 6, endedAt: null, exitCode: null },
+    { id: 'r4', command: 'pwd', startedAt: 7, typedAt: null, endedAt: null, exitCode: null },
   ]
   assert.equal(C.runOf(runs, 'ls').id, 'r3')
-  assert.equal(C.runOf(runs, 'pwd'), undefined)
-  assert.deepEqual(runs.map(C.runState), ['done', 'failed', 'running'])
-  assert.deepEqual(runs.map(C.runLabel), ['Done', 'Failed, exit 1', 'Running…'])
-  assert.equal(C.runState({ endedAt: 9, exitCode: null }), 'closed')
-  assert.equal(C.runLabel({ endedAt: 9, exitCode: null }), 'Closed before it ended')
+  assert.equal(C.runOf(runs, 'whoami'), undefined)
+  assert.deepEqual(runs.map(C.runState), ['done', 'failed', 'running', 'waiting'])
+  assert.deepEqual(runs.map(C.runLabel), ['Done', 'Failed, exit 1', 'Running…', 'Waiting for the terminal…'])
+  assert.equal(C.runState({ typedAt: 1, endedAt: 9, exitCode: null }), 'closed')
+  assert.equal(C.runLabel({ typedAt: 1, endedAt: 9, exitCode: null }), 'Closed before it ended')
+  assert.equal(C.runLabel({ endedAt: 9, exitCode: null }), 'Its terminal closed before it ran')
+})
+
+test('a run says where Claude is with it', () => {
+  assert.equal(C.runHeard({ typedAt: 1 }), 'Goes to Claude when it ends')
+  assert.equal(C.runHeard({}), 'Goes to Claude when it ends')
+  assert.equal(C.runHeard({ typedAt: 1, endedAt: 2, exitCode: 0, sentAt: 3 }), 'Sent to Claude')
+  assert.equal(C.runHeard({ typedAt: 1, endedAt: 2, exitCode: 0, sentAt: 3, told: true }), 'Claude has seen this')
+  // closed before it ended: nothing was sent, the next message tells of it
+  assert.equal(C.runHeard({ typedAt: 1, endedAt: 2, exitCode: null }), 'Claude sees this with your next message')
 })

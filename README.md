@@ -77,9 +77,11 @@ When Claude makes a design in a session (Claude Design), its card gets a **Desig
 
 ## Run
 
-A shell command Claude writes in a chat (a `bash`, `sh`, `zsh` or `shell` code block) gets a **Run** button beside Copy, as in the Claude app. It runs in the session's folder, in your own shell with your PATH, aliases and functions, in a terminal card of its own on the board, where you can type into it (a password, a y/n). How it went shows under the code block: running, done or failed with its exit code, and the last lines it printed. **>_ Terminal** goes to its card, and **Run again** runs it once more. The session's next run takes the place of the last one's terminal, once that one has ended.
+A shell command Claude writes in a chat (a `bash`, `sh`, `zsh` or `shell` code block) gets a **Run** button beside Copy, as in the Claude app. Each session has one terminal for them on the board, in its folder: the first Run starts it, and each Run types its command into it, once the one before is done. It is your own shell with your own start files (your PATH, aliases and functions), so you can type into it too, a password or a y/n. How a command went shows under its code block: waiting, running, done or failed with its exit code, and the last lines it printed. **>_ Terminal** goes to the terminal.
 
-Claude sees it too: with your next message to that session, from CCC, the Claude app or a terminal, Claude gets the commands you ran and what they printed (a note beside your message that you do not see). A command still running when you write is told again once it ends. Under the block, CCC shows whether Claude has seen it yet.
+Claude gets it at once, as in the Claude app: once the last command you ran has ended, CCC tells the session how they went ("Ran `npm test` from the chat: failed, exit 1"), with what they printed beside it, and Claude looks and answers. While Claude works, that waits its turn. A command you wrote to Claude about while it ran, from CCC, the Claude app or a terminal, goes in beside that message instead. Under the block, CCC shows where Claude is with it.
+
+To tell where each command starts and ends and how it ended, the terminal starts your shell through CCC's own start files (`board/shell/`), which read yours first and then add two marks around each command, codes a terminal does not show, as VS Code's terminal does. zsh and bash are read that way; another shell starts as zsh there.
 
 ## Themes
 

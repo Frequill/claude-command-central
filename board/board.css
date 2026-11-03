@@ -7547,9 +7547,14 @@ body.theme-inferno .live-reply {
   background: #8fb6d8;
 }
 
-.md-run-running .md-run-dot {
+.md-run-running .md-run-dot,
+.md-run-waiting .md-run-dot {
   background: #ffd166;
   animation: run-pulse 1.2s ease-in-out infinite;
+}
+
+.md-run-waiting .md-run-dot {
+  animation-duration: 2.4s;
 }
 
 .md-run-done .md-run-dot {
@@ -7613,7 +7618,8 @@ body.theme-inferno .live-reply {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .md-run-running .md-run-dot {
+  .md-run-running .md-run-dot,
+  .md-run-waiting .md-run-dot {
     animation: none;
   }
 }

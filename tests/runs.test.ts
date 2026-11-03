@@ -5,7 +5,7 @@ import { inboxFor } from '../hooks/inbox'
 import { readRun, readTold, runsNote, takeRunsNote, tellRuns, untold } from '../hooks/runs'
 import type { CommandRun, RunsIo } from '../hooks/runs'
 
-const run = (fields: Partial<CommandRun> = {}): CommandRun => ({ id: 'r000000000001', command: 'npm test', folder: '/p', startedAt: 1, output: '', ...fields })
+const run = (fields: Partial<CommandRun> = {}): CommandRun => ({ id: 'r000000000001', command: 'npm test', folder: '/p', startedAt: 1, typedAt: 1, output: '', ...fields })
 
 function fakeRuns(files: Record<string, string>, isThere = true) {
   const written: Record<string, string> = {}
@@ -30,8 +30,8 @@ function fakeRuns(files: Record<string, string>, isThere = true) {
 
 describe('commands run from the chat', () => {
   test('a stored run is read as the server writes it', () => {
-    const text = JSON.stringify({ id: 'r000000000001', command: 'ls', folder: '/p', terminalId: 't1', startedAt: 1, endedAt: null, exitCode: null, output: 'a' })
-    expect(readRun(text)).toEqual({ id: 'r000000000001', command: 'ls', folder: '/p', startedAt: 1, output: 'a' })
+    const text = JSON.stringify({ id: 'r000000000001', command: 'ls', folder: '/p', terminalId: 't1', shell: 'zsh', startedAt: 1, typedAt: 2, from: 40, endedAt: null, exitCode: null, output: 'a' })
+    expect(readRun(text)).toEqual({ id: 'r000000000001', command: 'ls', folder: '/p', startedAt: 1, typedAt: 2, output: 'a' })
     expect(readRun(JSON.stringify({ id: 'r000000000001', command: 'ls', startedAt: 1, endedAt: 5, exitCode: 0 }))?.exitCode).toBe(0)
     expect(readRun('{')).toBeUndefined()
     expect(readRun(JSON.stringify({ id: '../x', command: 'ls', startedAt: 1 }))).toBeUndefined()
@@ -53,12 +53,14 @@ describe('commands run from the chat', () => {
       run({ id: 'r000000000002', command: 'npm run dev', startedAt: 9, output: 'ready on :3000' }),
       run({ startedAt: 2, endedAt: 5, exitCode: 1, output: 'FAIL src/a.test.ts\n```oops```' }),
       run({ id: 'r000000000003', command: 'sleep 9', startedAt: 10, endedAt: 11 }),
+      run({ id: 'r000000000004', command: 'ls', startedAt: 12, typedAt: undefined }),
     ]) as string
     expect(note).toContain("from CCC's chat, with Run on a code block")
     expect(note.indexOf('$ npm test')).toBeLessThan(note.indexOf('$ npm run dev'))
     expect(note).toContain('$ npm test\nIn /p, it exited with code 1. The last lines it printed:\n````text\nFAIL src/a.test.ts\n```oops```\n````')
     expect(note).toContain('$ npm run dev\nIn /p, it is still running. What it printed so far:\n```text\nready on :3000\n```')
     expect(note).toContain('$ sleep 9\nIn /p, it was closed before it ended. What it printed:\n(nothing)')
+    expect(note).toContain('$ ls\nIt waits for the one before it to end, and has not run yet.')
     expect(runsNote([])).toBeUndefined()
   })
 
