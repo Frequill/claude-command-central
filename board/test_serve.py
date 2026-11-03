@@ -2599,6 +2599,19 @@ class ArtifactsTest(unittest.TestCase):
         self.assertIsNone(serve.artifact_file(self.transcripts, "../x", "0", ""))
         self.assertIn("/artifact.js", serve.BOARD_FILES)
 
+    def test_plus_lists_every_conversations_artifacts_newest_first(self):
+        self.write(json.dumps({"type": "user", "cwd": str(self.home), "message": {"content": "Make me something to listen to"}}))
+        self.write(*self.published("t1", "https://claude.ai/artifact/AAAAAAAAAA", at="2026-11-03T09:00:00Z"))
+        other = self.home / "projects" / "p" / "s2.jsonl"
+        lines = [json.dumps({"type": "user", "cwd": str(self.home), "message": {"content": "Another one"}})] + artifact_lines("t9", {"file_path": "/gone/page.html", "description": "Gone"}, "Published /gone/page.html at https://claude.ai/artifact/BBBBBBBBBB", "2026-11-03T12:00:00Z")
+        other.write_text("".join(line + "\n" for line in lines))
+        (self.home / "projects" / "p" / "empty.jsonl").write_text(json.dumps({"type": "user", "message": {"content": "nothing here"}}) + "\n")
+        listed = serve.all_artifacts(self.home / "projects", self.transcripts)
+        self.assertEqual([(one["sessionId"], one["title"]) for one in listed[:1]], [("s2", "Gone")])
+        mine = next(one for one in listed if one["sessionId"] == "s1")
+        self.assertEqual((mine["sessionTitle"], mine["folder"], mine["isHere"], mine["id"]), ("Make me something to listen to", str(self.home), True, 0))
+        self.assertEqual(len(listed), 2)
+
 
 if __name__ == "__main__":
     unittest.main()

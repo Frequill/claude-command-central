@@ -1714,3 +1714,15 @@ test('a card widened for its artifact moves the cards in its way, and they come 
   assert.deepEqual(movedBack(moved, [{ id: 'beside', x: 6, y: 32 }]).map(({ node, place }) => [node.id, place]), [['beside', { x: 6, y: 0 }]])
   assert.deepEqual(movedBack(moved, [{ id: 'beside', x: 0, y: 64 }]), [])
 })
+
+test('the artifacts "+" lists are searched by title, session and folder, and each opens as one card', () => {
+  const all = [
+    { title: 'Cart total checker', sessionTitle: 'Fix the discount', folder: '/code/shop' },
+    { title: 'Install steps', sessionTitle: 'Write the README', folder: '/code/docs' },
+  ]
+  assert.deepEqual(L.matchArtifacts(all, 'cart').map(one => one.title), ['Cart total checker'])
+  assert.deepEqual(L.matchArtifacts(all, 'docs readme').map(one => one.title), ['Install steps'])
+  assert.equal(L.matchArtifacts(all, '').length, 2)
+  assert.equal(L.artifactCardId('https://claude.ai/artifact/VsXLKmqA29v9XwBeWJ8MZ9'), 'art-VsXLKmqA29v9XwBeWJ8MZ9')
+  assert.equal(L.artifactCardId('https://claude.ai/code/artifact/a1b2-c3'), 'art-a1b2-c3')
+})

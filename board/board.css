@@ -10490,6 +10490,39 @@ body.theme-cyberpunk .settings legend {
   white-space: nowrap;
 }
 
+/* an artifact opened from "+" as a card of its own: its page fills the card under its header */
+.artifact-glyph {
+  display: inline-flex;
+  padding: 3px 5px;
+  border-radius: 5px;
+  color: #ffffff;
+  background: #2f6fde;
+}
+
+.source-artifact {
+  background: #2f6fde;
+}
+
+.artifact-tile .artifact-card-body {
+  flex: 1;
+  min-height: 0;
+}
+
+/* its own title first; the session it came from takes what room is left */
+.artifact-head .chat-title {
+  flex: 0 1 auto;
+  min-width: 6em;
+}
+
+.artifact-head .chat-where {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+.artifact-tile .artifact-bar {
+  justify-content: flex-end;
+}
+
 button.open-link {
   cursor: pointer;
 }

@@ -740,7 +740,8 @@ def artifacts_in(text: str, calls: dict, found: dict) -> tuple:
     description, and when it was published last. One Claude deleted is gone again."""
     calls, found = dict(calls), dict(found)
     for line in text.splitlines():
-        if '"Artifact"' not in line and "tool_result" not in line:
+        # only the lines of Artifact calls, and of their results: a transcript holds many other tools
+        if '"Artifact"' not in line and not (calls and "tool_result" in line and any(tool_id in line for tool_id in calls)):
             continue
         try:
             record = json.loads(line)
@@ -805,6 +806,29 @@ def artifact_summary(artifacts: list):
         return None
     newest = max(artifacts, key=lambda view: view["at"])
     return {"count": len(artifacts), "title": newest["title"], "at": newest["at"]}
+
+
+ALL_ARTIFACTS_SHOWN = 300
+
+
+def all_artifacts(projects_dir: Path, transcripts, limit: int = ALL_ARTIFACTS_SHOWN) -> list:
+    """Every artifact Claude published in a conversation on this Mac, the one changed last first,
+    for "+" to open as a card of its own: each with its session, that session's name and folder."""
+    files = []
+    for folder, _dirs, names in os.walk(projects_dir):
+        if "subagents" in Path(folder).parts:
+            continue
+        files += [Path(folder) / name for name in names if name.endswith(".jsonl") and SAFE_ID.match(name[:-6])]
+    found = []
+    for path in files:
+        session_id = path.name[:-6]
+        views = session_artifacts(transcripts, session_id)
+        if not views:
+            continue
+        title = transcripts.describe(session_id).get("title") or first_prompt(path) or session_id
+        folder = folder_of(path) or ""
+        found += [{**view, "sessionId": session_id, "sessionTitle": title[:200], "folder": folder} for view in views]
+    return sorted(found, key=lambda view: view["at"], reverse=True)[:limit]
 
 
 def with_artifacts(sessions: list, transcripts) -> list:
@@ -3187,6 +3211,8 @@ class Handler(SimpleHTTPRequestHandler):
             if not SAFE_ID.match(session_id):
                 return self.send_error(400)
             return self.send_json({"designs": session_designs(TRANSCRIPTS, session_id)})
+        if route == "/api/artifacts/all":
+            return self.send_json({"artifacts": all_artifacts(PROJECTS_DIR, TRANSCRIPTS)})
         if route == "/api/artifacts":
             session_id = parse_qs(urlsplit(self.path).query).get("session", [""])[0]
             if not SAFE_ID.match(session_id):

@@ -79,6 +79,8 @@ When Claude makes a design in a session (Claude Design), its card gets a **Desig
 
 When Claude publishes an artifact in a session (the Artifact tool), its card gets an **Artifact** button, with a dot while there is one you have not looked at. It shows the artifact beside the chat, as the Claude app shows it at its side: the card widens to the board's full width, the cards beside it move down, and the artifact is a live page you use right there. With several, a list picks one; one Claude publishes again loads again. **Open on claude.ai** opens the real one. The board shows the page's own file from this Mac, walled off from the board, so what needs claude.ai itself (data kept for its viewers, files people add, asking Claude) works there. Closed, the card goes back to its size and the cards it moved come back up. In a narrow window the artifact goes under the chat.
 
+**+ → An artifact** lists every artifact Claude published in a conversation on this Mac, the one changed last first, to search by title, session or folder. **Open in CCC** puts one on the board as a card of its own, in the space whose + you clicked, to move and size like any card; it stays across reloads until its × takes it off. One whose page is no longer on this Mac has its claude.ai link instead.
+
 ## Themes
 
 Twelve of them, from Clean to Cyberpunk 2077. Pick one in Settings.

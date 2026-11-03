@@ -531,6 +531,21 @@ export function matchConversations(conversations, search) {
   })
 }
 
+/** The artifacts whose title, session or folder holds every word searched for. */
+export function matchArtifacts(artifacts, search) {
+  const words = String(search ?? '').toLowerCase().split(/\s+/).filter(Boolean)
+  const list = Array.isArray(artifacts) ? artifacts : []
+  return list.filter(artifact => {
+    const text = `${artifact?.title ?? ''} ${artifact?.sessionTitle ?? ''} ${artifact?.folder ?? ''} ${artifact?.description ?? ''}`.toLowerCase()
+    return words.every(word => text.includes(word))
+  })
+}
+
+/** The id of an artifact's own card on the board, from its claude.ai link: one card per artifact. */
+export function artifactCardId(url) {
+  return `art-${String(url ?? '').split('/').pop().replace(/[^A-Za-z0-9_-]/g, '')}`
+}
+
 /** How long ago a time was, the short way: just now, 5 min ago, 3 h ago, 2 days ago. */
 export function timeAgo(at, now) {
   const seconds = Math.max(0, Math.round((now - at) / 1000))
