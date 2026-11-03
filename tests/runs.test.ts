@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'claude-code/testing'
+import { describe, expect, mock, test } from 'claude-code/testing'
 
 import { readRun, readTold, runsNote, takeRunsNote, untold } from '../hooks/runs'
 import type { CommandRun, RunsIo } from '../hooks/runs'
@@ -88,4 +88,34 @@ describe('commands run from the chat', () => {
   test('a session that never ran anything from CCC has no note', async () => {
     expect(await takeRunsNote(fakeRuns({}, false).io)).toBeUndefined()
   })
+})
+
+test('the next prompt carries what the person ran, once', async ($, on) => {
+  mock.clock(on, { now: 42 })
+  mock.env(on, { HOME: '/h' })
+  on('session.id', () => ({ value: 's1' }))
+  const dir = '/h/.claude/ccc/runs/s1'
+  const files = new Map([[`${dir}/r000000000001.json`, JSON.stringify(run({ endedAt: 5, exitCode: 1, output: 'FAIL' }))]])
+  on('fs.exists', (_, e) => ({ value: e.path === dir || files.has(e.path) }))
+  on('fs.list', (_, e) => ({ value: [...files.keys()].filter(path => path.startsWith(`${e.path}/`)).map(path => ({ name: path.slice(e.path.length + 1), kind: 'file' as const, size: 0, mtimeMs: 0, isLink: false })) }))
+  on('fs.read', (_, e) => {
+    if (!files.has(e.path)) throw new Error('missing')
+    return { value: files.get(e.path) as string }
+  })
+  on('fs.write', (_, e) => {
+    files.set(e.path, e.text)
+    return { value: undefined }
+  })
+  const entered: (readonly string[] | undefined)[] = []
+  on('prompt.submit', (_, e) => {
+    entered.push(e.context)
+    return { text: e.text }
+  })
+
+  await $.prompt.submit({ text: 'why did it fail?', wait: false, origin: { kind: 'composer' } })
+  await $.prompt.submit({ text: 'and now?', wait: false, origin: { kind: 'composer' } })
+
+  expect(entered[0]?.join('\n')).toContain('$ npm test\nIn /p, it exited with code 1.')
+  expect(entered[1]?.join('\n') ?? '').not.toContain('$ npm test')
+  expect(JSON.parse(files.get(`${dir}/r000000000001.told`) as string)).toEqual({ at: 42, ended: true })
 })
