@@ -4746,8 +4746,48 @@ body.theme-inferno .notes-text {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: var(--face-bg);
+  margin: 0;
+  padding: 0;
+  border: none;
   border-left: 2px solid var(--cell-light);
+  background: var(--face-bg);
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+/* the emblem closes the gaps between the cards */
+.hud-face > * {
+  transition: transform 0.15s ease-out;
+}
+
+.hud-face:hover > * {
+  transform: scale(1.1);
+}
+
+.hud-face:focus-visible {
+  outline: 2px solid var(--note-ink);
+  outline-offset: -4px;
+}
+
+.hud-face.pressed > * {
+  animation: emblem-nod 0.35s ease-out;
+}
+
+@keyframes emblem-nod {
+  40% {
+    transform: scale(0.88);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .hud-face > * {
+    transition: none;
+  }
+
+  .hud-face.pressed > * {
+    animation: none;
+  }
 }
 
 .skull {
