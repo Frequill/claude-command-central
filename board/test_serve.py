@@ -2616,6 +2616,317 @@ class ArtifactsTest(unittest.TestCase):
         self.assertEqual((mine["sessionTitle"], mine["folder"], mine["isHere"], mine["id"]), ("Make me something to listen to", str(self.home), True, 0))
         self.assertEqual(len(listed), 2)
 
+class RunTerms(FakeTerms):
+    """FakeTerms whose terminals print what a test gives them, and take what is typed."""
+
+    def __init__(self, cards=None):
+        super().__init__(cards)
+        self.printed = {}
+        self.typed = []
+        self.count = 0
+
+    def start(self, folder, cols=80, rows=24, command=None, session_id=None, is_hidden=False):
+        self.count += 1
+        terminal_id = f"t{self.count:012d}"
+        self.started.append({"folder": folder, "command": command, "sessionId": session_id, "hidden": is_hidden})
+        self.cards.append({"id": terminal_id, "endedAt": None, "where": folder})
+        return terminal_id, ""
+
+    def type(self, terminal_id, text):
+        self.typed.append((terminal_id, text))
+        return True
+
+    def screen(self, terminal_id):
+        data = self.printed.get(terminal_id)
+        return (data, len(data)) if data is not None else None
+
+    def prints(self, terminal_id, data: bytes):
+        self.printed[terminal_id] = self.printed.get(terminal_id, b"") + data
+
+
+PROMPT = b"\x1b]7770;ccc;done;0\x07% "
+
+
+def ran(output: bytes, code: int) -> bytes:
+    """What the terminal prints for a command typed at its prompt: the line, then its output between the marks."""
+    return b"\x1b[?2004l\r\r\n\x1b]7770;ccc;start\x07" + output + f"\x1b]7770;ccc;done;{code}\x07% ".encode()
+
+
+class CommandRunsTest(unittest.TestCase):
+    """Run on a code block in the chat: one terminal per session, each command typed into it."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        home = Path(self.tmp.name)
+        self.folder = str(home / "project")
+        os.mkdir(self.folder)
+        (home / "projects" / "p").mkdir(parents=True)
+        (home / "projects" / "p" / "s1.jsonl").write_text(json.dumps({"type": "user", "cwd": self.folder, "message": {"content": "hi"}}) + "\n")
+        self.transcripts = serve.Transcripts(home / "projects")
+        self.inbox = serve.Inbox(home / "inbox", home / "uploads")
+        self.runs = serve.CommandRuns(home / "runs", shell="/bin/zsh", inbox=self.inbox)
+        self.dir = home / "runs" / "s1"
+
+    @property
+    def sent(self):
+        """What waits in the session's inbox for Claude."""
+        return [(message["text"], message["mode"]) for message in self.inbox.pending("s1")]
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_the_first_run_starts_the_sessions_terminal_in_its_folder_with_the_marks(self):
+        terms = RunTerms()
+        started = self.runs.start(terms, self.transcripts, "s1", "npm test", 1000)
+        self.assertTrue(started["ok"])
+        self.assertEqual(terms.started, [{"folder": self.folder, "command": serve.run_shell("/bin/zsh")[0], "sessionId": None, "hidden": False}])
+        # the shell is still starting: the command waits for its prompt
+        [run] = self.runs.shown("s1")
+        self.assertEqual((run["id"], run["terminalId"], run["typedAt"], run["endedAt"]), (started["runId"], "t000000000001", None, None))
+        self.assertEqual(terms.typed, [])
+        self.assertEqual(self.runs.terminals(), {"t000000000001": {"sessionId": "s1"}})
+
+    def test_the_terminal_starts_where_the_session_works_now(self):
+        # started in a scratch folder the Claude app has since removed, and moved into the project
+        project = os.path.join(self.tmp.name, "moved")
+        os.mkdir(project)
+        lines = [{"type": "queue-operation"}, {"type": "user", "cwd": "/gone/scratch", "message": {"content": "hi"}}, {"type": "assistant", "cwd": project, "message": {"content": []}}]
+        (Path(self.tmp.name) / "projects" / "p" / "s2.jsonl").write_text("".join(json.dumps(line) + "\n" for line in lines))
+        terms = RunTerms()
+        self.assertTrue(self.runs.start(terms, self.transcripts, "s2", "ls", 1000)["ok"])
+        self.assertEqual(terms.started[0]["folder"], project)
+        # a session whose only folder is gone says so
+        (Path(self.tmp.name) / "projects" / "p" / "s3.jsonl").write_text(json.dumps({"type": "user", "cwd": "/gone/scratch", "message": {"content": "hi"}}) + "\n")
+        self.assertEqual(self.runs.start(terms, self.transcripts, "s3", "ls", 1000), {"ok": False, "problem": "This session's folder is not on this Mac any more: /gone/scratch"})
+
+    def test_nothing_runs_for_an_unknown_session_or_no_command(self):
+        terms = RunTerms()
+        self.assertFalse(self.runs.start(terms, self.transcripts, "nobody", "ls", 1000)["ok"])
+        self.assertFalse(self.runs.start(terms, self.transcripts, "../etc", "ls", 1000)["ok"])
+        self.assertFalse(self.runs.start(terms, self.transcripts, "s1", "   ", 1000)["ok"])
+        self.assertFalse(self.runs.start(terms, self.transcripts, "s1", "x" * (serve.RUN_COMMAND_MAX + 1), 1000)["ok"])
+        self.assertEqual(terms.started, [])
+
+    def test_a_command_is_typed_at_the_prompt_and_read_back_between_its_marks(self):
+        terms = RunTerms()
+        self.runs.start(terms, self.transcripts, "s1", "make", 1000)
+        terms.prints("t000000000001", b"Last login\r\n" + PROMPT)
+        self.runs.settle(terms, 2000)
+        self.assertEqual(terms.typed, [("t000000000001", "\x1b[200~make\x1b[201~\r")])
+        # read while a window title is only half printed
+        terms.prints("t000000000001", b"\x1b[7mmake\x1b[27m\x1b[?2004l\r\r\n\x1b]7770;ccc;start\x07\x1b[32mbuilding\x1b[0m\r\n\x1b]0;mak")
+        self.runs.settle(terms, 2500)
+        [run] = self.runs.shown("s1")
+        self.assertEqual((run["output"], run["endedAt"]), ("building", None))
+        terms.prints("t000000000001", b"e\x07error: no rule\r\n\x1b]7770;ccc;done;2\x07% ")
+        self.runs.settle(terms, 3000, session_id="s1")
+        [run] = self.runs.shown("s1")
+        self.assertEqual((run["typedAt"], run["output"], run["endedAt"], run["exitCode"]), (2000, "building\nerror: no rule", 3000, 2))
+
+    def test_runs_go_into_the_same_terminal_one_after_another(self):
+        terms = RunTerms()
+        terms.prints("t000000000001", PROMPT)
+        self.runs.start(terms, self.transcripts, "s1", "echo one", 1000)
+        self.runs.start(terms, self.transcripts, "s1", "echo two", 1100)
+        self.assertEqual(len(terms.started), 1)
+        self.assertEqual([text for _, text in terms.typed], ["\x1b[200~echo one\x1b[201~\r"])
+        terms.prints("t000000000001", ran(b"one\r\n", 0))
+        self.runs.settle(terms, 2000)
+        self.assertEqual([text for _, text in terms.typed], ["\x1b[200~echo one\x1b[201~\r", "\x1b[200~echo two\x1b[201~\r"])
+        terms.prints("t000000000001", ran(b"two\r\n", 0))
+        self.runs.settle(terms, 3000)
+        first, second = self.runs.shown("s1")
+        self.assertEqual([(first["output"], first["exitCode"]), (second["output"], second["exitCode"])], [("one", 0), ("two", 0)])
+        self.assertEqual(first["terminalId"], second["terminalId"])
+
+    def test_claude_gets_how_a_run_went_once_it_ends_and_answers(self):
+        terms = RunTerms()
+        terms.prints("t000000000001", PROMPT)
+        self.runs.start(terms, self.transcripts, "s1", "make", 1000)
+        self.assertEqual(self.sent, [])
+        terms.prints("t000000000001", ran(b"error: no rule\r\n", 2))
+        self.runs.settle(terms, 2000)
+        self.assertEqual(self.sent, [("Ran `make` from the chat: failed, exit 2. Have a look at what it printed.", "queue")])
+        self.assertEqual(self.runs.shown("s1")[0]["sentAt"], 2000)
+        # sent once
+        self.runs.settle(terms, 3000)
+        self.assertEqual(len(self.sent), 1)
+
+    def test_several_runs_go_to_claude_in_one_message_once_the_last_one_ends(self):
+        terms = RunTerms()
+        terms.prints("t000000000001", PROMPT)
+        self.runs.start(terms, self.transcripts, "s1", "npm test", 1000)
+        self.runs.start(terms, self.transcripts, "s1", "cd web &&\nnpm run lint", 1100)
+        terms.prints("t000000000001", ran(b"ok\r\n", 0))
+        self.runs.settle(terms, 2000)
+        self.assertEqual(self.sent, [])
+        terms.prints("t000000000001", ran(b"2 problems\r\n", 1))
+        self.runs.settle(terms, 3000)
+        self.assertEqual(self.sent, [("Ran 2 commands from the chat (1 done, 1 failed). Have a look at what they printed.", "queue")])
+        self.assertEqual(serve.run_message([{"command": "ls", "exitCode": 0}]), "Ran `ls` from the chat: done. Have a look at what it printed.")
+        self.assertEqual(serve.run_message([{"command": "cd web &&\nnpm run lint", "exitCode": 0}]), "Ran `cd web &&…` from the chat: done. Have a look at what it printed.")
+
+    def test_a_run_that_ends_while_the_last_message_still_waits_joins_it(self):
+        terms = RunTerms()
+        terms.prints("t000000000001", PROMPT)
+        self.runs.start(terms, self.transcripts, "s1", "echo one", 1000)
+        terms.prints("t000000000001", ran(b"one\r\n", 0))
+        self.runs.settle(terms, 2000)
+        # Claude works: the message waits, and the next run, clicked later, joins it in its place
+        self.runs.start(terms, self.transcripts, "s1", "ls /nope", 3000)
+        terms.prints("t000000000001", ran(b"ls: /nope\r\n", 1))
+        self.runs.settle(terms, 4000)
+        self.assertEqual(self.sent, [("Ran 2 commands from the chat (1 done, 1 failed). Have a look at what they printed.", "queue")])
+        # once Claude has taken it, the next run gets a message of its own
+        [waiting] = self.inbox.pending("s1")
+        (self.inbox.inbox_dir / "s1" / f"{waiting['id']}.taken").write_text("1")
+        self.runs.start(terms, self.transcripts, "s1", "pwd", 5000)
+        terms.prints("t000000000001", ran(b"/p\r\n", 0))
+        self.runs.settle(terms, 6000)
+        self.assertEqual(self.sent, [("Ran `pwd` from the chat: done. Have a look at what it printed.", "queue")])
+
+    def test_a_run_claude_heard_of_or_that_never_finished_is_not_sent(self):
+        terms = RunTerms()
+        terms.prints("t000000000001", PROMPT)
+        started = self.runs.start(terms, self.transcripts, "s1", "ls", 1000)
+        # the person wrote to Claude while it ran: it was told then, and of how it ended with the next
+        (self.dir / f"{started['runId']}.told").write_text(json.dumps({"at": 1, "ended": True}))
+        terms.prints("t000000000001", ran(b"a\r\n", 0))
+        self.runs.settle(terms, 2000)
+        # closed before it ended: nothing to look at
+        self.runs.start(terms, self.transcripts, "s1", "sleep 100", 3000)
+        terms.cards[0]["endedAt"] = 3500
+        self.runs.settle(terms, 4000)
+        self.assertEqual(self.sent, [])
+
+    def test_runs_clicked_in_the_same_millisecond_run_in_the_order_they_came(self):
+        terms = RunTerms()
+        terms.prints("t000000000001", PROMPT)
+        for command in ("first", "second", "third"):
+            self.runs.start(terms, self.transcripts, "s1", command, 1000)
+        self.assertEqual([run["command"] for run in self.runs.shown("s1")], ["first", "second", "third"])
+        self.assertEqual(terms.typed, [("t000000000001", "\x1b[200~first\x1b[201~\r")])
+
+    def test_nothing_is_typed_while_the_shell_runs_something_of_its_own(self):
+        terms = RunTerms()
+        terms.prints("t000000000001", PROMPT + b"npm run dev\r\n\x1b]7770;ccc;start\x07ready on :3000\r\n")
+        self.runs.start(terms, self.transcripts, "s1", "ls", 1000)
+        self.assertEqual(terms.typed, [])
+        self.assertIsNone(self.runs.shown("s1")[0]["typedAt"])
+
+    def test_a_shell_that_ended_is_replaced_by_a_new_terminal_in_its_place(self):
+        terms = RunTerms()
+        terms.prints("t000000000001", PROMPT)
+        self.runs.start(terms, self.transcripts, "s1", "exit", 1000)
+        terms.cards[0]["endedAt"] = 1500
+        self.runs.settle(terms, 2000)
+        [run] = self.runs.shown("s1")
+        self.assertEqual((run["endedAt"], run["exitCode"]), (1500, None))
+        again = self.runs.start(terms, self.transcripts, "s1", "ls", 3000)
+        self.assertEqual((again["terminalId"], again["replaced"], terms.closed), ("t000000000002", ["t000000000001"], ["t000000000001"]))
+        first, second = self.runs.shown("s1")
+        self.assertNotIn("terminalId", first)
+        self.assertEqual(second["terminalId"], "t000000000002")
+
+    def test_a_terminal_closed_ends_its_runs_only_once_it_stays_gone(self):
+        terms = RunTerms()
+        self.runs.start(terms, self.transcripts, "s1", "sleep 100", 1000)
+        for look in range(serve.RUN_MISSES - 1):
+            self.runs.settle(terms, 2000 + look, cards=[])
+            self.assertIsNone(self.runs.shown("s1")[0]["endedAt"])
+        self.runs.settle(terms, 5000, cards=[])
+        [run] = self.runs.shown("s1")
+        self.assertEqual((run["endedAt"], run["exitCode"]), (5000, None))
+        self.assertNotIn("terminalId", run)
+
+    def test_claude_has_seen_a_run_once_told_of_how_it_ended(self):
+        terms = RunTerms()
+        terms.prints("t000000000001", PROMPT)
+        started = self.runs.start(terms, self.transcripts, "s1", "ls", 1000)
+        (self.dir / f"{started['runId']}.told").write_text(json.dumps({"at": 1, "ended": False}))
+        self.assertTrue(self.runs.shown("s1")[0]["told"])
+        terms.prints("t000000000001", ran(b"a\r\n", 0))
+        self.runs.settle(terms, 1500)
+        self.assertFalse(self.runs.shown("s1")[0]["told"])
+        (self.dir / f"{started['runId']}.told").write_text(json.dumps({"at": 2, "ended": True}))
+        self.assertTrue(self.runs.shown("s1")[0]["told"])
+
+    def test_a_session_keeps_its_newest_runs(self):
+        terms = RunTerms()
+        for at in range(serve.RUNS_KEPT + 3):
+            self.runs.start(terms, self.transcripts, "s1", f"echo {at}", at)
+        shown = self.runs.shown("s1")
+        self.assertEqual(len(shown), serve.RUNS_KEPT)
+        self.assertEqual(shown[-1]["command"], f"echo {serve.RUNS_KEPT + 2}")
+
+    def test_the_shell_starts_with_the_persons_own_files_and_then_the_marks(self):
+        program, kind = serve.run_shell("/bin/zsh", {"ZDOTDIR": "/z"})
+        self.assertEqual((program, kind), (["/usr/bin/env", f"ZDOTDIR={serve.SHELL_DIR / 'zsh'}", "CCC_USER_ZDOTDIR=/z", "/bin/zsh", "-i"], "zsh"))
+        self.assertEqual(serve.run_shell("/usr/local/bin/bash", {}), (["/usr/local/bin/bash", "--rcfile", str(serve.SHELL_DIR / "bashrc"), "-i"], "bash"))
+        self.assertEqual(serve.run_shell("/opt/homebrew/bin/fish", {})[0][-2:], ["/bin/zsh", "-i"])
+        # zsh takes a block of several lines as one paste; bash gets it on one line
+        self.assertEqual(serve.typed_command("cd x\nls", "zsh"), "\x1b[200~cd x\nls\x1b[201~\r")
+        self.assertEqual(serve.typed_command("cd x\nls", "bash"), "eval 'cd x\nls'\r")
+        self.assertEqual(serve.typed_command("ls", "bash"), "ls\r")
+
+    def test_a_run_card_is_marked_with_its_session(self):
+        cards = [{"id": "t1"}, {"id": "t2"}]
+        self.assertEqual(serve.with_run_labels(cards, {"t2": {"sessionId": "s1"}}), [{"id": "t1"}, {"id": "t2", "run": {"sessionId": "s1"}}])
+
+    def test_the_output_is_the_plain_text_the_terminal_shows(self):
+        printed = b"\x1b]0;~/project\x07\x1b[1;31mred\x1b[0m\r\nprogress 10%\rprogress 100%\r\nab\x08c\r\n\r\n"
+        self.assertEqual(serve.plain_output(printed), "red\nprogress 100%\nac")
+        self.assertEqual(serve.plain_output(b"\n".join(str(n).encode() for n in range(10)), max_lines=3), "7\n8\n9")
+        self.assertEqual(serve.plain_output(b"\xff ok"), "� ok")
+
+    def test_the_runs_of_a_deleted_conversation_go_to_the_trash_with_it(self):
+        self.assertIn(serve.RUNS_DIR, serve.CCC_SESSION_DIRS)
+
+
+@unittest.skipUnless(os.path.exists("/bin/zsh"), "needs zsh")
+class RunShellTest(unittest.TestCase):
+    """The terminal for Run with a real zsh: the person's own .zshrc, and each command read back by its marks."""
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        home = self.home = Path(os.path.realpath(self.dir.name))
+        (home / ".zshrc").write_text("alias hello='echo hello from an alias'\nPROMPT='%% '\n")
+        self.folder = str(home / "project")
+        os.mkdir(self.folder)
+        (home / "projects" / "p").mkdir(parents=True)
+        (home / "projects" / "p" / "s1.jsonl").write_text(json.dumps({"type": "user", "cwd": self.folder, "message": {"content": "hi"}}) + "\n")
+        self.transcripts = serve.Transcripts(home / "projects")
+        self.terms = terminals.Terminals(environ={"SHELL": "/bin/zsh", "PATH": "/usr/bin:/bin", "HOME": str(home)})
+        self.runs = serve.CommandRuns(home / "runs", shell="/bin/zsh")
+
+    def tearDown(self):
+        self.terms.stop_all()
+        self.dir.cleanup()
+
+    def settled(self, count, seconds=10):
+        deadline = time.time() + seconds
+        while time.time() < deadline:
+            self.runs.settle(self.terms, int(time.time() * 1000))
+            shown = self.runs.shown("s1")
+            if len(shown) == count and all(run["endedAt"] for run in shown):
+                return shown
+            time.sleep(0.1)
+        self.fail(f"the runs never ended: {self.runs.shown('s1')!r}")
+
+    def test_commands_run_in_one_zsh_with_the_persons_aliases_and_their_exit_codes(self):
+        self.runs.start(self.terms, self.transcripts, "s1", "hello && pwd", int(time.time() * 1000))
+        self.runs.start(self.terms, self.transcripts, "s1", "echo first\nls /no-such-place", int(time.time() * 1000))
+        first, second = self.settled(2)
+        self.assertEqual((first["output"], first["exitCode"]), (f"hello from an alias\n{self.folder}", 0))
+        self.assertEqual(second["exitCode"], 1)
+        self.assertEqual(second["output"].splitlines()[0], "first")
+        self.assertIn("no-such-place", second["output"])
+        self.assertEqual(first["terminalId"], second["terminalId"])
+        self.assertEqual(len(self.terms.list()), 1)
+        # the history goes where the person keeps it, never beside CCC's start files
+        self.runs.start(self.terms, self.transcripts, "s1", "echo $HISTFILE", int(time.time() * 1000))
+        self.assertEqual(self.settled(3)[2]["output"], str(self.home / ".zsh_history"))
+
 class CodeLinkTest(unittest.TestCase):
     """Code chips in Claude's replies that open in the person's editor: files by their path, and
     classes, methods and constants where they are made."""

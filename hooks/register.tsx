@@ -47,6 +47,7 @@ import type { Inbox } from './inbox'
 import { applyPlanUpdate, completeAll, readPlanUpdate } from './plan'
 import { openLedger, rollLedger, spentToday } from './spend'
 import { publisherFor } from './publish'
+import { runsNoteFor, tellRuns } from './runs'
 import type { Publisher, SessionParts } from './publish'
 import { topicOf } from './snapshot'
 import { EMPTY_STATS, withMeasure } from './stats'
@@ -95,6 +96,7 @@ export const register: Register = on => {
       async () => Boolean((await read($, turn)).isRunning),
       text => cavemanDressed($, text),
       runId => stopRun($, runId),
+      () => tellRuns($),
     ).catch(() => undefined)
     await publishCommands($).catch(() => undefined)
     startTicking($)
@@ -244,10 +246,11 @@ export const register: Register = on => {
     if (e.origin?.kind === 'task-notification' && isOnlyStoppedReport(e.text, await read($, stoppedTasks))) {
       return { drop: 'Stopped from CCC.' }
     }
-    // caveman mode switched in CCC: a note beside the message that the person does not see
-    const note = e.command ? undefined : await nextCavemanNote($)
+    // caveman mode switched in CCC, and commands run from its chat: notes beside the message that
+    // the person does not see (a message from CCC's own chat gets the second from its inbox instead)
+    const notes = e.command ? [] : [await nextCavemanNote($), await runsNoteFor($)].filter((note): note is string => Boolean(note))
 
-    return next(note ? { ...e, context: [...(e.context ?? []), note] } : e)
+    return next(notes.length ? { ...e, context: [...(e.context ?? []), ...notes] } : e)
   }).catch(($, e, next) => next(e))
 
   // the engine's own guess at the person's next prompt, which the app shows dim in its prompt box for

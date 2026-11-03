@@ -1726,3 +1726,37 @@ test('the artifacts "+" lists are searched by title, session and folder, and eac
   assert.equal(L.artifactCardId('https://claude.ai/artifact/VsXLKmqA29v9XwBeWJ8MZ9'), 'art-VsXLKmqA29v9XwBeWJ8MZ9')
   assert.equal(L.artifactCardId('https://claude.ai/code/artifact/a1b2-c3'), 'art-a1b2-c3')
 })
+
+test('Run goes on shell code blocks with a command in them', () => {
+  const [bash, zsh, python, empty, plain] = blocks('```bash\nnpm test\n```\n\n```ZSH\nls\n```\n\n```python\nprint(1)\n```\n\n```sh\n  \n```\n\n```\nls\n```')
+  assert.equal(C.isRunnable(bash), true)
+  assert.equal(C.isRunnable(zsh), true)
+  assert.equal(C.isRunnable(python), false)
+  assert.equal(C.isRunnable(empty), false)
+  assert.equal(C.isRunnable(plain), false)
+})
+
+test('a code block shows the newest run of its command and how it went', () => {
+  const runs = [
+    { id: 'r1', command: 'ls', startedAt: 1, endedAt: 2, exitCode: 0 },
+    { id: 'r2', command: 'npm test', startedAt: 3, endedAt: 4, exitCode: 1 },
+    { id: 'r3', command: 'ls', startedAt: 5, typedAt: 6, endedAt: null, exitCode: null },
+    { id: 'r4', command: 'pwd', startedAt: 7, typedAt: null, endedAt: null, exitCode: null },
+  ]
+  assert.equal(C.runOf(runs, 'ls').id, 'r3')
+  assert.equal(C.runOf(runs, 'whoami'), undefined)
+  assert.deepEqual(runs.map(C.runState), ['done', 'failed', 'running', 'waiting'])
+  assert.deepEqual(runs.map(C.runLabel), ['Done', 'Failed, exit 1', 'Running…', 'Waiting for the terminal…'])
+  assert.equal(C.runState({ typedAt: 1, endedAt: 9, exitCode: null }), 'closed')
+  assert.equal(C.runLabel({ typedAt: 1, endedAt: 9, exitCode: null }), 'Closed before it ended')
+  assert.equal(C.runLabel({ endedAt: 9, exitCode: null }), 'Its terminal closed before it ran')
+})
+
+test('a run says where Claude is with it', () => {
+  assert.equal(C.runHeard({ typedAt: 1 }), 'Goes to Claude when it ends')
+  assert.equal(C.runHeard({}), 'Goes to Claude when it ends')
+  assert.equal(C.runHeard({ typedAt: 1, endedAt: 2, exitCode: 0, sentAt: 3 }), 'Sent to Claude')
+  assert.equal(C.runHeard({ typedAt: 1, endedAt: 2, exitCode: 0, sentAt: 3, told: true }), 'Claude has seen this')
+  // closed before it ended: nothing was sent, the next message tells of it
+  assert.equal(C.runHeard({ typedAt: 1, endedAt: 2, exitCode: null }), 'Claude sees this with your next message')
+})
