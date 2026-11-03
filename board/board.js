@@ -2565,6 +2565,8 @@ setupChat({
   onRemove: (id, title) => askToRemove(id, title),
   terminalOf: id => L.backgroundTerminal(view.terminals, id),
   onShowTerminal: showTerminal,
+  // an artifact beside its chat: the card as wide as the board while it shows
+  onWiden: (id, isWide) => view.grid?.widen(id, isWide),
   // the board's data again at once, as after a change made from a card
   refreshBoard: () => poll(),
   isResumable: id => (view.stopped ?? []).some(one => one.sessionId === id),

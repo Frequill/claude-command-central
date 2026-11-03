@@ -7,7 +7,7 @@ import { blocks, inline } from './markdown.js'
 import * as C from './chat-logic.js'
 import { chooseCrater, planFlight } from './dragon.js'
 import * as P from './placement.js'
-import { cellsOf, closedStrip, gapAt, isRoomForCard, lowestSpot, passedAt, resizedTo, stripAt } from './grid.js'
+import { cellsOf, closedStrip, gapAt, isRoomForCard, lowestSpot, movedBack, movedBy, passedAt, resizedTo, stripAt } from './grid.js'
 
 const NOW = 1_000_000_000
 
@@ -1698,4 +1698,19 @@ test('a background session that stopped is resumed by sending to it', () => {
   assert.equal(C.composeState(ended).resumeHere, undefined)
   // running, it takes the message as any session does
   assert.equal(C.composeState({ takesMessages: true }, true).resumeHere, undefined)
+})
+
+test('a session\'s artifacts are listed newest first', () => {
+  assert.deepEqual(C.newestFirst([{ id: 0, at: 5 }, { id: 1, at: 9 }, { id: 2 }]).map(one => one.id), [1, 0, 2])
+  assert.deepEqual(C.newestFirst(undefined), [])
+})
+
+test('a card widened for its artifact moves the cards in its way, and they come back where they were', () => {
+  const before = new Map([['chat', { x: 0, y: 0 }], ['beside', { x: 6, y: 0 }], ['below', { x: 0, y: 32 }]])
+  const after = [{ id: 'chat', x: 0, y: 0 }, { id: 'beside', x: 6, y: 32 }, { id: 'below', x: 0, y: 32 }]
+  const moved = movedBy(before, after, 'chat')
+  assert.deepEqual(moved, { beside: { from: { x: 6, y: 0 }, to: { x: 6, y: 32 } } })
+  // narrowed again: the card still where the widening put it goes back; one moved by hand since stays
+  assert.deepEqual(movedBack(moved, [{ id: 'beside', x: 6, y: 32 }]).map(({ node, place }) => [node.id, place]), [['beside', { x: 6, y: 0 }]])
+  assert.deepEqual(movedBack(moved, [{ id: 'beside', x: 0, y: 64 }]), [])
 })

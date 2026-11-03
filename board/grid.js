@@ -14,6 +14,9 @@
 import { edgeSpeed, holdHand, jelly } from './layout.js'
 
 const GRID_KEY = 'ccc.grid'
+// the cards made as wide as the board for what they show beside their chat: where each was, and the
+// cards it moved out of its way (widen)
+const WIDE_KEY = 'ccc.wide'
 export const COLUMNS = 12
 export const ROW = 20
 // each card keeps this much room on every side, so two cards have twice this between them
@@ -41,6 +44,38 @@ function store(kept) {
 }
 
 const whole = (value, least, most) => Math.max(least, Math.min(most, Math.round(value)))
+
+function loadWide() {
+  try {
+    const wide = JSON.parse(localStorage.getItem(WIDE_KEY) ?? '{}')
+    return wide && typeof wide === 'object' ? wide : {}
+  } catch {
+    return {}
+  }
+}
+
+function storeWide(wide) {
+  try {
+    localStorage.setItem(WIDE_KEY, JSON.stringify(wide))
+  } catch {
+    // a private window: kept until the board reloads
+  }
+}
+
+/** The cards that a card's widening moved: { id: { from, to } } of each place that changed, the card's own left out. */
+export function movedBy(before, after, ownId) {
+  const moved = {}
+  for (const node of after) {
+    const was = before.get(node.id)
+    if (node.id !== ownId && was && (was.x !== node.x || was.y !== node.y)) moved[node.id] = { from: was, to: { x: node.x, y: node.y } }
+  }
+  return moved
+}
+
+/** Where the cards a widening moved go back to: only those still where it put them; one moved since stays. */
+export function movedBack(moved, nodes) {
+  return nodes.filter(node => moved[node.id] && node.x === moved[node.id].to.x && node.y === moved[node.id].to.y).map(node => ({ node, place: moved[node.id].from }))
+}
 
 /**
  * A card's place in grid cells, from where the old free board kept it in pixels (its left and top,
@@ -247,6 +282,7 @@ export function makeGrid(box, { onStart, onEnd, oldPlace, wobbles, animates, onA
     box,
   )
   const kept = load()
+  const wide = loadWide()
   const items = new Map()
   const room = keptRoom(box, () => grid.getRow() * ROW)
   const view = keptView()
@@ -421,6 +457,35 @@ export function makeGrid(box, { onStart, onEnd, oldPlace, wobbles, animates, onA
     /** The next new card goes into this gap (null: wherever it would). */
     placeNext(gap) {
       nextPlace = gap ? { ...gap, at: Date.now() } : null
+    },
+    /**
+     * A card as wide as the board, for what it shows beside its chat (an artifact): the cards in its
+     * way move down. Narrowed again, it goes back to where it was, at its size, and the cards it moved
+     * come back up to where they were, those still where it put them.
+     */
+    widen(id, isWide) {
+      const el = items.get(id)?.el
+      const node = el?.gridstackNode
+      // a narrow window has one card a row: each is as wide as the board already
+      if (!node || grid.getColumn() < COLUMNS || (!isWide && !wide[id]) || (isWide && node.w >= COLUMNS)) return
+      room.hold()
+      if (isWide) {
+        const before = new Map(grid.engine.nodes.map(one => [one.id, { x: one.x, y: one.y }]))
+        // widened before and narrow again since (a reload, or a narrow window): where it was stays known
+        const own = wide[id] ?? { x: node.x, w: node.w }
+        grid.update(el, { x: 0, w: COLUMNS })
+        wide[id] = { x: own.x, w: own.w, moved: { ...own.moved, ...movedBy(before, grid.engine.nodes, id) } }
+      } else {
+        const was = wide[id]
+        delete wide[id]
+        grid.batchUpdate()
+        grid.update(el, { x: was.x, w: was.w })
+        for (const { node: other, place } of movedBack(was.moved ?? {}, grid.engine.nodes)) grid.update(other.el, place)
+        grid.batchUpdate(false)
+      }
+      storeWide(wide)
+      save()
+      room.release()
     },
     /** The cards packed together again, top first, each keeping its size. */
     closeGaps() {

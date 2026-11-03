@@ -533,6 +533,11 @@ export function enterMode(isWorking, withCommand) {
   return isWorking && !withCommand ? 'queue' : 'now'
 }
 
+/** A session's artifacts as its picker lists them: the one changed last first. */
+export function newestFirst(artifacts) {
+  return [...(artifacts ?? [])].sort((a, b) => (b.at ?? 0) - (a.at ?? 0))
+}
+
 // ---------- emoji ----------
 
 // the emoji the picker offers, each with its shortcode (:name:) and the words a search finds it by

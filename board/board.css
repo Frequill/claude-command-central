@@ -10861,6 +10861,114 @@ body.side-off .sidebar {
   display: none;
 }
 
+/* an artifact beside the chat: the chat at the left, the artifact's own page at the right, to use */
+.expanded-tile.shows-artifact .chat-body {
+  grid-template-columns: minmax(300px, 1fr) minmax(0, 1.4fr);
+}
+
+.expanded-tile.shows-artifact .chat-side {
+  display: none;
+}
+
+/* a card too narrow for the two side by side (a narrow window, one card a row): the chat above, the
+   artifact under it */
+.expanded-tile.shows-artifact.artifact-under .chat-body {
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: minmax(180px, 0.8fr) minmax(0, 1.2fr);
+}
+
+.chat-artifact {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
+.chat-artifact[hidden] {
+  display: none;
+}
+
+.artifact-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 0 0 10px;
+  color: var(--ink);
+}
+
+.artifact-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.artifact-title[hidden],
+.artifact-picker[hidden],
+.artifact-open[hidden] {
+  display: none;
+}
+
+.artifact-picker {
+  flex: 1;
+  min-width: 0;
+  max-width: 420px;
+}
+
+.artifact-tools {
+  display: inline-flex;
+  flex: none;
+  gap: 6px;
+  margin-left: auto;
+}
+
+.artifact-picker,
+.artifact-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--chip-border);
+  background: var(--chip-bg);
+  color: var(--ink);
+  font: 600 12px var(--sans);
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.artifact-open {
+  color: var(--accent);
+}
+
+.artifact-place {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  border-radius: 10px;
+  border: 1px solid var(--chip-border);
+  background: #fff;
+}
+
+.artifact-frame {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border: 0;
+  background: #fff;
+}
+
+.artifact-note {
+  margin: 0;
+  padding: 24px;
+  color: #555;
+  font: 13px var(--sans);
+}
+
 .design-bar {
   display: flex;
   flex-wrap: wrap;

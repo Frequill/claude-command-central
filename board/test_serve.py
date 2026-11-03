@@ -2520,5 +2520,85 @@ class MentionTest(unittest.TestCase):
         self.assertEqual(serve.session_files("../etc", "x", transcripts, mentions.FileLists())["paths"], [])
         self.assertEqual(serve.session_files("nobody", "x", transcripts, mentions.FileLists())["paths"], [])
 
+def artifact_lines(tool_id, given, said, at="2026-11-03T10:00:00Z", cwd="/w"):
+    """A transcript's Artifact call and its result, as two lines."""
+    return [
+        json.dumps({"type": "assistant", "cwd": cwd, "timestamp": at, "message": {"content": [{"type": "tool_use", "id": tool_id, "name": "Artifact", "input": given}]}}),
+        json.dumps({"type": "user", "cwd": cwd, "timestamp": at, "message": {"content": [{"type": "tool_result", "tool_use_id": tool_id, "content": [{"type": "text", "text": said}]}]}}),
+    ]
+
+
+class ArtifactsTest(unittest.TestCase):
+    """The pages a session published as Artifacts, shown beside its chat."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.home = Path(self.tmp.name)
+        self.place = self.home / "listen"
+        (self.place / "clips").mkdir(parents=True)
+        (self.place / "index.html").write_text("<html><head><title>Clips to hear</title></head><body><audio src='clips/a.mp3'></audio></body></html>")
+        (self.place / "clips" / "a.mp3").write_bytes(b"ID3 sound")
+        (self.home / "secret.txt").write_text("not for the board")
+        (self.home / "projects" / "p").mkdir(parents=True)
+        self.transcript = self.home / "projects" / "p" / "s1.jsonl"
+        self.transcripts = serve.Transcripts(self.home / "projects")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def write(self, *lines):
+        with self.transcript.open("a") as out:
+            for line in lines:
+                out.write(line + "\n")
+
+    def published(self, tool_id, url, at="2026-11-03T10:00:00Z", **given):
+        page = str(self.place / "index.html")
+        return artifact_lines(tool_id, {"file_path": page, **given}, f"Published {page} at {url} (Version 1, version id 1-a)", at)
+
+    def test_a_published_page_is_found_with_its_files_and_a_deleted_one_goes(self):
+        url, other = "https://claude.ai/artifact/AAAAAAAAAA", "https://claude.ai/artifact/BBBBBBBBBB"
+        self.write(*self.published("t1", url, files={"clips/a.mp3": str(self.place / "clips" / "a.mp3")}, description="Three calls"))
+        self.write(*artifact_lines("t2", {"action": "read", "url": url}, "[Artifact ...] raw HTML follows"))
+        self.write(*self.published("t3", other))
+        found = self.transcripts.artifacts("s1")
+        self.assertEqual(list(found), [url, other])
+        self.assertEqual((found[url]["files"], found[url]["description"]), ({"clips/a.mp3": str(self.place / "clips" / "a.mp3")}, "Three calls"))
+        # read again, only what was added since: published once more (newer), and the other deleted
+        self.write(*self.published("t4", url, at="2026-11-03T11:00:00Z"))
+        self.write(*artifact_lines("t5", {"action": "delete", "url": other}, f"Artifact deleted: {other}. Its link no longer works."))
+        found = self.transcripts.artifacts("s1")
+        self.assertEqual(list(found), [url])
+        self.assertEqual(found[url]["at"], serve.time_of("2026-11-03T11:00:00Z"))
+        # the files named the first time are kept
+        self.assertIn("clips/a.mp3", found[url]["files"])
+
+    def test_an_asset_upload_or_an_unanswered_call_is_no_artifact(self):
+        self.write(*artifact_lines("t1", {"url": "https://claude.ai/artifact/AAAAAAAAAA", "file_path": "/x.png", "asset": True}, "Published /x.png at https://claude.ai/artifact/AAAAAAAAAA"))
+        self.write(json.dumps({"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "t2", "name": "Artifact", "input": {"file_path": "/y.html"}}]}}))
+        self.assertEqual(self.transcripts.artifacts("s1"), {})
+
+    def test_the_list_names_each_by_its_title_and_says_whether_its_page_is_here(self):
+        self.write(*self.published("t1", "https://claude.ai/artifact/AAAAAAAAAA", description="Three calls"))
+        self.write(*artifact_lines("t2", {"file_path": "/gone/page.html", "description": "An old one"}, "Published /gone/page.html at https://claude.ai/artifact/CCCCCCCCCC"))
+        listed = serve.session_artifacts(self.transcripts, "s1")
+        self.assertEqual([(one["id"], one["title"], one["isHere"]) for one in listed], [(0, "Clips to hear", True), (1, "An old one", False)])
+        summary = serve.artifact_summary(listed)
+        self.assertEqual((summary["count"], summary["title"]), (2, "Clips to hear"))
+        self.assertIsNone(serve.artifact_summary([]))
+        self.assertEqual(serve.with_artifacts([{"sessionId": "s1"}, {"sessionId": "nobody"}], self.transcripts), [{"sessionId": "s1", "artifacts": summary}, {"sessionId": "nobody"}])
+
+    def test_only_its_page_and_the_files_it_names_are_served(self):
+        self.write(*self.published("t1", "https://claude.ai/artifact/AAAAAAAAAA", files={"clips/a.mp3": "clips/a.mp3"}, root=str(self.place)))
+        self.assertEqual(serve.artifact_file(self.transcripts, "s1", "0", "")[0], "text/html; charset=utf-8")
+        self.assertEqual(serve.artifact_file(self.transcripts, "s1", "0", "index.html")[1][:6], b"<html>")
+        # a file named relative to the root the call gave
+        self.assertEqual(serve.artifact_file(self.transcripts, "s1", "0", "clips/a.mp3"), ("audio/mpeg", b"ID3 sound"))
+        for asked in ("../secret.txt", "clips/b.mp3", "%2e%2e/secret.txt", str(self.home / "secret.txt")):
+            self.assertIsNone(serve.artifact_file(self.transcripts, "s1", "0", asked))
+        self.assertIsNone(serve.artifact_file(self.transcripts, "s1", "1", ""))
+        self.assertIsNone(serve.artifact_file(self.transcripts, "../x", "0", ""))
+        self.assertIn("/artifact.js", serve.BOARD_FILES)
+
+
 if __name__ == "__main__":
     unittest.main()
