@@ -2520,5 +2520,127 @@ class MentionTest(unittest.TestCase):
         self.assertEqual(serve.session_files("../etc", "x", transcripts, mentions.FileLists())["paths"], [])
         self.assertEqual(serve.session_files("nobody", "x", transcripts, mentions.FileLists())["paths"], [])
 
+
+class RunTerms(FakeTerms):
+    """FakeTerms with what each terminal printed, as the keeper's screen call gives it."""
+
+    def __init__(self, cards=None, screens=None):
+        super().__init__(cards)
+        self.screens = screens or {}
+        self.count = 0
+
+    def start(self, folder, cols=80, rows=24, command=None, session_id=None, is_hidden=False):
+        self.count += 1
+        self.started.append({"folder": folder, "command": command, "sessionId": session_id, "hidden": is_hidden})
+        return f"t{self.count:012d}", ""
+
+    def screen(self, terminal_id):
+        data = self.screens.get(terminal_id)
+        return (data, len(data)) if data is not None else None
+
+
+class CommandRunsTest(unittest.TestCase):
+    """Run on a code block in the chat: the command runs in a terminal of its own in the session's folder."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        home = Path(self.tmp.name)
+        self.folder = str(home / "project")
+        os.mkdir(self.folder)
+        (home / "projects" / "p").mkdir(parents=True)
+        (home / "projects" / "p" / "s1.jsonl").write_text(json.dumps({"type": "user", "cwd": self.folder, "message": {"content": "hi"}}) + "\n")
+        self.transcripts = serve.Transcripts(home / "projects")
+        self.runs = serve.CommandRuns(home / "runs")
+        self.dir = home / "runs" / "s1"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_a_command_runs_in_the_persons_own_shell_in_the_folder_its_transcript_names(self):
+        terms = RunTerms()
+        started = self.runs.start(terms, self.transcripts, "s1", "npm test && echo 'done'", 1000, shell="/bin/zsh")
+        self.assertTrue(started["ok"])
+        self.assertEqual(terms.started, [{"folder": self.folder, "command": ["/bin/zsh", "-i", "-c", "npm test && echo 'done'"], "sessionId": None, "hidden": False}])
+        [run] = self.runs.shown("s1")
+        self.assertEqual((run["id"], run["command"], run["terminalId"], run["endedAt"], run["told"]), (started["runId"], "npm test && echo 'done'", "t000000000001", None, False))
+        self.assertEqual(self.runs.terminals(), {"t000000000001": {"sessionId": "s1", "command": "npm test && echo 'done'"}})
+
+    def test_nothing_runs_for_an_unknown_session_or_no_command(self):
+        terms = RunTerms()
+        self.assertFalse(self.runs.start(terms, self.transcripts, "nobody", "ls", 1000)["ok"])
+        self.assertFalse(self.runs.start(terms, self.transcripts, "../etc", "ls", 1000)["ok"])
+        self.assertFalse(self.runs.start(terms, self.transcripts, "s1", "   ", 1000)["ok"])
+        self.assertFalse(self.runs.start(terms, self.transcripts, "s1", "x" * (serve.RUN_COMMAND_MAX + 1), 1000)["ok"])
+        self.assertEqual(terms.started, [])
+
+    def test_a_run_follows_its_terminal_until_it_ends_with_its_exit_code(self):
+        terms = RunTerms()
+        started = self.runs.start(terms, self.transcripts, "s1", "make", 1000)
+        terms.cards = [{"id": "t000000000001", "endedAt": None}]
+        terms.screens["t000000000001"] = b"\x1b[32mbuilding\x1b[0m\r\n"
+        self.runs.settle(terms, 2000)
+        [run] = self.runs.shown("s1")
+        self.assertEqual((run["output"], run["endedAt"]), ("building", None))
+        terms.cards = [{"id": "t000000000001", "endedAt": 3000, "exitCode": 2}]
+        terms.screens["t000000000001"] = b"building\r\nerror: no rule\r\n"
+        self.runs.settle(terms, 3500, session_id="s1")
+        [run] = self.runs.shown("s1")
+        self.assertEqual((run["id"], run["output"], run["endedAt"], run["exitCode"]), (started["runId"], "building\nerror: no rule", 3000, 2))
+
+    def test_a_terminal_closed_before_it_ended_ends_the_run_only_once_it_stays_gone(self):
+        terms = RunTerms()
+        self.runs.start(terms, self.transcripts, "s1", "sleep 100", 1000)
+        for look in range(serve.RUN_MISSES - 1):
+            self.runs.settle(terms, 2000 + look, cards=[])
+            self.assertIsNone(self.runs.shown("s1")[0]["endedAt"])
+        self.runs.settle(terms, 5000, cards=[])
+        [run] = self.runs.shown("s1")
+        self.assertEqual((run["endedAt"], run["exitCode"]), (5000, None))
+        self.assertNotIn("terminalId", run)
+
+    def test_a_new_run_closes_the_terminals_of_the_runs_that_ended(self):
+        terms = RunTerms()
+        self.runs.start(terms, self.transcripts, "s1", "ls", 1000)
+        self.runs.settle(terms, 1500, cards=[{"id": "t000000000001", "endedAt": 1200, "exitCode": 0}])
+        again = self.runs.start(terms, self.transcripts, "s1", "ls", 2000)
+        self.assertEqual((terms.closed, again["replaced"]), (["t000000000001"], ["t000000000001"]))
+        first, second = self.runs.shown("s1")
+        self.assertNotIn("terminalId", first)
+        self.assertEqual(second["terminalId"], "t000000000002")
+        # what the first printed stays in the chat
+        self.assertEqual((first["exitCode"], first["command"]), (0, "ls"))
+
+    def test_claude_has_seen_a_run_once_told_of_how_it_ended(self):
+        terms = RunTerms()
+        started = self.runs.start(terms, self.transcripts, "s1", "ls", 1000)
+        (self.dir / f"{started['runId']}.told").write_text(json.dumps({"at": 1, "ended": False}))
+        self.assertTrue(self.runs.shown("s1")[0]["told"])
+        self.runs.settle(terms, 1500, cards=[{"id": "t000000000001", "endedAt": 1200, "exitCode": 0}])
+        self.assertFalse(self.runs.shown("s1")[0]["told"])
+        (self.dir / f"{started['runId']}.told").write_text(json.dumps({"at": 2, "ended": True}))
+        self.assertTrue(self.runs.shown("s1")[0]["told"])
+
+    def test_a_session_keeps_its_newest_runs(self):
+        terms = RunTerms()
+        for at in range(serve.RUNS_KEPT + 3):
+            self.runs.start(terms, self.transcripts, "s1", f"echo {at}", at)
+        shown = self.runs.shown("s1")
+        self.assertEqual(len(shown), serve.RUNS_KEPT)
+        self.assertEqual(shown[-1]["command"], f"echo {serve.RUNS_KEPT + 2}")
+
+    def test_a_run_card_is_marked_with_its_command(self):
+        cards = [{"id": "t1"}, {"id": "t2"}]
+        self.assertEqual(serve.with_run_labels(cards, {"t2": {"sessionId": "s1", "command": "ls"}}), [{"id": "t1"}, {"id": "t2", "run": {"sessionId": "s1", "command": "ls"}}])
+
+    def test_the_output_is_the_plain_text_the_terminal_shows(self):
+        printed = b"\x1b]0;~/project\x07\x1b[1;31mred\x1b[0m\r\nprogress 10%\rprogress 100%\r\nab\x08c\r\n\r\n"
+        self.assertEqual(serve.plain_output(printed), "red\nprogress 100%\nac")
+        self.assertEqual(serve.plain_output(b"\n".join(str(n).encode() for n in range(10)), max_lines=3), "7\n8\n9")
+        self.assertEqual(serve.plain_output(b"\xff ok"), "� ok")
+
+    def test_the_runs_of_a_deleted_conversation_go_to_the_trash_with_it(self):
+        self.assertIn(serve.RUNS_DIR, serve.CCC_SESSION_DIRS)
+
+
 if __name__ == "__main__":
     unittest.main()

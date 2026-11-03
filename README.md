@@ -75,6 +75,12 @@ Every working agent and background command on the agent map has a **Stop**: clic
 
 When Claude makes a design in a session (Claude Design), its card gets a **Design** button, with a dot while there are screens you have not looked at. It shows the design's screens in place of the chat, laid out as the canvas has them and scaled to the card, each a live page that follows Claude's changes; click one to see it large. **Open the canvas** opens the real canvas in Claude, for panning, comments and sharing: claude.ai does not let its canvas be shown inside another page, so the card shows the screens' own files, run walled off from the board.
 
+## Run
+
+A shell command Claude writes in a chat (a `bash`, `sh`, `zsh` or `shell` code block) gets a **Run** button beside Copy, as in the Claude app. It runs in the session's folder, in your own shell with your PATH, aliases and functions, in a terminal card of its own on the board, where you can type into it (a password, a y/n). How it went shows under the code block: running, done or failed with its exit code, and the last lines it printed. **>_ Terminal** goes to its card, and **Run again** runs it once more. The session's next run takes the place of the last one's terminal, once that one has ended.
+
+Claude sees it too: with your next message to that session, from CCC, the Claude app or a terminal, Claude gets the commands you ran and what they printed (a note beside your message that you do not see). A command still running when you write is told again once it ends. Under the block, CCC shows whether Claude has seen it yet.
+
 ## Themes
 
 Twelve of them, from Clean to Cyberpunk 2077. Pick one in Settings.

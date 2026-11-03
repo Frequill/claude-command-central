@@ -9,7 +9,7 @@ import { setupNotes } from './notes.js'
 import { loadSettings, setupSettings } from './settings.js'
 import { startScene } from './themes.js'
 import { makeGrid } from './grid.js'
-import { closeTerminal, dropTerminal, focusTerminal, isTerminal, setupTerminals, startTerminal, stopKeeper, terminalCard, themeTerminals, toggleTerminal, updateTerminal } from './terminal.js'
+import { closeTerminal, dropTerminal, focusTerminal, isTerminal, runCommand, setupTerminals, startTerminal, stopKeeper, terminalCard, themeTerminals, toggleTerminal, updateTerminal } from './terminal.js'
 
 const POLL_MS = 1000
 const TOKENS_POLL_MS = 15_000
@@ -1065,8 +1065,21 @@ function askToCloseTerminal(id, title, isEnded) {
   document.querySelector('#terminal-close-confirm').focus()
 }
 
+/**
+ * Run on a code block in a chat: the command runs in a terminal of its own on the board. The
+ * session's last run's terminal, ended, makes way for it, and the new one takes its place. The
+ * board stays where it is and the cursor in the chat: the result shows under the code block.
+ */
+async function runFromChat(sessionId, command) {
+  const started = await runCommand(sessionId, command)
+  if (started.problem) return started
+  const [replaced] = started.replaced
+  await (replaced ? moveTerminalPlace(replaced, started.id, false) : poll())
+  return started
+}
+
 /** A shell started again takes the old card's place and size on the board. */
-function moveTerminalPlace(oldId, newId) {
+function moveTerminalPlace(oldId, newId, isFocused = true) {
   for (const part of ['cards', 'chats']) {
     if (view.layout[part]?.[oldId]) {
       view.layout[part][newId] = view.layout[part][oldId]
@@ -1074,7 +1087,7 @@ function moveTerminalPlace(oldId, newId) {
     }
   }
   saveLayout(view.layout)
-  poll().then(() => focusTerminal(newId))
+  return poll().then(() => isFocused && focusTerminal(newId))
 }
 
 // what the top bar gives up, first to last, while it does not fit: whole parts, never one cut off
@@ -1567,7 +1580,9 @@ function renderTiles(sessions, now, day, tags) {
   const started = awaited ?? [...arriving].find(id => !id.startsWith('t'))
   const isOwnStart = Boolean(awaited || (started && view.startedAt && Date.now() - view.startedAt < STARTED_WAIT_MS))
   if (isOwnStart && !awaited) view.startedAt = 0
-  const newest = isOwnStart ? started : [...arriving].at(-1)
+  // a Run's terminal comes in quietly: its result shows under the code block it ran from
+  const isRun = id => view.terminals.some(card => card.id === id && card.run)
+  const newest = isOwnStart ? started : [...arriving].filter(id => !isRun(id)).at(-1)
   if (newest && (isOwnStart || Date.now() - view.typedAt > TYPING_MS)) {
     setTimeout(() => window.dispatchEvent(new CustomEvent('ccc:show-session', { detail: { sessionId: newest } })), 300)
   }
@@ -2565,6 +2580,7 @@ setupChat({
   onRemove: (id, title) => askToRemove(id, title),
   terminalOf: id => L.backgroundTerminal(view.terminals, id),
   onShowTerminal: showTerminal,
+  onRun: runFromChat,
   // the board's data again at once, as after a change made from a card
   refreshBoard: () => poll(),
   isResumable: id => (view.stopped ?? []).some(one => one.sessionId === id),

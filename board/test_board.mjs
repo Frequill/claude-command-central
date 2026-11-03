@@ -1699,3 +1699,26 @@ test('a background session that stopped is resumed by sending to it', () => {
   // running, it takes the message as any session does
   assert.equal(C.composeState({ takesMessages: true }, true).resumeHere, undefined)
 })
+
+test('Run goes on shell code blocks with a command in them', () => {
+  const [bash, zsh, python, empty, plain] = blocks('```bash\nnpm test\n```\n\n```ZSH\nls\n```\n\n```python\nprint(1)\n```\n\n```sh\n  \n```\n\n```\nls\n```')
+  assert.equal(C.isRunnable(bash), true)
+  assert.equal(C.isRunnable(zsh), true)
+  assert.equal(C.isRunnable(python), false)
+  assert.equal(C.isRunnable(empty), false)
+  assert.equal(C.isRunnable(plain), false)
+})
+
+test('a code block shows the newest run of its command and how it went', () => {
+  const runs = [
+    { id: 'r1', command: 'ls', startedAt: 1, endedAt: 2, exitCode: 0 },
+    { id: 'r2', command: 'npm test', startedAt: 3, endedAt: 4, exitCode: 1 },
+    { id: 'r3', command: 'ls', startedAt: 5, endedAt: null, exitCode: null },
+  ]
+  assert.equal(C.runOf(runs, 'ls').id, 'r3')
+  assert.equal(C.runOf(runs, 'pwd'), undefined)
+  assert.deepEqual(runs.map(C.runState), ['done', 'failed', 'running'])
+  assert.deepEqual(runs.map(C.runLabel), ['Done', 'Failed, exit 1', 'Running…'])
+  assert.equal(C.runState({ endedAt: 9, exitCode: null }), 'closed')
+  assert.equal(C.runLabel({ endedAt: 9, exitCode: null }), 'Closed before it ended')
+})

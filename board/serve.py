@@ -45,6 +45,9 @@ APPROVALS_DIR = Path(os.environ.get("CCC_APPROVALS_DIR", CCC_DIR / "approvals"))
 COMMANDS_DIR = Path(os.environ.get("CCC_COMMANDS_DIR", CCC_DIR / "commands"))
 # caveman mode per session, as the person switches it in CCC; the mod reads it (hooks/caveman.ts)
 CAVEMAN_DIR = Path(os.environ.get("CCC_CAVEMAN_DIR", CCC_DIR / "caveman"))
+# the commands the person ran from a code block in a session's chat (Run), a folder per session; the
+# mod reads them and tells Claude (hooks/runs.ts)
+RUNS_DIR = Path(os.environ.get("CCC_RUNS_DIR", CCC_DIR / "runs"))
 BACKGROUND_FILE = Path(os.environ.get("CCC_BACKGROUND_FILE", CCC_DIR / "background.json"))
 DELETED_FILE = Path(os.environ.get("CCC_DELETED_FILE", CCC_DIR / "deleted.json"))
 # after a conversation is deleted, what a Claude that was stopping writes late follows it to the Trash
@@ -54,7 +57,7 @@ LATE_SWEEPS_S = (2, 10, 30)
 CLAUDE_HOME = Path(os.environ.get("CCC_CLAUDE_HOME", Path.home() / ".claude"))
 TRASH_DIR = Path(os.environ.get("CCC_TRASH_DIR", Path.home() / ".Trash"))
 # what CCC keeps per session, each named after its id
-CCC_SESSION_DIRS = (SESSIONS_DIR, PROMPTS_DIR, COMMANDS_DIR, CAVEMAN_DIR, ANSWERS_DIR, APPROVALS_DIR, INBOX_DIR, UPLOADS_DIR)
+CCC_SESSION_DIRS = (SESSIONS_DIR, PROMPTS_DIR, COMMANDS_DIR, CAVEMAN_DIR, ANSWERS_DIR, APPROVALS_DIR, INBOX_DIR, UPLOADS_DIR, RUNS_DIR)
 CAVEMAN_LEVELS = ("off", "lite", "full", "ultra")
 COMMANDS_MAX = 400
 COMMAND_NAME = re.compile(r"^[A-Za-z0-9_:.-]{1,80}$")
@@ -2807,6 +2810,181 @@ class Notes:
             temporary.replace(self.path)
 
 
+# ---------- Run: a command from a code block in the chat ----------
+
+RUN_ID = re.compile(r"^r[0-9a-f]{12}$")
+RUN_COMMAND_MAX = 16_000
+RUN_SIZE = (120, 32)
+# the runs a session keeps, newest first; older ones go, their terminals long closed
+RUNS_KEPT = 20
+# what the chat shows of a run's output, and the mod tells Claude of it: its last lines
+RUN_OUTPUT_MAX = 24_000
+RUN_LINES_MAX = 300
+# how many looks in a row a run's terminal must be missing before the run counts as closed: a look
+# the keeper did not answer in time finds no terminals at all
+RUN_MISSES = 3
+# what a terminal prints that is not text: colours, cursor moves, window titles
+TERMINAL_CODES = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[P^_X][^\x1b]*\x1b\\|\x1b\[[0-?]*[ -/]*[@-~]|\x1b[()*+][0-9A-Za-z]|\x1b[@-Z\\-_=>78]")
+BACKSPACED = re.compile(r"[^\x08]\x08")
+CONTROLS = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
+
+
+def plain_output(data: bytes, max_chars: int = RUN_OUTPUT_MAX, max_lines: int = RUN_LINES_MAX) -> str:
+    """What a terminal printed, as the plain lines it shows: its codes gone, and a line written over
+    in place (a progress bar) as it was left. The last lines only."""
+    text = TERMINAL_CODES.sub("", data.decode("utf-8", errors="replace")).replace("\r\n", "\n")
+    lines = []
+    for line in text.split("\n"):
+        parts = [part for part in line.split("\r") if part]
+        line = parts[-1] if parts else ""
+        while "\x08" in line and BACKSPACED.search(line):
+            line = BACKSPACED.sub("", line)
+        lines.append(CONTROLS.sub("", line).rstrip())
+    while lines and not lines[-1]:
+        lines.pop()
+    while lines and not lines[0]:
+        lines.pop(0)
+    return "\n".join(lines[-max_lines:])[-max_chars:]
+
+
+class CommandRuns:
+    """The commands the person ran from the chat's code blocks (Run), each in a terminal of its own
+    on the board, in the session's folder. A folder per session, a file per run, kept up to date
+    with what its terminal prints and how it ended. The session's mod leaves `<run id>.told` beside
+    a run once Claude was told of it (hooks/runs.ts)."""
+
+    def __init__(self, folder: Path):
+        self.folder = folder
+        self.lock = threading.Lock()
+        self.misses = {}
+
+    def start(self, terms, transcripts, session_id, command, now_ms: int, shell=None) -> dict:
+        """Runs a command in the session's folder, in the person's own shell as their terminal opens
+        it (so their PATH, aliases and functions are there too). The folder comes from the session's
+        transcript, never from the page. Closes the terminals of the session's runs that ended."""
+        if not isinstance(session_id, str) or not SAFE_ID.match(session_id):
+            return {"ok": False, "problem": "That session could not be found."}
+        if not isinstance(command, str) or not command.strip() or len(command) > RUN_COMMAND_MAX:
+            return {"ok": False, "problem": "That is no command to run."}
+        path = transcripts.find(session_id)
+        folder = folder_of(path) if path else None
+        if not folder or not os.path.isdir(folder):
+            return {"ok": False, "problem": "This session's folder is not known yet."}
+        terminal_id, problem = terms.start(folder, *RUN_SIZE, command=[shell or terminals.shell_of(os.environ), "-i", "-c", command])
+        if not terminal_id:
+            return {"ok": False, "problem": problem}
+        replaced = self.close_ended(terms, session_id)
+        run = {"id": "r" + secrets.token_hex(6), "command": command, "folder": folder, "terminalId": terminal_id, "startedAt": now_ms, "endedAt": None, "exitCode": None, "output": ""}
+        with self.lock:
+            self.write(session_id, run)
+            self.prune(session_id)
+        return {"ok": True, "runId": run["id"], "terminalId": terminal_id, "replaced": replaced}
+
+    def close_ended(self, terms, session_id: str) -> list:
+        """Closes the terminals of a session's runs that ended, so each Run leaves one on the board;
+        what they printed stays in the chat. The ids of those it closed."""
+        closed = []
+        with self.lock:
+            for run in self.runs_of(session_id):
+                if run.get("endedAt") is not None and not run.get("terminalGone"):
+                    if terms.close(run.get("terminalId")):
+                        closed.append(run["terminalId"])
+                    self.write(session_id, {**run, "terminalGone": True})
+        return closed
+
+    def settle(self, terms, now_ms: int, cards=None, session_id=None):
+        """Brings each run still going up to date with its terminal: what it printed so far, and its
+        exit code once it ended. One whose terminal was closed first ends with no exit code."""
+        with self.lock:
+            going = [(owner, run) for owner, run in self.every_run(session_id) if run.get("endedAt") is None]
+            if not going:
+                return
+            listed = {card.get("id"): card for card in (terms.list() if cards is None else cards) if isinstance(card, dict)}
+            for owner, run in going:
+                card = listed.get(run.get("terminalId"))
+                now = dict(run)
+                if card is None:
+                    self.misses[run["id"]] = self.misses.get(run["id"], 0) + 1
+                    if self.misses[run["id"]] >= RUN_MISSES:
+                        self.misses.pop(run["id"], None)
+                        now.update(endedAt=now_ms, terminalGone=True)
+                else:
+                    self.misses.pop(run["id"], None)
+                    seen = terms.screen(run["terminalId"]) if hasattr(terms, "screen") else None
+                    if seen:
+                        now["output"] = plain_output(seen[0])
+                    if card.get("endedAt"):
+                        now.update(endedAt=card["endedAt"], exitCode=card.get("exitCode"))
+                if now != run:
+                    self.write(owner, now)
+
+    def shown(self, session_id) -> list:
+        """A session's runs for its chat, oldest first, each marked `told` once Claude was told of it."""
+        if not isinstance(session_id, str) or not SAFE_ID.match(session_id):
+            return []
+        shown = []
+        for run in self.runs_of(session_id):
+            told = self.told(session_id, run)
+            terminal = {} if run.get("terminalGone") else {"terminalId": run.get("terminalId")}
+            shown.append({key: run.get(key) for key in ("id", "command", "startedAt", "endedAt", "exitCode", "output")} | terminal | {"told": told})
+        return shown
+
+    def told(self, session_id: str, run: dict) -> bool:
+        """Whether Claude was told of the run as it stands: one told of while it ran, and ended
+        since, is told again with the next message."""
+        try:
+            told = json.loads((self.folder / session_id / f"{run['id']}.told").read_text(encoding="utf-8"))
+        except OSError:
+            return False
+        except ValueError:
+            return True
+        return run.get("endedAt") is None or not isinstance(told, dict) or told.get("ended") is not False
+
+    def terminals(self) -> dict:
+        """Each run's terminal still on the board: {terminal id: {"sessionId", "command"}}."""
+        return {run["terminalId"]: {"sessionId": owner, "command": run.get("command", "")} for owner, run in self.every_run() if not run.get("terminalGone") and isinstance(run.get("terminalId"), str)}
+
+    def every_run(self, session_id=None) -> list:
+        try:
+            owners = [session_id] if session_id else [path.name for path in self.folder.iterdir() if path.is_dir() and SAFE_ID.match(path.name)]
+        except OSError:
+            return []
+        return [(owner, run) for owner in owners for run in self.runs_of(owner)]
+
+    def runs_of(self, session_id: str) -> list:
+        """A session's runs, oldest first."""
+        runs = []
+        try:
+            paths = list((self.folder / session_id).glob("r*.json"))
+        except OSError:
+            return []
+        for path in paths:
+            try:
+                run = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if isinstance(run, dict) and isinstance(run.get("id"), str) and RUN_ID.match(run["id"]) and path.stem == run["id"]:
+                runs.append(run)
+        return sorted(runs, key=lambda run: run.get("startedAt") or 0)
+
+    def write(self, session_id: str, run: dict):
+        folder = self.folder / session_id
+        folder.mkdir(parents=True, exist_ok=True)
+        temporary = folder / f".{run['id']}.tmp"
+        temporary.write_text(json.dumps(run), encoding="utf-8")
+        temporary.replace(folder / f"{run['id']}.json")
+
+    def prune(self, session_id: str):
+        for run in self.runs_of(session_id)[:-RUNS_KEPT]:
+            for suffix in (".json", ".told"):
+                (self.folder / session_id / f"{run['id']}{suffix}").unlink(missing_ok=True)
+
+
+def with_run_labels(cards: list, runs: dict) -> list:
+    """Each terminal card that runs a command from a chat, marked with that command and its session."""
+    return [{**card, "run": runs[card.get("id")]} if card.get("id") in runs else card for card in cards]
+
+
 TRANSCRIPTS = Transcripts(PROJECTS_DIR)
 FILE_LISTS = mentions.FileLists()
 APP_SESSIONS = AppSessions(APP_SESSIONS_DIR)
@@ -2820,6 +2998,7 @@ DELETED = Deleted(DELETED_FILE)
 SCREEN_BOXES = {}
 CAVEMAN = Caveman(CAVEMAN_DIR)
 NOTES = Notes(NOTES_FILE)
+RUNS = CommandRuns(RUNS_DIR)
 TERMINALS = keeper.KeptTerminals()
 BACKGROUNDS = Backgrounds(BACKGROUND_FILE)
 KEEPER_WATCH = KeeperWatch()
@@ -2912,7 +3091,7 @@ def removal_target(body: bytes):
     return session_id if isinstance(session_id, str) and SAFE_ID.match(session_id) else None
 
 
-TERMINAL_ROUTES = {"/api/terminal/start": "terminal-start", "/api/terminal/type": "terminal-type", "/api/terminal/resize": "terminal-resize", "/api/terminal/close": "terminal-close", "/api/terminal/open": "terminal-open", "/api/terminal/show": "terminal-show", "/api/keeper/stop": "terminal-keeper-stop"}
+TERMINAL_ROUTES = {"/api/terminal/start": "terminal-start", "/api/terminal/run": "terminal-run", "/api/terminal/type": "terminal-type", "/api/terminal/resize": "terminal-resize", "/api/terminal/close": "terminal-close", "/api/terminal/open": "terminal-open", "/api/terminal/show": "terminal-show", "/api/keeper/stop": "terminal-keeper-stop"}
 TERMINAL_KEY_HEADER = "X-CCC-Key"
 MAX_TERMINAL_BODY_BYTES = 256 * 1024
 
@@ -3014,6 +3193,8 @@ class Handler(SimpleHTTPRequestHandler):
             editor_apps = [{"id": editor["id"], "name": editor["name"]} for editor in editors.installed_editors()]
             now_ms = int(time.time() * 1000)
             cards = with_screen_modes(TERMINALS, named_backgrounds(reveal_waiting(TERMINALS, TERMINALS.list(), SESSIONS_DIR, now_ms), TRANSCRIPTS, REMOVALS.load()))
+            RUNS.settle(TERMINALS, now_ms, cards)
+            cards = with_run_labels(cards, RUNS.terminals())
             payload["sessions"] = with_designs(with_screen_boxes(payload["sessions"], cards, now_ms, SCREEN_BOXES), TRANSCRIPTS)
             lost, seen = KEEPER_WATCH.look(TERMINALS.keeper_id, cards, now_ms)
             stopped = stopped_backgrounds(BACKGROUNDS, cards, SESSIONS_DIR, TRANSCRIPTS, now_ms, lost)
@@ -3063,7 +3244,9 @@ class Handler(SimpleHTTPRequestHandler):
             return self.send_json(session_files(query.get("session", [""])[0], query.get("q", [""])[0], TRANSCRIPTS, FILE_LISTS))
         if route == "/api/chat":
             session_id = parse_qs(urlsplit(self.path).query).get("session", [""])[0]
-            return self.send_json(chat_payload(session_id, TRANSCRIPTS, INBOX))
+            if SAFE_ID.match(session_id):
+                RUNS.settle(TERMINALS, int(time.time() * 1000), session_id=session_id)
+            return self.send_json({**chat_payload(session_id, TRANSCRIPTS, INBOX), "runs": RUNS.shown(session_id)})
         if route == "/api/step":
             query = parse_qs(urlsplit(self.path).query)
             session_id, tool_id = query.get("session", [""])[0], query.get("tool", [""])[0]
@@ -3104,6 +3287,8 @@ class Handler(SimpleHTTPRequestHandler):
                 return self.send_error(400)
             if action == "terminal-keeper-stop":
                 KEEPER_WATCH.ended_on_purpose(TERMINALS.keeper_id)
+            if action == "terminal-run":
+                return self.send_json(RUNS.start(TERMINALS, TRANSCRIPTS, data.get("sessionId"), data.get("command"), int(time.time() * 1000)))
             return self.send_json(terminal_action(TERMINALS, action, data, close_session=close_on_board))
         if action == "upload":
             # an image or file for a message, sent as it is: saved as it comes in, however big

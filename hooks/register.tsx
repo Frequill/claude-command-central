@@ -47,6 +47,7 @@ import type { Inbox } from './inbox'
 import { applyPlanUpdate, completeAll, readPlanUpdate } from './plan'
 import { openLedger, rollLedger, spentToday } from './spend'
 import { publisherFor } from './publish'
+import { runsFor, takeRunsNote } from './runs'
 import type { Publisher, SessionParts } from './publish'
 import { topicOf } from './snapshot'
 import { EMPTY_STATS, withMeasure } from './stats'
@@ -244,10 +245,11 @@ export const register: Register = on => {
     if (e.origin?.kind === 'task-notification' && isOnlyStoppedReport(e.text, await read($, stoppedTasks))) {
       return { drop: 'Stopped from CCC.' }
     }
-    // caveman mode switched in CCC: a note beside the message that the person does not see
-    const note = e.command ? undefined : await nextCavemanNote($)
+    // caveman mode switched in CCC, and commands run from its chat: notes beside the message that
+    // the person does not see
+    const notes = e.command ? [] : [await nextCavemanNote($), await nextRunsNote($)].filter((note): note is string => Boolean(note))
 
-    return next(note ? { ...e, context: [...(e.context ?? []), note] } : e)
+    return next(notes.length ? { ...e, context: [...(e.context ?? []), ...notes] } : e)
   }).catch(($, e, next) => next(e))
 
   // the engine's own guess at the person's next prompt, which the app shows dim in its prompt box for
@@ -341,6 +343,16 @@ async function nextCavemanNote($: EngineInterface): Promise<string | undefined> 
     const note = cavemanNote(level, cavemanTold, level ? await cavemanRules($) : '', wasChosen)
     if (note) cavemanTold = level ?? 'off'
     return note
+  } catch {
+    return undefined
+  }
+}
+
+/** What the person ran from CCC's chat since Claude last heard (Run on a code block). */
+async function nextRunsNote($: EngineInterface): Promise<string | undefined> {
+  try {
+    const io = await runsFor($)
+    return io ? await takeRunsNote(io) : undefined
   } catch {
     return undefined
   }
