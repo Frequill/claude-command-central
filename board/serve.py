@@ -1852,6 +1852,26 @@ class Inbox:
         temporary.replace(path)
         return True
 
+    def rewrite(self, session_id: str, message_id: str, text: str) -> bool:
+        """Puts new words in a message that still waits in the queue, where it is; False when the
+        session has taken it already, or there is no such message."""
+        if not SAFE_ID.match(session_id or "") or not re.fullmatch(r"[0-9]{1,16}-[0-9a-f]{1,32}", message_id or ""):
+            return False
+        folder = self.inbox_dir / session_id
+        path = folder / f"{message_id}.json"
+        if (folder / f"{message_id}.taken").exists():
+            return False
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return False
+        if not isinstance(data, dict) or data.get("stop") or data.get("stopRun"):
+            return False
+        temporary = folder / f"{message_id}.tmp"
+        temporary.write_text(json.dumps({**data, "text": text}), encoding="utf-8")
+        temporary.replace(path)
+        return True
+
     def take_first(self, session_id: str):
         """The oldest message that waits for the session, marked taken as its mod marks one, for a
         session that starts with it; None when nothing waits."""
@@ -2907,11 +2927,11 @@ class CommandRuns:
     kept up to date with what it printed and how it ended. The session's mod leaves `<run id>.told`
     beside a run once Claude was told of it (hooks/runs.ts)."""
 
-    def __init__(self, folder: Path, shell=None, send=None):
+    def __init__(self, folder: Path, shell=None, inbox=None):
         self.folder = folder
         self.shell = shell
-        # how Claude gets a message from CCC's chat: send(session id, text, time), through its inbox
-        self.send = send
+        # how Claude gets how its runs went: a message in its inbox, as one written in CCC's chat
+        self.inbox = inbox
         self.lock = threading.Lock()
         self.misses = {}
 
@@ -2983,17 +3003,23 @@ class CommandRuns:
     def report(self, owner: str, now_ms: int):
         """Once none of a session's runs waits or runs any more, Claude gets how the ones that ended
         went in one message, as in the Claude app: it looks at what they printed and answers. It
-        waits in the inbox while Claude works. What they printed goes in beside it, from the mod
-        (hooks/runs.ts); runs Claude heard of already, or that never ran, are not sent."""
+        waits in the inbox while Claude works, and while it waits, runs that end after it join it.
+        What they printed goes in beside it, from the mod (hooks/runs.ts); runs Claude heard of
+        already, or that never ran, are not sent."""
         runs = self.runs_of(owner)
-        if self.send is None or any(run.get("endedAt") is None for run in runs):
+        if self.inbox is None or any(run.get("endedAt") is None for run in runs):
             return
         due = [run for run in runs if run.get("typedAt") and isinstance(run.get("exitCode"), int) and not run.get("sentAt") and not (self.folder / owner / f"{run['id']}.told").exists()]
         if not due:
             return
-        self.send(owner, run_message(due), now_ms)
+        last = next((run.get("message") for run in reversed(runs) if run.get("sentAt") and run.get("message")), None)
+        joined = [run for run in runs if last and run.get("message") == last] + due
+        if last and self.inbox.rewrite(owner, last, run_message(joined)):
+            message = last
+        else:
+            message = self.inbox.send(owner, run_message(due), [], "queue", now_ms)
         for run in due:
-            self.write(owner, {**run, "sentAt": now_ms})
+            self.write(owner, {**run, "sentAt": now_ms, "message": message})
 
     def settle_terminal(self, terms, owner: str, terminal: str, runs: list, card, now_ms: int):
         if card is None:
@@ -3121,7 +3147,7 @@ DELETED = Deleted(DELETED_FILE)
 SCREEN_BOXES = {}
 CAVEMAN = Caveman(CAVEMAN_DIR)
 NOTES = Notes(NOTES_FILE)
-RUNS = CommandRuns(RUNS_DIR, send=lambda session_id, text, now_ms: INBOX.send(session_id, text, [], "queue", now_ms))
+RUNS = CommandRuns(RUNS_DIR, inbox=INBOX)
 TERMINALS = keeper.KeptTerminals()
 BACKGROUNDS = Backgrounds(BACKGROUND_FILE)
 KEEPER_WATCH = KeeperWatch()

@@ -2568,9 +2568,14 @@ class CommandRunsTest(unittest.TestCase):
         (home / "projects" / "p").mkdir(parents=True)
         (home / "projects" / "p" / "s1.jsonl").write_text(json.dumps({"type": "user", "cwd": self.folder, "message": {"content": "hi"}}) + "\n")
         self.transcripts = serve.Transcripts(home / "projects")
-        self.sent = []
-        self.runs = serve.CommandRuns(home / "runs", shell="/bin/zsh", send=lambda session_id, text, now_ms: self.sent.append((session_id, text, now_ms)))
+        self.inbox = serve.Inbox(home / "inbox", home / "uploads")
+        self.runs = serve.CommandRuns(home / "runs", shell="/bin/zsh", inbox=self.inbox)
         self.dir = home / "runs" / "s1"
+
+    @property
+    def sent(self):
+        """What waits in the session's inbox for Claude."""
+        return [(message["text"], message["mode"]) for message in self.inbox.pending("s1")]
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -2633,7 +2638,7 @@ class CommandRunsTest(unittest.TestCase):
         self.assertEqual(self.sent, [])
         terms.prints("t000000000001", ran(b"error: no rule\r\n", 2))
         self.runs.settle(terms, 2000)
-        self.assertEqual(self.sent, [("s1", "Ran `make` from the chat: failed, exit 2. Have a look at what it printed.", 2000)])
+        self.assertEqual(self.sent, [("Ran `make` from the chat: failed, exit 2. Have a look at what it printed.", "queue")])
         self.assertEqual(self.runs.shown("s1")[0]["sentAt"], 2000)
         # sent once
         self.runs.settle(terms, 3000)
@@ -2649,9 +2654,28 @@ class CommandRunsTest(unittest.TestCase):
         self.assertEqual(self.sent, [])
         terms.prints("t000000000001", ran(b"2 problems\r\n", 1))
         self.runs.settle(terms, 3000)
-        self.assertEqual(self.sent, [("s1", "Ran 2 commands from the chat (1 done, 1 failed). Have a look at what they printed.", 3000)])
+        self.assertEqual(self.sent, [("Ran 2 commands from the chat (1 done, 1 failed). Have a look at what they printed.", "queue")])
         self.assertEqual(serve.run_message([{"command": "ls", "exitCode": 0}]), "Ran `ls` from the chat: done. Have a look at what it printed.")
         self.assertEqual(serve.run_message([{"command": "cd web &&\nnpm run lint", "exitCode": 0}]), "Ran `cd web &&…` from the chat: done. Have a look at what it printed.")
+
+    def test_a_run_that_ends_while_the_last_message_still_waits_joins_it(self):
+        terms = RunTerms()
+        terms.prints("t000000000001", PROMPT)
+        self.runs.start(terms, self.transcripts, "s1", "echo one", 1000)
+        terms.prints("t000000000001", ran(b"one\r\n", 0))
+        self.runs.settle(terms, 2000)
+        # Claude works: the message waits, and the next run, clicked later, joins it in its place
+        self.runs.start(terms, self.transcripts, "s1", "ls /nope", 3000)
+        terms.prints("t000000000001", ran(b"ls: /nope\r\n", 1))
+        self.runs.settle(terms, 4000)
+        self.assertEqual(self.sent, [("Ran 2 commands from the chat (1 done, 1 failed). Have a look at what they printed.", "queue")])
+        # once Claude has taken it, the next run gets a message of its own
+        [waiting] = self.inbox.pending("s1")
+        (self.inbox.inbox_dir / "s1" / f"{waiting['id']}.taken").write_text("1")
+        self.runs.start(terms, self.transcripts, "s1", "pwd", 5000)
+        terms.prints("t000000000001", ran(b"/p\r\n", 0))
+        self.runs.settle(terms, 6000)
+        self.assertEqual(self.sent, [("Ran `pwd` from the chat: done. Have a look at what it printed.", "queue")])
 
     def test_a_run_claude_heard_of_or_that_never_finished_is_not_sent(self):
         terms = RunTerms()
