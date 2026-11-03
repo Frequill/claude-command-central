@@ -2591,6 +2591,19 @@ class CommandRunsTest(unittest.TestCase):
         self.assertEqual(terms.typed, [])
         self.assertEqual(self.runs.terminals(), {"t000000000001": {"sessionId": "s1"}})
 
+    def test_the_terminal_starts_where_the_session_works_now(self):
+        # started in a scratch folder the Claude app has since removed, and moved into the project
+        project = os.path.join(self.tmp.name, "moved")
+        os.mkdir(project)
+        lines = [{"type": "queue-operation"}, {"type": "user", "cwd": "/gone/scratch", "message": {"content": "hi"}}, {"type": "assistant", "cwd": project, "message": {"content": []}}]
+        (Path(self.tmp.name) / "projects" / "p" / "s2.jsonl").write_text("".join(json.dumps(line) + "\n" for line in lines))
+        terms = RunTerms()
+        self.assertTrue(self.runs.start(terms, self.transcripts, "s2", "ls", 1000)["ok"])
+        self.assertEqual(terms.started[0]["folder"], project)
+        # a session whose only folder is gone says so
+        (Path(self.tmp.name) / "projects" / "p" / "s3.jsonl").write_text(json.dumps({"type": "user", "cwd": "/gone/scratch", "message": {"content": "hi"}}) + "\n")
+        self.assertEqual(self.runs.start(terms, self.transcripts, "s3", "ls", 1000), {"ok": False, "problem": "This session's folder is not on this Mac any more: /gone/scratch"})
+
     def test_nothing_runs_for_an_unknown_session_or_no_command(self):
         terms = RunTerms()
         self.assertFalse(self.runs.start(terms, self.transcripts, "nobody", "ls", 1000)["ok"])

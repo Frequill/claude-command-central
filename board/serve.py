@@ -2158,6 +2158,24 @@ def recent_folders(projects_dir: Path, limit: int = RECENT_FOLDERS, passing: tup
     return found
 
 
+def current_folder(path: Path):
+    """The folder a transcript's session works in now: the last one its newest lines name that is
+    still on this Mac, as a session can move on the way (the Claude app moves one out of its scratch
+    folder into a project). The one it started in when the newest lines name none."""
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return None
+    for match in reversed(list(CWD_FIELD.finditer(read_bytes(path, max(0, size - TAIL_BYTES), TAIL_BYTES)))):
+        try:
+            folder = json.loads(match.group(1).decode("utf-8", errors="replace"))
+        except ValueError:
+            continue
+        if isinstance(folder, str) and folder.startswith("/") and os.path.isdir(folder):
+            return folder
+    return folder_of(path)
+
+
 def folder_of(path: Path):
     """The folder a transcript's session worked in, from its first lines; None when it names none."""
     try:
@@ -2936,16 +2954,18 @@ class CommandRuns:
         self.misses = {}
 
     def start(self, terms, transcripts, session_id, command, now_ms: int) -> dict:
-        """Runs a command in the session's terminal, starting it in the session's folder when it has
-        none. The folder comes from the session's transcript, never from the page."""
+        """Runs a command in the session's terminal, starting it in the folder the session works in
+        now when it has none. The folder comes from the session's transcript, never from the page."""
         if not isinstance(session_id, str) or not SAFE_ID.match(session_id):
             return {"ok": False, "problem": "That session could not be found."}
         if not isinstance(command, str) or not command.strip() or len(command) > RUN_COMMAND_MAX:
             return {"ok": False, "problem": "That is no command to run."}
         path = transcripts.find(session_id)
-        folder = folder_of(path) if path else None
-        if not folder or not os.path.isdir(folder):
+        folder = current_folder(path) if path else None
+        if not folder:
             return {"ok": False, "problem": "This session's folder is not known yet."}
+        if not os.path.isdir(folder):
+            return {"ok": False, "problem": f"This session's folder is not on this Mac any more: {folder}"}
         with self.lock:
             runs = self.runs_of(session_id)
             listed = {card.get("id"): card for card in terms.list() if isinstance(card, dict)}
