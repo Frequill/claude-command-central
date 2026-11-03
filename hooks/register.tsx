@@ -47,7 +47,7 @@ import type { Inbox } from './inbox'
 import { applyPlanUpdate, completeAll, readPlanUpdate } from './plan'
 import { openLedger, rollLedger, spentToday } from './spend'
 import { publisherFor } from './publish'
-import { runsFor, takeRunsNote } from './runs'
+import { runsNoteFor, tellRuns } from './runs'
 import type { Publisher, SessionParts } from './publish'
 import { topicOf } from './snapshot'
 import { EMPTY_STATS, withMeasure } from './stats'
@@ -96,6 +96,7 @@ export const register: Register = on => {
       async () => Boolean((await read($, turn)).isRunning),
       text => cavemanDressed($, text),
       runId => stopRun($, runId),
+      () => tellRuns($),
     ).catch(() => undefined)
     await publishCommands($).catch(() => undefined)
     startTicking($)
@@ -246,8 +247,8 @@ export const register: Register = on => {
       return { drop: 'Stopped from CCC.' }
     }
     // caveman mode switched in CCC, and commands run from its chat: notes beside the message that
-    // the person does not see
-    const notes = e.command ? [] : [await nextCavemanNote($), await nextRunsNote($)].filter((note): note is string => Boolean(note))
+    // the person does not see (a message from CCC's own chat gets the second from its inbox instead)
+    const notes = e.command ? [] : [await nextCavemanNote($), await runsNoteFor($)].filter((note): note is string => Boolean(note))
 
     return next(notes.length ? { ...e, context: [...(e.context ?? []), ...notes] } : e)
   }).catch(($, e, next) => next(e))
@@ -343,16 +344,6 @@ async function nextCavemanNote($: EngineInterface): Promise<string | undefined> 
     const note = cavemanNote(level, cavemanTold, level ? await cavemanRules($) : '', wasChosen)
     if (note) cavemanTold = level ?? 'off'
     return note
-  } catch {
-    return undefined
-  }
-}
-
-/** What the person ran from CCC's chat since Claude last heard (Run on a code block). */
-async function nextRunsNote($: EngineInterface): Promise<string | undefined> {
-  try {
-    const io = await runsFor($)
-    return io ? await takeRunsNote(io) : undefined
   } catch {
     return undefined
   }

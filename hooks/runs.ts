@@ -130,6 +130,26 @@ export async function takeRunsNote(io: RunsIo): Promise<string | undefined> {
   return runsNote(fresh)
 }
 
+/** The note on what the person ran since Claude last heard, or undefined for none (or where none can be read). */
+export async function runsNoteFor($: EngineInterface): Promise<string | undefined> {
+  try {
+    const io = await runsFor($)
+    return io ? await takeRunsNote(io) : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Tells Claude what the person ran, in a row of its own that the person does not see, just before a
+ * message from CCC's chat goes in. A prompt the mod submits passes none of the mod's own hooks, so
+ * prompt.submit never puts the note beside it, as it does for one typed in the app or a terminal.
+ */
+export async function tellRuns($: EngineInterface): Promise<void> {
+  const note = await runsNoteFor($)
+  if (note) await $.session.append({ message: { type: 'user', content: [{ type: 'text', text: note }] } }).catch(() => undefined)
+}
+
 /** This session's runs from CCC, or undefined where none can be read. */
 export async function runsFor($: EngineInterface): Promise<RunsIo | undefined> {
   const home = await $.env.get('HOME')

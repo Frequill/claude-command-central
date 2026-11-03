@@ -1,6 +1,8 @@
+import type { EngineInterface, On } from 'claude-code'
 import { describe, expect, mock, test } from 'claude-code/testing'
 
-import { readRun, readTold, runsNote, takeRunsNote, untold } from '../hooks/runs'
+import { inboxFor } from '../hooks/inbox'
+import { readRun, readTold, runsNote, takeRunsNote, tellRuns, untold } from '../hooks/runs'
 import type { CommandRun, RunsIo } from '../hooks/runs'
 
 const run = (fields: Partial<CommandRun> = {}): CommandRun => ({ id: 'r000000000001', command: 'npm test', folder: '/p', startedAt: 1, output: '', ...fields })
@@ -90,13 +92,15 @@ describe('commands run from the chat', () => {
   })
 })
 
-test('the next prompt carries what the person ran, once', async ($, on) => {
+const RUNS_DIR = '/h/.claude/ccc/runs/s1'
+
+/** A session `s1` under HOME `/h` with one run that failed, its files kept in memory. */
+function oneFailedRun(on: On) {
   mock.clock(on, { now: 42 })
   mock.env(on, { HOME: '/h' })
   on('session.id', () => ({ value: 's1' }))
-  const dir = '/h/.claude/ccc/runs/s1'
-  const files = new Map([[`${dir}/r000000000001.json`, JSON.stringify(run({ endedAt: 5, exitCode: 1, output: 'FAIL' }))]])
-  on('fs.exists', (_, e) => ({ value: e.path === dir || files.has(e.path) }))
+  const files = new Map([[`${RUNS_DIR}/r000000000001.json`, JSON.stringify(run({ endedAt: 5, exitCode: 1, output: 'FAIL' }))]])
+  on('fs.exists', (_, e) => ({ value: e.path === RUNS_DIR || files.has(e.path) }))
   on('fs.list', (_, e) => ({ value: [...files.keys()].filter(path => path.startsWith(`${e.path}/`)).map(path => ({ name: path.slice(e.path.length + 1), kind: 'file' as const, size: 0, mtimeMs: 0, isLink: false })) }))
   on('fs.read', (_, e) => {
     if (!files.has(e.path)) throw new Error('missing')
@@ -106,6 +110,11 @@ test('the next prompt carries what the person ran, once', async ($, on) => {
     files.set(e.path, e.text)
     return { value: undefined }
   })
+  return files
+}
+
+test('the next prompt typed in the app or a terminal carries what the person ran, once', async ($, on) => {
+  const files = oneFailedRun(on)
   const entered: (readonly string[] | undefined)[] = []
   on('prompt.submit', (_, e) => {
     entered.push(e.context)
@@ -117,5 +126,51 @@ test('the next prompt carries what the person ran, once', async ($, on) => {
 
   expect(entered[0]?.join('\n')).toContain('$ npm test\nIn /p, it exited with code 1.')
   expect(entered[1]?.join('\n') ?? '').not.toContain('$ npm test')
-  expect(JSON.parse(files.get(`${dir}/r000000000001.told`) as string)).toEqual({ at: 42, ended: true })
+  expect(JSON.parse(files.get(`${RUNS_DIR}/r000000000001.told`) as string)).toEqual({ at: 42, ended: true })
+})
+
+/** As much of a session's `$` as the runs and the inbox use: `s1` under HOME `/h`, its files in memory, what it did in order. */
+function fakeSession(files: Map<string, string>) {
+  const did: string[] = []
+  const $ = {
+    env: { get: async (name: string) => (name === 'HOME' ? '/h' : undefined) },
+    session: {
+      id: async () => 's1',
+      append: async (args: { message: { type: string; content: { text: string }[] } }) => void did.push(`${args.message.type} row: ${args.message.content.map(block => block.text).join('')}`),
+    },
+    fs: {
+      exists: async (path: string) => files.has(path) || [...files.keys()].some(name => name.startsWith(`${path}/`)),
+      list: async (dir: string) => [...files.keys()].filter(path => path.startsWith(`${dir}/`)).map(path => ({ name: path.slice(dir.length + 1), kind: 'file' })),
+      read: async (path: string) => files.get(path) ?? '',
+      write: async (path: string, text: string) => void files.set(path, text),
+    },
+    clock: { now: async () => 42 },
+    command: { list: async () => [] },
+    prompt: { submit: async ({ text }: { text: string }) => void did.push(`prompt: ${text}`) },
+  } as unknown as EngineInterface
+  return { $, did }
+}
+
+describe("a message from CCC's chat", () => {
+  test('Claude hears what the person ran in a row of its own, once', async () => {
+    const { $, did } = fakeSession(new Map([[`${RUNS_DIR}/r000000000001.json`, JSON.stringify(run({ endedAt: 5, exitCode: 1, output: 'FAIL' }))]]))
+    await tellRuns($)
+    await tellRuns($)
+    expect(did).toHaveLength(1)
+    expect(did[0]).toMatch(/^user row: The person ran these commands[\s\S]*\$ npm test/)
+  })
+
+  test('the note goes in just before the message', async () => {
+    const files = new Map([
+      [`${RUNS_DIR}/r000000000001.json`, JSON.stringify(run({ endedAt: 5, exitCode: 1, output: 'FAIL' }))],
+      ['/h/.claude/ccc/inbox/s1/1000-aa.json', JSON.stringify({ text: 'why did it fail?', images: [], mode: 'queue' })],
+    ])
+    const { $, did } = fakeSession(files)
+    const inbox = await inboxFor($, async () => undefined, undefined, undefined, undefined, () => tellRuns($))
+    await inbox?.check()
+    // the inbox hands a message over without waiting for it
+    for (let step = 0; step < 100; step++) await Promise.resolve()
+    expect(did.map(line => line.split(':')[0])).toEqual(['user row', 'prompt'])
+    expect(did[1]).toBe('prompt: why did it fail?')
+  })
 })
