@@ -1114,7 +1114,7 @@ function drawItem(chat, item) {
     )
   }
   if (item.kind === 'image') return el('li', { class: 'msg msg-images', 'aria-label': 'Images Claude looked at' }, drawPictures(chat, item.pictures, true))
-  if (item.kind === 'claude') return el('li', { class: 'msg msg-claude' }, el('span', { class: 'claude-mark', 'aria-hidden': 'true' }, '✻'), markdown(item.text))
+  if (item.kind === 'claude') return el('li', { class: 'msg msg-claude' }, el('span', { class: 'claude-mark', 'aria-hidden': 'true' }, '✻'), linkCode(chat, markdown(item.text)))
   if (item.kind === 'steps') return drawSteps(chat, item.steps, item.pictures)
   if (item.kind === 'question') return drawQuestion(chat, item)
   return el('li', { class: 'msg msg-note' }, item.text)
@@ -1529,7 +1529,7 @@ function drawLive(chat, session) {
     return
   }
   const status = el('div', { class: 'live-status' }, el('span', { class: 'running-dots', 'aria-hidden': 'true' }, el('i'), el('i'), el('i')), ' ', activity?.label ?? 'Working', activity?.text ? el('span', { class: 'live-detail' }, ` · ${activity.text}`) : null)
-  const writing = rest ? el('div', { class: 'msg msg-claude' }, el('span', { class: 'claude-mark', 'aria-hidden': 'true' }, '✻'), markdown(rest), session?.reply?.isWriting ? el('span', { class: 'reply-caret', 'aria-hidden': 'true' }) : null) : null
+  const writing = rest ? el('div', { class: 'msg msg-claude' }, el('span', { class: 'claude-mark', 'aria-hidden': 'true' }, '✻'), linkCode(chat, markdown(rest)), session?.reply?.isWriting ? el('span', { class: 'reply-caret', 'aria-hidden': 'true' }) : null) : null
   chat.live.replaceChildren(...[writing, steps, status].filter(Boolean))
   if (chat.isFollowing !== false) toNewest(chat)
 }
@@ -1939,6 +1939,171 @@ async function sendMessage(chat, mode) {
 }
 
 // ---------- Claude's text ----------
+
+// how long a chip that pointed nowhere is believed: Claude may make that file or method in a moment
+const CODE_MISS_MS = 30_000
+
+/**
+ * Makes the code chips of one of Claude's replies links, while the setting to open files in an
+ * editor is on: a file opens in it, and a class, method or constant opens where it is made. The
+ * server says where each chip points; one that points nowhere stays as it was. Returns `root`.
+ */
+function linkCode(chat, root) {
+  if (!chat || !context.editorOf?.()) return root
+  chat.codePlaces ??= new Map()
+  chat.codeWaiting ??= new Map()
+  const now = Date.now()
+  for (const node of root.querySelectorAll('code')) {
+    if (node.closest('pre')) continue
+    const chip = node.textContent
+    const known = chat.codePlaces.get(chip)
+    if (known?.places) codeLink(chat, node, chip, known.places)
+    // asked about already: linked when the answer comes
+    else if (known?.asking) known.asking.add(node)
+    else if (!known || now - known.at > CODE_MISS_MS) {
+      if (!chat.codeWaiting.has(chip)) chat.codeWaiting.set(chip, new Set())
+      chat.codeWaiting.get(chip).add(node)
+    }
+  }
+  askSoon(chat)
+  return root
+}
+
+// the server looks at this many chips at a time
+const CHIPS_AT_ONCE = 200
+
+function askSoon(chat) {
+  if (chat.codeWaiting.size && !chat.codeTimer && !chat.isAskingCode) chat.codeTimer = setTimeout(() => askCodePlaces(chat), 120)
+}
+
+// the chips drawn since the last ask, asked about at once; one ask at a time, the rest wait for it
+async function askCodePlaces(chat) {
+  chat.codeTimer = 0
+  const waiting = new Map([...chat.codeWaiting].slice(0, CHIPS_AT_ONCE))
+  for (const [chip, nodes] of waiting) {
+    chat.codeWaiting.delete(chip)
+    chat.codePlaces.set(chip, { asking: nodes })
+  }
+  chat.isAskingCode = true
+  try {
+    await placeChips(chat, waiting)
+  } finally {
+    chat.isAskingCode = false
+    askSoon(chat)
+  }
+}
+
+async function placeChips(chat, waiting) {
+  let places = null
+  try {
+    const response = await fetch('/api/code-links', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-CCC-Action': 'code-links' },
+      body: JSON.stringify({ sessionId: chat.id, chips: [...waiting.keys()] }),
+    })
+    places = response.ok ? (await response.json()).places : null
+  } catch {
+    places = null
+  }
+  // the board is not running: asked again the next time they are drawn
+  if (!places || typeof places !== 'object') {
+    for (const chip of waiting.keys()) chat.codePlaces.delete(chip)
+    return
+  }
+  const at = Date.now()
+  for (const [chip, nodes] of waiting) {
+    const found = Array.isArray(places[chip]) && places[chip].length ? places[chip] : null
+    chat.codePlaces.set(chip, { places: found, at })
+    if (found) for (const node of nodes) if (node.isConnected) codeLink(chat, node, chip, found)
+  }
+}
+
+function codeLink(chat, node, chip, places) {
+  if (node.classList.contains('code-link')) return
+  const editor = context.editorOf?.()
+  if (!editor) return
+  const only = places.length === 1 ? places[0] : null
+  node.classList.add('code-link')
+  node.setAttribute('role', 'button')
+  node.setAttribute('tabindex', '0')
+  node.title = only ? `Open ${only.path}, line ${only.line}, in ${editor.name}` : `Made in ${places.length} places: choose one to open in ${editor.name}`
+  const go = event => {
+    event.preventDefault()
+    event.stopPropagation()
+    if (only) openCode(chat, chip, 0)
+    else codeMenu(chat, node, chip, places, editor)
+  }
+  node.addEventListener('click', go)
+  node.addEventListener('keydown', event => {
+    if (event.key === 'Enter' || event.key === ' ') go(event)
+  })
+}
+
+async function openCode(chat, chip, at) {
+  const editor = context.editorOf?.()
+  try {
+    const response = await fetch('/api/open-code', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-CCC-Action': 'open-code' },
+      body: JSON.stringify({ sessionId: chat.id, chip, at, editor: editor?.id }),
+    })
+    const answer = response.ok ? await response.json() : { problem: 'Could not open it. Is the board still running?' }
+    if (!answer.ok) {
+      // pointing nowhere now: looked up again the next time it is drawn
+      chat.codePlaces?.delete(chip)
+      say(chat, answer.problem || 'Could not open it.')
+    }
+  } catch {
+    say(chat, 'Could not open it. Is the board still running?')
+  }
+}
+
+// the places a chip is made in, under it, to choose one; a click elsewhere, Escape or scrolling the chip away closes it
+function codeMenu(chat, node, chip, places, editor) {
+  document.querySelector('.code-menu')?.remove()
+  const items = places.map((place, at) => {
+    const { name, parent } = L.folderLabel(place.path)
+    const item = el('button', { type: 'button', class: 'code-menu-item', title: `Open ${place.path}, line ${place.line}` }, el('span', { class: 'code-menu-name' }, `${name}:${place.line}`), el('span', { class: 'code-menu-folder' }, parent))
+    item.addEventListener('click', () => {
+      close()
+      openCode(chat, chip, at)
+    })
+    return item
+  })
+  const menu = el('div', { class: 'code-menu', role: 'menu' }, el('div', { class: 'code-menu-head' }, `Open in ${editor.name}`), items)
+  const box = node.getBoundingClientRect()
+  document.body.append(menu)
+  const width = menu.offsetWidth
+  const height = menu.offsetHeight
+  menu.style.left = `${Math.max(8, Math.min(box.left, window.innerWidth - width - 8))}px`
+  menu.style.top = `${box.bottom + 4 + height > window.innerHeight - 8 ? Math.max(8, box.top - 4 - height) : box.bottom + 4}px`
+  items[0]?.focus()
+  const away = event => {
+    if (!menu.contains(event.target)) close()
+  }
+  const key = event => {
+    if (event.key === 'Escape') close()
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      event.preventDefault()
+      const at = items.indexOf(document.activeElement)
+      items[(at + (event.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length]?.focus()
+    }
+  }
+  // only a scroll that moves the chip closes it: other cards' chats scroll as Claude writes in them
+  const moved = event => {
+    if (event.target === document || event.target.contains?.(node)) close()
+  }
+  function close() {
+    menu.remove()
+    document.removeEventListener('pointerdown', away, true)
+    document.removeEventListener('keydown', key, true)
+    window.removeEventListener('scroll', moved, true)
+    node.focus?.({ preventScroll: true })
+  }
+  document.addEventListener('pointerdown', away, true)
+  document.addEventListener('keydown', key, true)
+  window.addEventListener('scroll', moved, true)
+}
 
 function markdown(text) {
   return el('div', { class: 'md' }, blocks(text).map(drawBlock))

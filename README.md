@@ -71,6 +71,10 @@ In Activity Monitor the board's server shows as **Claude Command Central** and t
 
 Every working agent and background command on the agent map has a **Stop**: click it, then click again within a few seconds, and that one ends while its session's turn goes on.
 
+## Opening code in your editor
+
+With **Settings → Terminal & editor → Open Claude's files and code in** set to an editor (IntelliJ IDEA or VS Code), the files, classes, methods and constants Claude names in its replies (`AbstractDuoNode.java`, `releasePushCall`, `pushCall.getPushSuccess()`) open in it where they are made: click one. A name made in a few places (an interface and its implementation) asks which. CCC looks for them in the session's folder, or in each repository in it for a folder of projects, with `git grep`; a chip that points nowhere, or at more than 8 places, stays plain text, and so does a plain word such as `run` unless it is called, `run()`. A getter that Lombok makes opens at its field. A file a step changed opens from that step too.
+
 ## Designs
 
 When Claude makes a design in a session (Claude Design), its card gets a **Design** button, with a dot while there are screens you have not looked at. It shows the design's screens in place of the chat, laid out as the canvas has them and scaled to the card, each a live page that follows Claude's changes; click one to see it large. **Open the canvas** opens the real canvas in Claude, for panning, comments and sharing: claude.ai does not let its canvas be shown inside another page, so the card shows the screens' own files, run walled off from the board.
