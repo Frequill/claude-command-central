@@ -1066,9 +1066,9 @@ function askToCloseTerminal(id, title, isEnded) {
 }
 
 /**
- * Run on a code block in a chat: the command runs in the session's terminal on the board. A new
- * one takes the place of the session's terminal that ended. The board stays where it is and the
- * cursor in the chat: the result shows under the code block.
+ * Run on a code block in a chat: the command runs in the session's terminal on the board. The
+ * board goes to the terminal as it opens, as to any new card; later runs are typed into it where it
+ * is. A new one takes the place of the session's terminal that ended. The cursor stays in the chat.
  */
 async function runFromChat(sessionId, command) {
   const started = await runCommand(sessionId, command)
@@ -1580,9 +1580,7 @@ function renderTiles(sessions, now, day, tags) {
   const started = awaited ?? [...arriving].find(id => !id.startsWith('t'))
   const isOwnStart = Boolean(awaited || (started && view.startedAt && Date.now() - view.startedAt < STARTED_WAIT_MS))
   if (isOwnStart && !awaited) view.startedAt = 0
-  // a chat's terminal for Run comes in quietly: its results show under the code blocks they ran from
-  const isRun = id => view.terminals.some(card => card.id === id && card.run)
-  const newest = isOwnStart ? started : [...arriving].filter(id => !isRun(id)).at(-1)
+  const newest = isOwnStart ? started : [...arriving].at(-1)
   if (newest && (isOwnStart || Date.now() - view.typedAt > TYPING_MS)) {
     setTimeout(() => window.dispatchEvent(new CustomEvent('ccc:show-session', { detail: { sessionId: newest } })), 300)
   }
