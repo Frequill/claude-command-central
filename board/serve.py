@@ -20,6 +20,7 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, quote, unquote, urlsplit
 
+import code_links
 import editors
 import keeper
 import mentions
@@ -143,6 +144,8 @@ MAX_SESSIONS = 300
 # a session's snapshot bigger than this is no snapshot the mod wrote
 MAX_SNAPSHOT_BYTES = 2_000_000
 MAX_BODY_BYTES = 1024
+# a reply's code chips, asked about at once: up to code_links.MOST_CHIPS of them
+MAX_CODE_LINKS_BODY_BYTES = 128 * 1024
 MAX_NOTES_BODY_BYTES = 200_000
 MAX_NOTES_TEXT = 20_000
 ACTION_HEADER = "X-CCC-Action"
@@ -1683,9 +1686,8 @@ def read_send_request(body: bytes):
 def session_files(session_id: str, typed: str, transcripts, lists) -> dict:
     """The files of a session's folder that match what was typed after "@", for its write box's menu.
     The folder is the one its transcript names; nothing when that cannot be told."""
-    path = transcripts.find(session_id) if isinstance(session_id, str) and SAFE_ID.match(session_id) else None
-    folder = folder_of(path) if path else None
-    if not folder or not os.path.isdir(folder):
+    folder = session_folder(transcripts, session_id)
+    if folder is None:
         return {"paths": [], "problem": "Its folder is not known yet."}
     return {"folder": folder, "paths": mentions.matches(mentions.with_folders(lists.files(folder)), typed[:200])}
 
@@ -2996,6 +2998,78 @@ def open_step_file(transcripts, data: dict, open_file=editors.open_file, install
     return {"ok": not problem, "editor": editor["name"], **({"problem": problem} if problem else {})}
 
 
+def session_folder(transcripts, session_id):
+    """The folder a session works in, from its own transcript; None when that cannot be told."""
+    path = transcripts.find(session_id) if isinstance(session_id, str) and SAFE_ID.match(session_id) else None
+    folder = folder_of(path) if path else None
+    return folder if folder and os.path.isdir(folder) else None
+
+
+class FoundCode:
+    """What the server last found for each folder's chips, kept a minute: a click on a chip opens what
+    the board was just shown at once, without searching the folder again."""
+
+    FRESH_S = 60
+    MOST_KEPT = 5000
+
+    def __init__(self, clock=time.time):
+        self.clock = clock
+        self.kept = {}
+        self.lock = threading.Lock()
+
+    def keep(self, folder: str, chips: list, places: dict):
+        now = self.clock()
+        with self.lock:
+            if len(self.kept) > self.MOST_KEPT:
+                self.kept = {key: value for key, value in self.kept.items() if now - value[0] < self.FRESH_S}
+            for chip in chips:
+                self.kept[(folder, chip)] = (now, places.get(chip, []))
+
+    def places(self, folder: str, chip: str):
+        with self.lock:
+            kept = self.kept.get((folder, chip))
+        return kept[1] if kept and self.clock() - kept[0] < self.FRESH_S else None
+
+
+FOUND_CODE = FoundCode()
+
+
+def code_places(transcripts, lists, data: dict, run=subprocess.run, found=FOUND_CODE) -> dict:
+    """Where the code chips of one of Claude's replies point in the session's folder, for the board
+    to make them links: {chip: [{path, line}]}, only for chips that point somewhere."""
+    chips = data.get("chips")
+    folder = session_folder(transcripts, data.get("sessionId"))
+    if folder is None or not isinstance(chips, list):
+        return {"places": {}}
+    chips = [chip for chip in chips[: code_links.MOST_CHIPS] if isinstance(chip, str)]
+    places = code_links.places_for(folder, chips, lists.files, run)
+    found.keep(folder, chips, places)
+    return {"places": places}
+
+
+def open_code(transcripts, lists, data: dict, open_file=editors.open_file, installed=editors.installed_editors, run=subprocess.run, found=FOUND_CODE) -> dict:
+    """Opens one place a code chip points at, in the editor asked for. The places are the ones the
+    server found for the chip (just now, or again here), so the page names only the chip and which of
+    its places, never a file."""
+    chip, at = data.get("chip"), data.get("at", 0)
+    folder = session_folder(transcripts, data.get("sessionId"))
+    if folder is None:
+        return {"ok": False, "problem": "The session's folder is not known."}
+    if not isinstance(chip, str) or not isinstance(at, int) or isinstance(at, bool):
+        return {"ok": False, "problem": "That could not be found."}
+    places = found.places(folder, chip)
+    if places is None:
+        places = code_links.places_for(folder, [chip], lists.files, run).get(chip, [])
+    if not 0 <= at < len(places):
+        return {"ok": False, "problem": f"{chip} is not in the folder any more."}
+    editor = editors.chosen_editor(data.get("editor"), installed())
+    if editor is None:
+        return {"ok": False, "problem": "No editor CCC knows is installed: IntelliJ IDEA or VS Code."}
+    place = places[at]
+    problem = open_file(editor, os.path.join(folder, place["path"]), place["line"])
+    return {"ok": not problem, "editor": editor["name"], **({"problem": problem} if problem else {})}
+
+
 class Handler(SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(BOARD_DIR), **kwargs)
@@ -3091,10 +3165,10 @@ class Handler(SimpleHTTPRequestHandler):
 
     def do_POST(self):
         route = self.path.split("?", 1)[0]
-        action = {"/api/remove": "remove", "/api/notes": "notes", "/api/send": "send", "/api/answer": "answer", "/api/approve": "approve", "/api/start": "start", "/api/pick-folder": "pick", "/api/interrupt": "interrupt", "/api/add": "add", "/api/hurry": "hurry", "/api/open-file": "open-file", "/api/caveman": "caveman", "/api/background/resume": "background-resume", "/api/background/forget": "background-forget", "/api/background/dismiss": "background-dismiss", "/api/background/mode": "background-mode", "/api/stop-run": "stop-run", "/api/upload": "upload", "/api/delete": "delete", **TERMINAL_ROUTES}.get(route)
+        action = {"/api/remove": "remove", "/api/notes": "notes", "/api/send": "send", "/api/answer": "answer", "/api/approve": "approve", "/api/start": "start", "/api/pick-folder": "pick", "/api/interrupt": "interrupt", "/api/add": "add", "/api/hurry": "hurry", "/api/open-file": "open-file", "/api/code-links": "code-links", "/api/open-code": "open-code", "/api/caveman": "caveman", "/api/background/resume": "background-resume", "/api/background/forget": "background-forget", "/api/background/dismiss": "background-dismiss", "/api/background/mode": "background-mode", "/api/stop-run": "stop-run", "/api/upload": "upload", "/api/delete": "delete", **TERMINAL_ROUTES}.get(route)
         if not is_local_host(self.headers.get("Host", ""), PORT) or action is None or not is_from_board(self.headers, PORT, action):
             return self.send_error(403 if action else 404)
-        limits = {"remove": MAX_BODY_BYTES, "notes": MAX_NOTES_BODY_BYTES, "send": MAX_SEND_BODY_BYTES, "answer": MAX_ANSWER_BODY_BYTES, "approve": MAX_BODY_BYTES, "start": MAX_START_BODY_BYTES, "pick": MAX_BODY_BYTES, "interrupt": MAX_BODY_BYTES, "add": MAX_BODY_BYTES, "hurry": MAX_BODY_BYTES, "open-file": MAX_BODY_BYTES, "caveman": MAX_BODY_BYTES, "background-resume": MAX_START_BODY_BYTES, "background-forget": MAX_BODY_BYTES, "background-dismiss": MAX_BODY_BYTES, "background-mode": MAX_BODY_BYTES, "stop-run": MAX_BODY_BYTES, "delete": MAX_BODY_BYTES}
+        limits = {"remove": MAX_BODY_BYTES, "notes": MAX_NOTES_BODY_BYTES, "send": MAX_SEND_BODY_BYTES, "answer": MAX_ANSWER_BODY_BYTES, "approve": MAX_BODY_BYTES, "start": MAX_START_BODY_BYTES, "pick": MAX_BODY_BYTES, "interrupt": MAX_BODY_BYTES, "add": MAX_BODY_BYTES, "hurry": MAX_BODY_BYTES, "open-file": MAX_BODY_BYTES, "code-links": MAX_CODE_LINKS_BODY_BYTES, "open-code": MAX_BODY_BYTES * 2, "caveman": MAX_BODY_BYTES, "background-resume": MAX_START_BODY_BYTES, "background-forget": MAX_BODY_BYTES, "background-dismiss": MAX_BODY_BYTES, "background-mode": MAX_BODY_BYTES, "stop-run": MAX_BODY_BYTES, "delete": MAX_BODY_BYTES}
         if action.startswith("terminal-"):
             if not has_terminal_key(self.headers, TERMINALS.key):
                 return self.send_error(403)
@@ -3256,6 +3330,10 @@ class Handler(SimpleHTTPRequestHandler):
             return self.send_json({"ok": is_hurried, **({} if is_hurried else {"problem": "It has gone in already."})})
         if action == "open-file":
             return self.send_json(open_step_file(TRANSCRIPTS, json_object(body) or {}))
+        if action == "code-links":
+            return self.send_json(code_places(TRANSCRIPTS, FILE_LISTS, json_object(body) or {}))
+        if action == "open-code":
+            return self.send_json(open_code(TRANSCRIPTS, FILE_LISTS, json_object(body) or {}))
         if action == "caveman":
             request = read_caveman_request(body)
             if request is None:
