@@ -1,3 +1,5 @@
+import { cleanCustom } from './keys.js'
+
 // What the board computes from the sessions' snapshots: no DOM here, so node can test it.
 
 export const STALE_MS = 30_000
@@ -166,7 +168,7 @@ export function editorChoice(setting, apps) {
   return named ?? { id: 'auto', name: known.length === 1 ? known[0].name : 'your editor' }
 }
 
-export const SETTINGS_TABS = ['look', 'board', 'behaviour', 'terminal', 'background']
+export const SETTINGS_TABS = ['look', 'board', 'behaviour', 'terminal', 'keys', 'background']
 
 // wheel events closer together than this are one movement: a push of the wheel and the glide a Mac adds after it
 export const WHEEL_GAP_MS = 120
@@ -1258,6 +1260,10 @@ export function normalizeSettings(raw) {
     terminalApp: TERMINAL_APPS.includes(value.terminalApp) ? value.terminalApp : 'auto',
     // file names in opened steps open the file in this editor; off unless the person turns it on
     editor: EDITOR_CHOICES.includes(value.editor) ? value.editor : 'off',
+    // the board's keyboard shortcuts (⌘T, ⌘W, ⌥⌘arrows…); off unless the person turns them on
+    shortcuts: value.shortcuts === true,
+    // the keyboard shortcuts the person changed, { commandId: [shortcut] }; the rest keep their defaults (keys.js)
+    keys: cleanCustom(value.keys),
   }
 }
 

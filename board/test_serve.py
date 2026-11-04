@@ -212,6 +212,32 @@ class StartModeTest(unittest.TestCase):
         self.assertEqual([serve.is_running_background(Terms(), one) for one in ("s1", "s2", "s3")], [False, False, True])
 
 
+class NamesTest(unittest.TestCase):
+    """Names the person gives cards in CCC."""
+
+    def test_a_name_given_in_ccc_comes_before_any_other_and_an_empty_one_takes_it_away(self):
+        with tempfile.TemporaryDirectory() as folder:
+            names = serve.Names(Path(folder) / "names.json")
+            names.set("s1", "Unit list toggle")
+            names.set("s2", "Other")
+            self.assertEqual(names.load(), {"s1": "Unit list toggle", "s2": "Other"})
+            shown = serve.with_names([{"sessionId": "s1", "title": "A summary"}, {"sessionId": "s3", "title": "Kept"}], names.load())
+            self.assertEqual(shown, [{"sessionId": "s1", "title": "Unit list toggle", "isNamedInCcc": True}, {"sessionId": "s3", "title": "Kept"}])
+            names.set("s1", "")
+            self.assertEqual(names.load(), {"s2": "Other"})
+            (Path(folder) / "names.json").write_text('{"names": {"../x": "bad", "s4": 5, "s5": "  "}}')
+            self.assertEqual(names.load(), {})
+
+    def test_a_name_is_one_line_with_single_spaces_and_not_too_long(self):
+        self.assertEqual(serve.clean_name("  Fix   the\nlogin  "), "Fix the login")
+        self.assertEqual(len(serve.clean_name("x" * 500)), serve.NAME_MAX)
+        self.assertEqual(serve.clean_name(5), "")
+
+    def test_a_rename_shows_as_a_note_not_a_message(self):
+        text = "<command-name>/rename</command-name>\n<command-args>Unit list toggle</command-args>"
+        self.assertEqual(serve.user_items(text, 5), [{"kind": "note", "text": "Renamed to Unit list toggle", "at": 5}])
+
+
 class BoardFilesTest(unittest.TestCase):
     def test_every_module_the_board_imports_is_served(self):
         served = set(serve.BOARD_FILES.values())
@@ -285,6 +311,27 @@ class TranscriptTest(unittest.TestCase):
         ])
         self.assertEqual(serve.Transcripts(self.projects).describe("s9")["entrypoint"], "claude-vscode")
         self.assertEqual(serve.facts_in('{"entrypoint": "Bad Value!"}'), {})
+
+    def test_a_session_with_no_name_is_named_by_claudes_summary_not_its_first_message(self):
+        self.transcript("s7", [
+            {"type": "user", "message": {"content": "Allright, I have this task: the PWA needs a toggle"}},
+            {"type": "ai-title", "aiTitle": "Older summary", "sessionId": "s7"},
+            {"type": "ai-title", "aiTitle": "PWA unit list toggle", "sessionId": "s7"},
+        ])
+        self.assertEqual(serve.Transcripts(self.projects).describe("s7"), {"title": "PWA unit list toggle", "isSummaryTitle": True})
+        # a name given (/rename, the Claude app's) wins over any summary
+        self.transcript("s8", [
+            {"type": "custom-title", "customTitle": "My own name", "sessionId": "s8"},
+            {"type": "ai-title", "aiTitle": "A summary written later", "sessionId": "s8"},
+        ])
+        self.assertEqual(serve.Transcripts(self.projects).describe("s8"), {"title": "My own name"})
+
+    def test_a_summary_near_the_end_does_not_hide_a_name_given_further_back(self):
+        path = self.transcript("s6", [{"type": "custom-title", "customTitle": "Given name", "sessionId": "s6"}])
+        with path.open("a") as handle:
+            handle.write(json.dumps({"type": "assistant", "pad": "x" * (serve.TAIL_BYTES + 10)}) + "\n")
+            handle.write(json.dumps({"type": "ai-title", "aiTitle": "Summary in the tail", "sessionId": "s6"}) + "\n")
+        self.assertEqual(serve.Transcripts(self.projects).describe("s6"), {"title": "Given name"})
 
     def test_finds_facts_beyond_the_tail(self):
         path = self.transcript("s2", [{"type": "custom-title", "customTitle": "Early name", "sessionId": "s2"}])

@@ -34,6 +34,7 @@ SESSIONS_DIR = Path(os.environ.get("CCC_SESSIONS_DIR", CCC_DIR / "sessions"))
 REMOVED_FILE = Path(os.environ.get("CCC_REMOVED_FILE", CCC_DIR / "removed.json"))
 NOTES_FILE = Path(os.environ.get("CCC_NOTES_FILE", CCC_DIR / "notes.json"))
 PINNED_FILE = Path(os.environ.get("CCC_PINNED_FILE", CCC_DIR / "pinned.json"))
+NAMES_FILE = Path(os.environ.get("CCC_NAMES_FILE", CCC_DIR / "names.json"))
 PROJECTS_DIR = Path(os.environ.get("CCC_PROJECTS_DIR", Path.home() / ".claude" / "projects"))
 APP_SESSIONS_DIR = Path(os.environ.get("CCC_APP_SESSIONS_DIR", Path.home() / "Library" / "Application Support" / "Claude" / "claude-code-sessions"))
 APP_SESSION_ID = re.compile(r"^local_[A-Za-z0-9-]{1,64}$")
@@ -122,6 +123,8 @@ COMMAND_NAME_TAG = re.compile(r"<command-name>\s*(/?[^<\s]+)\s*</command-name>")
 COMMAND_ARGS_TAG = re.compile(r"<command-args>(.*?)</command-args>", re.S)
 # "/model opus", "/effort high": a setting of the session's, shown as a note in the chat
 SETTING_COMMAND = re.compile(r"^/(model|effort)\s+([A-Za-z0-9._\[\]-]{1,80})$")
+# "/rename Fix the login bug": a new name for the conversation, shown as a note in the chat
+RENAME_COMMAND = re.compile(r"^/rename\s+(.{1,200})$", re.S)
 # the big base64 strings of a transcript line, which the chat never shows: images, thinking signatures
 PAYLOAD = re.compile(rb'("(?:data|base64|signature)":\s*")[A-Za-z0-9+/=]{1024,}"')
 # how the mod names the images of a message written in CCC (hooks/inbox.ts, promptFor)
@@ -158,7 +161,7 @@ BOARD_FILES = {"/": "index.html", "/index.html": "index.html", "/board.css": "bo
                "/layout.js": "layout.js", "/settings.js": "settings.js", "/notes.js": "notes.js",
                "/decor.js": "decor.js", "/dragon.js": "dragon.js",
                "/arrivals.js": "arrivals.js", "/chat.js": "chat.js", "/chat-logic.js": "chat-logic.js",
-               "/markdown.js": "markdown.js", "/placement.js": "placement.js",
+               "/markdown.js": "markdown.js", "/placement.js": "placement.js", "/keys.js": "keys.js", "/refocus.js": "refocus.js",
                "/eva-logo.png": "eva-logo.png",
                "/terminal.js": "terminal.js", "/xterm.js": "xterm.js", "/xterm.css": "xterm.css", "/xterm-fit.js": "xterm-fit.js",
                "/grid.js": "grid.js", "/gridstack.js": "gridstack.js", "/gridstack.css": "gridstack.css",
@@ -259,6 +262,52 @@ def split_removed(sessions: list, removed: dict):
         else:
             hidden.append({"sessionId": session_id, "today": session.get("today")})
     return shown, hidden, back
+
+
+class Names:
+    """Names the person gave cards in CCC, { sessionId: name }: the card's name before any other,
+    at once, for any session (one in the Claude app, a terminal, the background)."""
+
+    def __init__(self, path: Path):
+        self.path = path
+        self.lock = threading.Lock()
+
+    def load(self) -> dict:
+        try:
+            data = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        names = data.get("names") if isinstance(data, dict) else None
+        if not isinstance(names, dict):
+            return {}
+        return {key: name for key, name in names.items() if SAFE_ID.match(key) and isinstance(name, str) and name.strip()}
+
+    def set(self, session_id: str, name: str):
+        """Keeps the name; an empty one takes it away, and the card is named as before."""
+        with self.lock:
+            names = self.load()
+            if name:
+                names[session_id] = name
+            else:
+                names.pop(session_id, None)
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = self.path.with_suffix(".tmp")
+            temporary.write_text(json.dumps({"names": names}), encoding="utf-8")
+            temporary.replace(self.path)
+
+
+# the longest name a card is given in CCC
+NAME_MAX = 120
+
+
+def clean_name(text) -> str:
+    """A name as kept: one line, the spaces in it single, at most NAME_MAX long; '' for none."""
+    return " ".join(str(text).split())[:NAME_MAX] if isinstance(text, str) else ""
+
+
+def with_names(sessions: list, names: dict) -> list:
+    """Each session with the name the person gave its card in CCC, over any other it has."""
+    return [{**session, "title": names[session["sessionId"]], "isNamedInCcc": True} if isinstance(session, dict) and session.get("sessionId") in names else session for session in sessions]
 
 
 class Pins:
@@ -562,8 +611,13 @@ class Transcripts:
 def read_transcript_facts(path: Path, size: int) -> dict:
     """The newest name and permission mode in a transcript: its tail first, the whole file if needed."""
     facts = facts_in(read_tail(path, size, TAIL_BYTES))
-    if ("title" not in facts or "permissionMode" not in facts) and TAIL_BYTES < size <= WHOLE_FILE_LIMIT:
-        facts = {**facts_in(read_tail(path, size, size)), **facts}
+    # a summary in the tail does not hide a name given further back (/rename, the app's): that one wins
+    if ("title" not in facts or facts.get("isSummaryTitle") or "permissionMode" not in facts) and TAIL_BYTES < size <= WHOLE_FILE_LIMIT:
+        whole = facts_in(read_tail(path, size, size))
+        named = {"title": whole["title"]} if "title" in whole and not whole.get("isSummaryTitle") else {}
+        facts = {**whole, **facts, **named}
+        if named:
+            facts.pop("isSummaryTitle", None)
     if "permissionMode" not in facts and size > WHOLE_FILE_LIMIT:
         mode = last_mode_before(path, size - TAIL_BYTES)
         if mode:
@@ -718,20 +772,30 @@ def read_bytes(path: Path, start: int, length: int) -> bytes:
 
 
 def facts_in(text: str) -> dict:
-    """The last name record (whole JSON lines only), the last permission mode, and where the session
-    was started (the Claude app, VS Code, a terminal), as Claude Code writes it on each record."""
+    """The session's name, the last permission mode, and where the session was started (the Claude
+    app, VS Code, a terminal), as Claude Code writes it on each record. The name is the last one given
+    (by /rename, or the Claude app's own), else the last summary Claude Code wrote of the conversation
+    (its ai-title): a terminal or background session gets one too, and is not named after the start of
+    its first message. Whole JSON lines only."""
     facts = {}
+    summary = None
     for line in reversed(text.splitlines()):
-        if "custom-title" not in line:
+        if "custom-title" not in line and (summary is not None or "ai-title" not in line):
             continue
         try:
             record = json.loads(line)
         except ValueError:
             continue
-        title = record.get("customTitle") if isinstance(record, dict) and record.get("type") == "custom-title" else None
-        if isinstance(title, str) and title.strip():
-            facts["title"] = title.strip()[:200]
+        if not isinstance(record, dict):
+            continue
+        if record.get("type") == "custom-title" and isinstance(record.get("customTitle"), str) and record["customTitle"].strip():
+            facts["title"] = record["customTitle"].strip()[:200]
             break
+        if summary is None and record.get("type") == "ai-title" and isinstance(record.get("aiTitle"), str) and record["aiTitle"].strip():
+            summary = record["aiTitle"].strip()[:200]
+    if "title" not in facts and summary:
+        facts["title"] = summary
+        facts["isSummaryTitle"] = True
     modes = MODE_FIELD.findall(text)
     if modes:
         facts["permissionMode"] = modes[-1]
@@ -1481,6 +1545,9 @@ def user_items(content, at) -> list:
     text = SYSTEM_BLOCK.sub("", "\n".join(texts)).strip()
     text = command_line(text) or text
     # a model or effort picked in CCC's session menu (or typed) is a setting changed, not words to Claude
+    renamed = RENAME_COMMAND.match(text)
+    if renamed:
+        return [{"kind": "note", "text": f"Renamed to {clean_name(renamed.group(1))}", "at": at}]
     setting = SETTING_COMMAND.match(text)
     if setting:
         return [{"kind": "note", "setting": setting.group(1), "value": setting.group(2), "text": f"{setting.group(1).capitalize()} set to {setting.group(2)}", "at": at}]
@@ -2878,6 +2945,7 @@ ANSWERS = Answers(ANSWERS_DIR, TRANSCRIPTS)
 APPROVALS = Approvals(APPROVALS_DIR)
 REMOVALS = Removals(REMOVED_FILE)
 PINS = Pins(PINNED_FILE)
+NAMES = Names(NAMES_FILE)
 DELETED = Deleted(DELETED_FILE)
 SCREEN_BOXES = {}
 CAVEMAN = Caveman(CAVEMAN_DIR)
@@ -3208,6 +3276,7 @@ class Handler(SimpleHTTPRequestHandler):
             editor_apps = [{"id": editor["id"], "name": editor["name"]} for editor in editors.installed_editors()]
             now_ms = int(time.time() * 1000)
             cards = with_screen_modes(TERMINALS, named_backgrounds(reveal_waiting(TERMINALS, TERMINALS.list(), SESSIONS_DIR, now_ms), TRANSCRIPTS, REMOVALS.load()))
+            payload["sessions"] = with_names(payload["sessions"], NAMES.load())
             payload["sessions"] = with_choices(with_designs(with_screen_boxes(payload["sessions"], cards, now_ms, SCREEN_BOXES), TRANSCRIPTS), CHOICES_DIR)
             lost, seen = KEEPER_WATCH.look(TERMINALS.keeper_id, cards, now_ms)
             stopped = stopped_backgrounds(BACKGROUNDS, cards, SESSIONS_DIR, TRANSCRIPTS, now_ms, lost)
@@ -3285,10 +3354,10 @@ class Handler(SimpleHTTPRequestHandler):
 
     def do_POST(self):
         route = self.path.split("?", 1)[0]
-        action = {"/api/remove": "remove", "/api/notes": "notes", "/api/send": "send", "/api/answer": "answer", "/api/approve": "approve", "/api/start": "start", "/api/pick-folder": "pick", "/api/interrupt": "interrupt", "/api/add": "add", "/api/hurry": "hurry", "/api/open-file": "open-file", "/api/code-links": "code-links", "/api/open-code": "open-code", "/api/caveman": "caveman", "/api/background/resume": "background-resume", "/api/background/forget": "background-forget", "/api/background/dismiss": "background-dismiss", "/api/background/mode": "background-mode", "/api/stop-run": "stop-run", "/api/upload": "upload", "/api/delete": "delete", "/api/choose": "choose", **TERMINAL_ROUTES}.get(route)
+        action = {"/api/remove": "remove", "/api/notes": "notes", "/api/send": "send", "/api/answer": "answer", "/api/approve": "approve", "/api/start": "start", "/api/pick-folder": "pick", "/api/interrupt": "interrupt", "/api/add": "add", "/api/hurry": "hurry", "/api/open-file": "open-file", "/api/code-links": "code-links", "/api/open-code": "open-code", "/api/caveman": "caveman", "/api/background/resume": "background-resume", "/api/background/forget": "background-forget", "/api/background/dismiss": "background-dismiss", "/api/background/mode": "background-mode", "/api/stop-run": "stop-run", "/api/upload": "upload", "/api/delete": "delete", "/api/choose": "choose", "/api/rename": "rename", **TERMINAL_ROUTES}.get(route)
         if not is_local_host(self.headers.get("Host", ""), PORT) or action is None or not is_from_board(self.headers, PORT, action):
             return self.send_error(403 if action else 404)
-        limits = {"remove": MAX_BODY_BYTES, "notes": MAX_NOTES_BODY_BYTES, "send": MAX_SEND_BODY_BYTES, "answer": MAX_ANSWER_BODY_BYTES, "approve": MAX_BODY_BYTES, "start": MAX_START_BODY_BYTES, "pick": MAX_BODY_BYTES, "interrupt": MAX_BODY_BYTES, "add": MAX_BODY_BYTES, "hurry": MAX_BODY_BYTES, "open-file": MAX_BODY_BYTES, "code-links": MAX_CODE_LINKS_BODY_BYTES, "open-code": MAX_BODY_BYTES * 2, "caveman": MAX_BODY_BYTES, "background-resume": MAX_START_BODY_BYTES, "background-forget": MAX_BODY_BYTES, "background-dismiss": MAX_BODY_BYTES, "background-mode": MAX_BODY_BYTES, "stop-run": MAX_BODY_BYTES, "delete": MAX_BODY_BYTES, "choose": MAX_BODY_BYTES}
+        limits = {"remove": MAX_BODY_BYTES, "notes": MAX_NOTES_BODY_BYTES, "send": MAX_SEND_BODY_BYTES, "answer": MAX_ANSWER_BODY_BYTES, "approve": MAX_BODY_BYTES, "start": MAX_START_BODY_BYTES, "pick": MAX_BODY_BYTES, "interrupt": MAX_BODY_BYTES, "add": MAX_BODY_BYTES, "hurry": MAX_BODY_BYTES, "open-file": MAX_BODY_BYTES, "code-links": MAX_CODE_LINKS_BODY_BYTES, "open-code": MAX_BODY_BYTES * 2, "caveman": MAX_BODY_BYTES, "background-resume": MAX_START_BODY_BYTES, "background-forget": MAX_BODY_BYTES, "background-dismiss": MAX_BODY_BYTES, "background-mode": MAX_BODY_BYTES, "stop-run": MAX_BODY_BYTES, "delete": MAX_BODY_BYTES, "choose": MAX_BODY_BYTES, "rename": MAX_BODY_BYTES}
         if action.startswith("terminal-"):
             if not has_terminal_key(self.headers, TERMINALS.key):
                 return self.send_error(403)
@@ -3454,6 +3523,16 @@ class Handler(SimpleHTTPRequestHandler):
             return self.send_json({"ok": is_hurried, **({} if is_hurried else {"problem": "It has gone in already."})})
         if action == "open-file":
             return self.send_json(open_step_file(TRANSCRIPTS, json_object(body) or {}))
+        if action == "rename":
+            data = json_object(body) or {}
+            session_id, name = data.get("sessionId"), clean_name(data.get("name"))
+            if not isinstance(session_id, str) or not SAFE_ID.match(session_id):
+                return self.send_error(400)
+            NAMES.set(session_id, name)
+            # Claude's own lists (/resume, the app's) get the name too, from a session that takes messages
+            if name and data.get("tellClaude") is True:
+                INBOX.send(session_id, f"/rename {name}", [], "queue", int(time.time() * 1000), [])
+            return self.send_json({"ok": True, "name": name})
         if action == "choose":
             data = json_object(body) or {}
             problem = choose(CHOICES_DIR, data.get("sessionId"), data)
@@ -3486,6 +3565,7 @@ class Handler(SimpleHTTPRequestHandler):
                 sweep.daemon = True
                 sweep.start()
             PINS.drop(session_id)
+            NAMES.set(session_id, "")
             BACKGROUNDS.forget(session_id)
             REMOVALS.forget([session_id])
             return self.send_json({"ok": True, "moved": moved})

@@ -96,6 +96,11 @@ export const register: Register = on => {
       async () => Boolean((await read($, turn)).isRunning),
       text => cavemanDressed($, text),
       runId => stopRun($, runId),
+      // the turn that ended with Claude's question and its buttons still up: what was queued while it ran waits for the answer
+      async () => {
+        const now = await read($, turn)
+        return !now.isRunning && (now.choices?.length ?? 0) > 0 && now.startedAt && now.endedAt ? { from: now.startedAt, to: now.endedAt } : undefined
+      },
     ).catch(() => undefined)
     await publishCommands($).catch(() => undefined)
     startTicking($)

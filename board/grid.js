@@ -59,16 +59,17 @@ export function cellsOf(pixels, boardWidth) {
 }
 
 /**
- * Where a new card goes: at the very bottom of the board, where new things are added. It goes under
- * the half (left or right) that ends lowest: the board lifts cards into any room above them, so under
- * the other half it would rise into the room there instead of staying at the bottom.
+ * Where a new card goes: the board fills row by row, as a page is read. It goes under the half (left
+ * or right) that ends highest, the left one when both end alike, so the first card is at the top on
+ * the left, the second beside it, the third under the first, and so on; never stacked under one half
+ * with room left beside it.
  */
-export function lowestSpot(nodes) {
+export function nextSpot(nodes) {
   const halves = [0, FIRST.w].map(x => ({
     x,
     bottom: Math.max(0, ...nodes.filter(node => node.x < x + FIRST.w && node.x + node.w > x).map(node => node.y + node.h)),
   }))
-  const spot = halves[1].bottom > halves[0].bottom ? halves[1] : halves[0]
+  const spot = halves[1].bottom < halves[0].bottom ? halves[1] : halves[0]
   return { ...FIRST, x: spot.x, y: spot.bottom }
 }
 
@@ -402,7 +403,7 @@ export function makeGrid(box, { onStart, onEnd, oldPlace, wobbles, animates, onA
         placedInGap.set(id, Date.now())
       }
       const place = spot ? { x: spot.x, y: spot.y, w: spot.w, h: spot.h } : kept[id] ?? cellsOf(oldPlace?.(id), box.clientWidth)
-      grid.makeWidget(el, { id, minW: LEAST.w, minH: LEAST.h, ...(place ?? lowestSpot(grid.engine.nodes)) })
+      grid.makeWidget(el, { id, minW: LEAST.w, minH: LEAST.h, ...(place ?? nextSpot(grid.engine.nodes)) })
       items.set(id, { el, card })
     },
     /** Takes a card off the grid; the cards below rise into its place. */

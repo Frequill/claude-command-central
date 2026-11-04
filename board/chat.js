@@ -7,6 +7,8 @@
 
 import * as L from './board-logic.js'
 import * as C from './chat-logic.js'
+import { optionNumber } from './keys.js'
+import { rememberFocus, restoreFocus } from './refocus.js'
 import { designTab } from './design.js'
 import { blocks } from './markdown.js'
 
@@ -90,6 +92,73 @@ export function dropChat(sessionId) {
 /** Puts the cursor in an expanded card's write box, leaving the page where it is. */
 export function focusChat(sessionId) {
   chats.get(sessionId)?.text.focus({ preventScroll: true })
+}
+
+/** The card's name in its header: a double-click (or the Rename shortcut) gives it a new one. */
+function titleNode(chat, session, title) {
+  const node = el('span', { class: 'chat-title', title: `${title}: double-click to rename it` }, title)
+  node.addEventListener('dblclick', () => renameChat(chat.id))
+  return node
+}
+
+/**
+ * Renames a card: its name in the header becomes a field to type in. Enter (or leaving the field)
+ * keeps the new name, Esc keeps the old one, and an empty name goes back to the one the session has
+ * (its summary). A session that runs CCC's mod is told too (/rename), so Claude's own lists show it.
+ */
+export function renameChat(sessionId) {
+  const chat = chats.get(sessionId)
+  const current = chat?.head.querySelector('.chat-title')
+  if (!chat || !current || chat.isRenaming) return
+  const session = context.sessionOf(chat.id)
+  chat.isRenaming = true
+  const field = el('input', { class: 'chat-title-field', type: 'text', maxlength: '120', 'aria-label': 'New name for this card', spellcheck: 'false' })
+  field.value = String(session?.title ?? current.textContent ?? '').trim()
+  current.replaceWith(field)
+  field.focus()
+  field.select()
+  let isDone = false
+  const finish = async keep => {
+    if (isDone) return
+    isDone = true
+    const name = field.value.trim()
+    const changed = keep && name !== String(session?.title ?? '').trim()
+    if (changed) {
+      try {
+        await fetch('/api/rename', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-CCC-Action': 'rename' },
+          body: JSON.stringify({ sessionId: chat.id, name, tellClaude: Boolean(session?.takesMessages) }),
+        })
+      } catch {
+        say(chat, 'Could not rename it. Is the board still running?')
+      }
+    }
+    chat.isRenaming = false
+    chat.headSignature = ''
+    if (changed) await context.refreshBoard?.()
+    drawHead(chat, context.sessionOf(chat.id))
+    chat.text.focus({ preventScroll: true })
+  }
+  field.addEventListener('keydown', event => {
+    event.stopPropagation()
+    if (event.key === 'Enter') {
+      event.preventDefault()
+      finish(true)
+    } else if (event.key === 'Escape') {
+      event.preventDefault()
+      finish(false)
+    }
+  })
+  field.addEventListener('blur', () => finish(true))
+}
+
+/** Scrolls a card's chat to its newest messages, and it follows Claude from there, as at the bottom. */
+export function showNewest(sessionId) {
+  const chat = chats.get(sessionId)
+  if (!chat) return
+  chat.isFollowing = true
+  toNewest(chat)
 }
 
 /** Called on every board update: each expanded card's header, live part, box and facts follow it. */
@@ -209,6 +278,8 @@ function buildCard(sessionId) {
   text.addEventListener('blur', () => setTimeout(() => hideSlashMenu(chat), 150))
   text.addEventListener('keydown', event => {
     if (chat.menuFor === 'mention' ? mentionKey(chat, event) : slashKey(chat, event)) return
+    // with nothing written yet, a number answers the box that waits (as Claude's own boxes take one)
+    if (!text.value && answerByNumber(chat, event)) return
     if (takeSuggestion(chat, event)) return
     if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
       event.preventDefault()
@@ -433,13 +504,18 @@ async function drawSetup(chat, session) {
         ...options.map(option => {
           const isOn = C.sameChoice(option, current)
           const button = el('button', { type: 'button', class: `setup-choice${isOn ? ' on' : ''}`, 'aria-pressed': String(isOn) }, option)
-          button.addEventListener('click', () => run(option, button))
+          button.addEventListener('click', () => {
+            chat.setupFocus = button
+            run(option, button)
+          })
           return button
         }),
       ),
     )
   // a pick is kept for this session alone, and its mod sends the very next request with it
   const pick = async (choice, button) => {
+    // the button pressed is where the cursor goes back to, once the menu is drawn again
+    chat.setupFocus = button
     button.disabled = true
     const problem = await choose(chat, choice)
     const versions = context.modelVersions?.() ?? {}
@@ -475,9 +551,27 @@ async function drawSetup(chat, session) {
       ),
     ),
   )
+  // Esc closes the menu and goes back to the write box, as in an app's menus
+  panel.addEventListener('keydown', event => {
+    if (event.key !== 'Escape') return
+    event.preventDefault()
+    event.stopPropagation()
+    toggleSetup(chat)
+    chat.text.focus({ preventScroll: true })
+  })
+  // drawn again after a pick: the cursor stays on the same button in the new menu, so the arrow keys go
+  // on. A pick switches its button off while it works, which drops the focus onto the page: then the
+  // button the cursor was on last is the one
+  const active = document.activeElement
+  const was = chat.setup?.contains(active) ? active : active === document.body ? chat.setupFocus : null
+  const kept = rememberFocus(chat.setup, was)
+  panel.addEventListener('focusin', event => {
+    chat.setupFocus = event.target
+  })
   chat.setup?.remove()
   chat.setup = panel
   chat.head.after(panel)
+  restoreFocus(panel, kept)
 }
 
 /** The mode of a session in CCC's background, to pick: CCC presses Shift+Tab in its terminal until Claude shows it. */
@@ -487,6 +581,7 @@ function backgroundModeRow(chat, current, isWaitingToRun = false) {
     const button = el('button', { type: 'button', class: `setup-choice${isOn ? ' on' : ''}`, 'aria-pressed': String(isOn) }, label)
     button.addEventListener('click', async () => {
       if (id === current) return
+      chat.setupFocus = button
       for (const one of buttons) one.disabled = true
       say(chat, isWaitingToRun ? `Claude starts in ${label} mode\u2026` : `Switching to ${label}\u2026`)
       try {
@@ -855,6 +950,8 @@ function placeButtons(text) {
 }
 
 function drawHead(chat, session) {
+  // while the person types a new name in it, the header stays as it is
+  if (chat.isRenaming) return
   const id = chat.id
   const title = context.titleOf(id) ?? session?.folder ?? 'Session'
   const state = session ? L.sessionState(session, Date.now()) : 'ended'
@@ -951,7 +1048,7 @@ function drawHead(chat, session) {
   designButton?.addEventListener('click', () => toggleDesign(chat))
   const parts = [
     el('span', { class: 'dot', style: `background:${context.colorOf(id)}`, 'aria-hidden': 'true' }),
-    el('span', { class: 'chat-title' }, title),
+    titleNode(chat, session, title),
     source ? el('span', { class: `source source-${source.kind}` }, source.label) : null,
     el('span', { class: 'chat-where' }, [session?.folder, session?.branch].filter(Boolean).join(' · ')),
     el('span', { class: `pill ${state === 'working' ? 'pill-work live' : state === 'needs-you' ? 'pill-wait' : 'pill-done'}` }, L.STATE_LABEL[state] ?? state),
@@ -1137,6 +1234,7 @@ function drawQuestion(chat, item) {
     send.disabled = !C.isDraftReady(item.questions, draft)
   }
   send.addEventListener('click', () => sendAnswer(chat, item, draft, redraw))
+  node.addEventListener('keydown', event => pickByNumber(chat, item, event))
   node.append(
     el(
       'div',
@@ -1152,12 +1250,17 @@ function drawQuestion(chat, item) {
 /** One question to answer here: its options to click, and Other for words of the person's own. */
 function drawAnswerable(question, part, index, isLocked, change, typed) {
   const role = question.multiSelect ? 'checkbox' : 'radio'
+  // with the keyboard shortcuts on, each option shows the number key that picks it
+  const isNumbered = Boolean(context.shortcutsOn?.())
+  let number = 0
   const option = (label, description, isChosen, onClick) => {
+    number += 1
     const button = el(
       'button',
       { type: 'button', role, class: `q-option${isChosen ? ' chosen' : ''}`, 'aria-checked': String(isChosen), disabled: isLocked },
       el('span', { class: 'q-mark', 'aria-hidden': 'true' }),
       el('span', { class: 'q-option-text' }, el('span', { class: 'q-label' }, label), description ? el('span', { class: 'q-desc' }, description) : null),
+      isNumbered && number <= 9 ? el('span', { class: 'q-number', 'aria-hidden': 'true' }, String(number)) : null,
     )
     button.addEventListener('click', onClick)
     return button
@@ -1229,6 +1332,37 @@ async function sendAnswer(chat, item, draft, redraw) {
     const current = chat.root.querySelector(`[data-box="${CSS.escape(item.toolId)}"]`)
     if (current) current.replaceWith(drawQuestion(chat, item))
   }
+}
+
+/**
+ * A number key in a question box, with the keyboard shortcuts on: picks that option of the question
+ * the cursor is in (the first one when it is on the box). One question with one choice is sent at
+ * once, as in Claude's own box; else the cursor goes on to the next question, or to Send answer.
+ * "Other" opens its field to write in. In a field to write in, numbers are typed as always.
+ */
+function pickByNumber(chat, item, event) {
+  if (!context.shortcutsOn?.() || event.target.closest?.('textarea, input')) return
+  const n = optionNumber(event)
+  if (!n) return
+  const box = event.currentTarget
+  const ones = [...box.querySelectorAll('.q-one')]
+  const one = event.target.closest?.('.q-one') ?? ones[0]
+  const at = ones.indexOf(one)
+  const button = [...(one?.querySelectorAll('.q-option') ?? [])][n - 1]
+  if (!button || button.disabled) return
+  event.preventDefault()
+  event.stopPropagation()
+  const question = item.questions[at]
+  const isOther = n === question.options.length + 1
+  // the pick draws the box again: the cursor goes on in the new one
+  button.click()
+  if (isOther) return
+  const fresh = chat.root.querySelector(`[data-box="${CSS.escape(item.toolId)}"]`)
+  if (!fresh) return
+  if (item.questions.length === 1 && !question.multiSelect) return fresh.querySelector('.q-send:not(:disabled)')?.click()
+  const freshOnes = fresh.querySelectorAll('.q-one')
+  const next = question.multiSelect ? freshOnes[at]?.querySelectorAll('.q-option')[n - 1] : (freshOnes[at + 1]?.querySelector('.q-option') ?? fresh.querySelector('.q-send'))
+  next?.focus()
 }
 
 function drawOneQuestion(question, answer) {
@@ -1439,7 +1573,9 @@ function drawPending(chat, message) {
     'li',
     { class: 'msg msg-you pending' },
     el('div', { class: 'msg-bubble' }, message.text ? promptText(chat, message.text) : null, message.images ? el('span', { class: 'msg-bubble-images' }, message.images === 1 ? '1 image' : `${message.images} images`) : null, message.files ? el('span', { class: 'msg-bubble-images' }, message.files === 1 ? '1 file' : `${message.files} files`) : null),
-    message.mode === 'queue' ? queuedNote(chat, 'queued, goes in when Claude is done', message.id) : el('span', { class: 'pending-note' }, 'going in now…'),
+    message.mode === 'queue'
+      ? queuedNote(chat, C.isHeldForAnswer(context.sessionOf(chat.id), message) ? 'waits for your answer to Claude’s question, which goes in first' : 'queued, goes in when Claude is done', message.id)
+      : el('span', { class: 'pending-note' }, 'going in now…'),
   )
 }
 
@@ -1526,8 +1662,11 @@ function drawApproval(chat, session, view) {
   const link = L.openLink(session)
   const draft = chat.approvals.get(view.box)
   const isLocked = draft?.state === 'sending' || draft?.state === 'sent'
+  // with the keyboard shortcuts on, 1 allows once and 2 denies, as Claude's own box numbers them
+  const isNumbered = Boolean(context.shortcutsOn?.())
   const choice = (decision, label) => {
-    const button = el('button', { type: 'button', class: `a-choice a-${decision}${draft?.choice === decision ? ' chosen' : ''}`, disabled: isLocked }, label)
+    const key = decision === 'allow' ? '1' : '2'
+    const button = el('button', { type: 'button', class: `a-choice a-${decision}${draft?.choice === decision ? ' chosen' : ''}`, disabled: isLocked }, label, isNumbered ? el('span', { class: 'q-number', 'aria-hidden': 'true' }, key) : null)
     button.addEventListener('click', () => sendApproval(chat, view.box, decision))
     return button
   }
@@ -1539,7 +1678,7 @@ function drawApproval(chat, session, view) {
   const foot = view.canAnswer
     ? el('div', { class: 'q-foot' }, el('span', { class: `q-status${draft?.problem ? ' problem' : ''}`, role: 'status' }, C.approvalStatus(draft, C.answerPlace(session))), el('span', { class: 'q-actions' }, openLink(link, 'Open in the app'), choice('deny', 'Deny'), choice('allow', 'Allow once')))
     : el('div', { class: 'q-foot' }, el('span', {}, where), show ?? openLink(link))
-  return el(
+  const box = el(
     'div',
     { class: 'msg msg-question msg-approval q-open', 'data-approval': view.box },
     el(
@@ -1553,6 +1692,18 @@ function drawApproval(chat, session, view) {
       foot,
     ),
   )
+  // 1 allows once and 2 denies, with the cursor on the box and the keyboard shortcuts on
+  if (view.canAnswer) {
+    box.addEventListener('keydown', event => {
+      if (!context.shortcutsOn?.() || event.target.closest?.('textarea, input') || isLocked) return
+      const n = optionNumber(event)
+      if (n !== 1 && n !== 2) return
+      event.preventDefault()
+      event.stopPropagation()
+      sendApproval(chat, view.box, n === 1 ? 'allow' : 'deny')
+    })
+  }
+  return box
 }
 
 /**
@@ -1634,8 +1785,11 @@ function drawNextStep(chat, session, next) {
   const endedAt = session.turn.endedAt
   const given = sentChoices.get(chat.id)
   const sent = given?.endedAt === endedAt ? given : null
+  // with the keyboard shortcuts on, each answer shows its number, and the last one is your own words
+  const isNumbered = Boolean(context.shortcutsOn?.())
+  const number = i => (isNumbered && i < 9 ? el('span', { class: 'q-number', 'aria-hidden': 'true' }, String(i + 1)) : null)
   const buttons = next.choices.map((choice, i) => {
-    const button = el('button', { type: 'button', class: `next-choice${i === 0 ? ' first' : ''}${sent?.label === choice.label ? ' sent' : ''}`, title: choice.message, disabled: Boolean(sent) }, choice.label)
+    const button = el('button', { type: 'button', class: `next-choice${i === 0 ? ' first' : ''}${sent?.label === choice.label ? ' sent' : ''}`, title: choice.message, disabled: Boolean(sent) }, choice.label, number(i))
     button.addEventListener('click', async () => {
       sentChoices.set(chat.id, { endedAt, label: choice.label })
       drawLive(chat, context.sessionOf(chat.id))
@@ -1645,15 +1799,62 @@ function drawNextStep(chat, session, next) {
     })
     return button
   })
+  const own = isNumbered && !sent ? el('button', { type: 'button', class: 'next-choice next-own', title: 'Write your own answer in the box below' }, 'Write your own', number(buttons.length)) : null
+  own?.addEventListener('click', () => chat.text.focus())
   const note = given?.problem || (sent ? 'Sent. Claude takes it in a moment.' : '')
-  return el(
+  const box = el(
     'div',
     { class: 'next-step in-chat' },
     el('span', { class: 'next-badge' }, 'Your move'),
     next.question ? el('span', { class: 'next-question' }, next.question) : null,
-    el('div', { class: 'next-choices' }, buttons),
+    el('div', { class: 'next-choices', role: 'group', 'aria-label': 'Answers' }, buttons, own),
     note ? el('span', { class: `next-note${given?.problem ? ' problem' : ''}`, role: 'status' }, note) : null,
   )
+  // a number key with the cursor on the box picks that answer
+  box.addEventListener('keydown', event => {
+    if (!context.shortcutsOn?.()) return
+    const n = optionNumber(event)
+    const picked = n ? box.querySelectorAll('.next-choice')[n - 1] : null
+    if (!picked || picked.disabled) return
+    event.preventDefault()
+    event.stopPropagation()
+    picked.click()
+  })
+  return box
+}
+
+/**
+ * A number key in the empty write box, with the keyboard shortcuts on: answers the box that waits in
+ * this chat, as Claude's own boxes take one. An approval (1 allows once, 2 denies), else a question
+ * (that option), else the next-step box (that answer; its last number, "write your own", leaves the
+ * cursor here). True when a box took the key; with no box waiting the number is typed as always.
+ */
+function answerByNumber(chat, event) {
+  if (!context.shortcutsOn?.()) return false
+  const n = optionNumber(event)
+  if (!n) return false
+  const approval = chat.dock.querySelector('.msg-approval.q-open')
+  if (approval?.querySelector('.a-choice:not([disabled])')) {
+    const button = approval.querySelector(n === 1 ? '.a-allow' : n === 2 ? '.a-deny' : null)
+    if (!button || button.disabled) return false
+    event.preventDefault()
+    button.click()
+    return true
+  }
+  const question = [...chat.root.querySelectorAll('.msg-question.q-open:not(.msg-approval)')].at(-1)
+  if (question?.querySelector('button.q-option:not([disabled])')) {
+    event.preventDefault()
+    question.dispatchEvent(new KeyboardEvent('keydown', { code: event.code, key: event.key, bubbles: true, cancelable: true }))
+    return true
+  }
+  const next = chat.live.querySelector('.next-step')
+  const choices = next ? [...next.querySelectorAll('.next-choice')] : []
+  const picked = choices[n - 1]
+  if (!picked || picked.disabled) return false
+  event.preventDefault()
+  // "write your own": the cursor is here already
+  if (!picked.classList.contains('next-own')) picked.click()
+  return true
 }
 
 function keepSideAboveCompose(chat) {

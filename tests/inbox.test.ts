@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { createInbox, promptFor, readMessage, waiting } from '../hooks/inbox'
+import { createInbox, isHeld, promptFor, readMessage, waiting } from '../hooks/inbox'
 import type { InboxIo } from '../hooks/inbox'
 
 const file = (name: string) => ({ name, kind: 'file' })
@@ -149,6 +149,37 @@ describe('messages from the chat window', () => {
     const stubborn = createInbox({ ...fake.io, interrupt: () => Promise.reject(new Error('not running')) })
     expect(await stubborn.check()).toBe(1)
     expect(fake.sent).toEqual(['now'])
+  })
+
+  test('only a message queued while the turn ran that ended with a question waits for the answer', async () => {
+    const held = { from: 1000, to: 5000 }
+    const queued = (at: number) => ({ text: 'later', images: [], mode: 'queue' as const, at })
+    expect(isHeld(queued(3000), '3000-aa', held)).toBe(true)
+    // queued after the question (the answer itself, or anything written then), or before that turn
+    expect(isHeld(queued(6000), '6000-aa', held)).toBe(false)
+    expect(isHeld(queued(500), '500-aa', held)).toBe(false)
+    // sent now (Send now), a stop, or no question open: never held
+    expect(isHeld({ ...queued(3000), mode: 'now' }, '3000-aa', held)).toBe(false)
+    expect(isHeld({ text: '', images: [], mode: 'now', isStop: true, at: 3000 }, '3000-aa', held)).toBe(false)
+    expect(isHeld(queued(3000), '3000-aa', undefined)).toBe(false)
+    // with no time of its own, the id says when it was queued
+    expect(isHeld({ text: 'x', images: [], mode: 'queue' }, '3000-bb', held)).toBe(true)
+  })
+
+  test("the answer to Claude's question goes in before what was queued while it worked", async () => {
+    const fake = fakeInbox({ '3000-aa.json': '{"text": "queued while it worked", "at": 3000}', '6000-bb.json': '{"text": "Yes, install it", "at": 6000}' })
+    let window: { from: number; to: number } | undefined = { from: 1000, to: 5000 }
+    let busy = false
+    const inbox = createInbox({ ...fake.io, isBusy: async () => busy, heldWindow: async () => window })
+    expect(await inbox.check()).toBe(1)
+    expect(fake.sent).toEqual(['Yes, install it'])
+    // the answer's turn runs: the queued one waits for it, as any queued message does
+    busy = true
+    window = undefined
+    expect(await inbox.check()).toBe(0)
+    busy = false
+    expect(await inbox.check()).toBe(1)
+    expect(fake.sent).toEqual(['Yes, install it', 'queued while it worked'])
   })
 
   test('a failed hand-over is no error for the inbox', async () => {

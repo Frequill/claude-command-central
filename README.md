@@ -71,6 +71,37 @@ In Activity Monitor the board's server shows as **Claude Command Central** and t
 
 Every working agent and background command on the agent map has a **Stop**: click it, then click again within a few seconds, and that one ends while its session's turn goes on.
 
+## The keyboard
+
+Everything on the board can work without a mouse. Turn it on in **Settings → Keys → Keyboard shortcuts** (it is off until you do; off, every key does what it does in any window). Then **⌘K** opens the command palette: type part of any card's name or any command, and press Enter to go there or run it. It also lists every shortcut. The defaults:
+
+| Keys | Does |
+| --- | --- |
+| ⌘T / ⌥⌘T | New session / new terminal. In the start window **Enter starts** and Space picks the one highlighted, so ⌘T then Enter starts as the window shows it |
+| (none) | **Quick new session**: one in the background at once, with no window, in the folder and mode the start window would take. Give it a key in Settings → Keys |
+| ⌘W | Close the current card (its Close dialog, as its X) |
+| ⌥⌘← → ↑ ↓ | The card in that direction, into its write box or terminal; from inside a text field too. The board jumps to the card's top at once, and its chat to its newest messages |
+| ⌃Tab / ⌃⇧Tab | Next / previous card, row by row |
+| ⌘1 … ⌘9 | Card 1 to 8, and ⌘9 the last |
+| ⌥⌘N | The next card that needs you, with the cursor on its question or approval (the current card's own first) |
+| 1 … 9 | Answers the box that waits, as Claude's own boxes do: in a question that option (one question with one choice is sent at once), in an approval 1 allows once and 2 denies, in the next-step box that answer (its last number, Write your own, leaves you typing). Works with the cursor on the box, or in the empty write box; once you have typed something, numbers are text. Each answer shows its number |
+| ⌘. or ⌃C | Stop Claude in the current card, as its Stop button does. In a terminal card ⌃C (and every Ctrl key) stays the shell's |
+| F2 | Rename the current card (or double-click its name) |
+| ⇧⌘M | Its model, effort and mode menu |
+| ⌘J / ⇧⌘E / ⇧⌘K | Its facts panel / its terminal (in the background) / caveman |
+| ⌘, | Settings |
+| ⌘K | The command palette |
+
+The current card is the one you last clicked or went to; once you use the keyboard it has a ring. In menus, dialogs and boxes the arrow keys move between the buttons, Enter or Space presses one and Esc closes the session menu. **Settings → Keys** changes any shortcut, removes one, puts one back (**↺**) or all of them (**Reset to defaults**). A shortcut needs Cmd, Ctrl or Option, so typing stays as it is, and a shortcut given to another command moves there. Shortcuts follow the keys' places, so they work on any keyboard layout, and they are shown as your keyboard writes them.
+
+## Messages that wait
+
+A message written while Claude works waits in the queue, shown under the chat with **Send now**, and goes in once Claude is done. When that turn ends with a question for you (its buttons in the chat), the queued message waits for your answer instead: a button, or anything you write after the question, goes in first, and the queued message follows once that turn is done. **Send now** still sends it at once.
+
+## Card names
+
+A card is named, first to last: by the name you gave it in CCC (double-click its name in the header, or F2; Enter keeps it, Esc doesn't, and an empty name goes back to the automatic one), by a name given with `/rename` or the Claude app's own title, by the short summary Claude Code writes of the conversation, and only then by the start of your first message. A background session gets its summary once Claude has answered its first message. Renamed in CCC, a session that runs CCC's mod is sent `/rename` too, so Claude's own `/resume` list shows the same name; the chat shows it as a short note.
+
 ## A session's model and effort
 
 The settings button in a card's header opens its menu: the model, named as Claude's own picker names it (Opus 5.5, Sonnet 5.5, Default and the rest, with **1M context** as a switch of its own), and the effort. A pick is for that session alone and counts from Claude's very next request: CCC's mod sends the session's requests with it. It is not a `/model` or `/effort` command, so nothing is saved as the default for new sessions, no other card changes, and no "Switch model?" box waits in a terminal. **Default** takes the pick away, and the session runs its own model again. The Claude app's or terminal's own model menu still shows the model the session was started with. A `/model` or `/effort` typed in a chat shows there as a short note.

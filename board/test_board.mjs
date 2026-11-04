@@ -5,9 +5,10 @@ import * as L from './board-logic.js'
 import { nearestCrater } from './arrivals.js'
 import { blocks, inline } from './markdown.js'
 import * as C from './chat-logic.js'
+import * as K from './keys.js'
 import { chooseCrater, planFlight } from './dragon.js'
 import * as P from './placement.js'
-import { cellsOf, closedStrip, gapAt, isRoomForCard, lowestSpot, passedAt, resizedTo, stripAt } from './grid.js'
+import { cellsOf, closedStrip, gapAt, isRoomForCard, nextSpot, passedAt, resizedTo, stripAt } from './grid.js'
 
 const NOW = 1_000_000_000
 
@@ -470,8 +471,8 @@ test('a card is one card wide, two when large, or the width it was pulled to', (
 })
 
 test('settings fall back to their defaults; wobble follows the mode', () => {
-  assert.deepEqual(L.normalizeSettings(null), { theme: 'clean', animations: true, wobble: 'aero', cardSize: 'compact', freeze: false, statusBar: true, sidePanel: true, shiftScroll: false, scrollButtons: ['key:Shift'], showNotes: true, terminalApp: 'auto', editor: 'off' })
-  assert.deepEqual(L.normalizeSettings({ theme: 'doom', animations: 'yes', wobble: 'x', cardSize: 'huge', freeze: 'no', statusBar: 1 }), { theme: 'clean', animations: true, wobble: 'aero', cardSize: 'compact', freeze: false, statusBar: true, sidePanel: true, shiftScroll: false, scrollButtons: ['key:Shift'], showNotes: true, terminalApp: 'auto', editor: 'off' })
+  assert.deepEqual(L.normalizeSettings(null), { theme: 'clean', animations: true, wobble: 'aero', cardSize: 'compact', freeze: false, statusBar: true, sidePanel: true, shiftScroll: false, scrollButtons: ['key:Shift'], showNotes: true, terminalApp: 'auto', editor: 'off', shortcuts: false, keys: {} })
+  assert.deepEqual(L.normalizeSettings({ theme: 'doom', animations: 'yes', wobble: 'x', cardSize: 'huge', freeze: 'no', statusBar: 1 }), { theme: 'clean', animations: true, wobble: 'aero', cardSize: 'compact', freeze: false, statusBar: true, sidePanel: true, shiftScroll: false, scrollButtons: ['key:Shift'], showNotes: true, terminalApp: 'auto', editor: 'off', shortcuts: false, keys: {} })
   assert.equal(L.normalizeSettings({ statusBar: false }).statusBar, false)
   assert.equal(L.normalizeSettings({ freeze: true }).freeze, true)
   assert.equal(L.normalizeSettings({ cardSize: 'large' }).cardSize, 'large')
@@ -1557,14 +1558,20 @@ test('the file of a step opens in the editor picked, and only with the setting o
   assert.equal(L.editorChoice('auto', []), null)
 })
 
-test('a new card goes to the very bottom of the board, under the half that ends lowest', () => {
-  assert.deepEqual(lowestSpot([]), { x: 0, y: 0, w: 6, h: 32 })
-  // the left half ends at 64, the right at 32: under the right one it would rise, so it goes under the left
-  const nodes = [{ x: 0, y: 0, w: 6, h: 32 }, { x: 6, y: 0, w: 6, h: 32 }, { x: 0, y: 32, w: 6, h: 32 }]
-  assert.deepEqual(lowestSpot(nodes), { x: 0, y: 64, w: 6, h: 32 })
-  assert.deepEqual(lowestSpot([{ x: 6, y: 0, w: 6, h: 90 }]), { x: 6, y: 90, w: 6, h: 32 })
+test('new cards fill the board row by row: left, then right, then the next row', () => {
+  assert.deepEqual(nextSpot([]), { x: 0, y: 0, w: 6, h: 32 })
+  // one card on the left: the next goes beside it, not under it
+  const one = [{ x: 0, y: 0, w: 6, h: 32 }]
+  assert.deepEqual(nextSpot(one), { x: 6, y: 0, w: 6, h: 32 })
+  // both halves end alike: the next row starts on the left
+  const two = [...one, { x: 6, y: 0, w: 6, h: 32 }]
+  assert.deepEqual(nextSpot(two), { x: 0, y: 32, w: 6, h: 32 })
+  const three = [...two, { x: 0, y: 32, w: 6, h: 32 }]
+  assert.deepEqual(nextSpot(three), { x: 6, y: 32, w: 6, h: 32 })
+  // a tall card on the right: the left, ending higher, gets the next one
+  assert.deepEqual(nextSpot([{ x: 6, y: 0, w: 6, h: 90 }]), { x: 0, y: 0, w: 6, h: 32 })
   // a card as wide as the board ends both halves
-  assert.deepEqual(lowestSpot([{ x: 0, y: 0, w: 12, h: 40 }]), { x: 0, y: 40, w: 6, h: 32 })
+  assert.deepEqual(nextSpot([{ x: 0, y: 0, w: 12, h: 40 }]), { x: 0, y: 40, w: 6, h: 32 })
 })
 
 test("caveman mode: a session's own level wins over the default, and unknown levels count as none", () => {
@@ -1768,4 +1775,270 @@ test('a background session that stopped is resumed by sending to it', () => {
   assert.equal(C.composeState(ended).resumeHere, undefined)
   // running, it takes the message as any session does
   assert.equal(C.composeState({ takesMessages: true }, true).resumeHere, undefined)
+})
+
+
+test('a key press is a shortcut by its physical key, the modifiers in one order', () => {
+  const press = (code, mods = {}, key = 'x') => ({ code, key, ctrlKey: false, altKey: false, shiftKey: false, metaKey: false, ...mods })
+  assert.equal(K.chordOf(press('ArrowLeft', { altKey: true, metaKey: true })), 'Alt+Meta+ArrowLeft')
+  assert.equal(K.chordOf(press('KeyT', { metaKey: true }, 't')), 'Meta+KeyT')
+  assert.equal(K.chordOf(press('Tab', { shiftKey: true, ctrlKey: true })), 'Control+Shift+Tab')
+  // with Cmd held Chrome says "7" for Cmd+Shift+7 on a Swedish keyboard: the key is what counts
+  assert.equal(K.chordOf(press('Digit7', { metaKey: true, shiftKey: true }, '7')), 'Shift+Meta+Digit7')
+  // a modifier on its own is no shortcut
+  assert.equal(K.chordOf(press('MetaLeft', { metaKey: true }, 'Meta')), null)
+  assert.equal(K.chordOf(press('ShiftRight', { shiftKey: true }, 'Shift')), null)
+  assert.equal(K.chordOf({}), null)
+  assert.equal(K.normalChord('Meta + Alt + ArrowLeft'), 'Alt+Meta+ArrowLeft')
+  for (const bad of ['', 'Meta', 'Meta+', 'Hyper+KeyT', 'Meta+Meta+KeyT', 'Meta+key t', null]) assert.equal(K.normalChord(bad), null, String(bad))
+})
+
+test('a shortcut shows as a Mac writes it, symbols as this keyboard has them', () => {
+  assert.equal(K.formatChord('Alt+Meta+ArrowLeft'), '⌥⌘←')
+  assert.equal(K.formatChord('Meta+KeyT'), '⌘T')
+  assert.equal(K.formatChord('Control+Shift+Tab'), '⌃⇧Tab')
+  assert.equal(K.formatChord('Meta+Digit1'), '⌘1')
+  assert.equal(K.formatChord('Meta+Comma'), '⌘,')
+  // a Swedish keyboard's own letters, from the browser's layout map
+  const swedish = new Map([['Minus', '+'], ['Slash', '-'], ['KeyT', 't']])
+  assert.equal(K.formatChord('Meta+Minus', swedish), '⌘+')
+  assert.equal(K.formatChord('Meta+KeyT', swedish), '⌘T')
+  assert.equal(K.formatChord('nonsense'), '')
+})
+
+test('the defaults are the ones agreed, every one a key the board window gets', () => {
+  const map = K.keymap()
+  assert.equal(map.get('Meta+KeyT'), 'newSession')
+  assert.equal(map.get('Meta+KeyW'), 'closeCard')
+  assert.equal(map.get('Alt+Meta+ArrowRight'), 'cardRight')
+  assert.equal(map.get('Control+Tab'), 'cardNext')
+  assert.equal(map.get('Meta+Digit9'), 'card9')
+  // Quick new session has no key until the person gives it one
+  assert.deepEqual(K.bindings().quickNew, [])
+  assert.equal([...map.values()].includes('quickNew'), false)
+  assert.deepEqual(K.clashes(), [])
+  // no default is a key Chrome or macOS keeps, nor a symbol key that moves between layouts
+  const defaults = K.COMMANDS.flatMap(command => command.keys)
+  assert.deepEqual(defaults.filter(chord => K.takenBy(chord)), [])
+  assert.deepEqual(defaults.filter(chord => /\+(Slash|BracketLeft|BracketRight|Backslash|Semicolon|Quote|Minus|Equal|Backquote)$/.test(chord)), [])
+  assert.equal(K.takenBy('Meta+KeyE'), 'Chrome keeps it')
+  assert.equal(new Set(K.COMMANDS.map(command => command.id)).size, K.COMMANDS.length)
+  // each default is written the one way key presses are, or it would never match
+  assert.deepEqual(defaults.filter(chord => K.normalChord(chord) !== chord), [])
+  assert.equal(map.get('Shift+Meta+KeyM'), 'sessionMenu')
+})
+
+test('the person\'s own keys replace a default, can leave a command with none, and clashes are found', () => {
+  const custom = { closeCard: ['Control+KeyW'], palette: [], nobody: ['Meta+KeyZ'], stop: ['broken'] }
+  const map = K.keymap(custom)
+  assert.equal(map.get('Control+KeyW'), 'closeCard')
+  assert.equal(map.get('Meta+KeyW'), undefined)
+  assert.equal(map.get('Meta+KeyK'), undefined)
+  // a broken shortcut is dropped, which leaves that command with none
+  assert.equal([...map.values()].includes('stop'), false)
+  assert.equal(map.get('Meta+KeyZ'), undefined)
+  // two commands on one key: the first listed wins, and the Keys tab is told
+  const clash = { stop: ['Meta+KeyT'] }
+  assert.equal(K.keymap(clash).get('Meta+KeyT'), 'newSession')
+  assert.deepEqual(K.clashes(clash), [{ chord: 'Meta+KeyT', ids: ['newSession', 'stop'] }])
+  // what is kept: only real changes, written the one way
+  assert.deepEqual(K.cleanCustom({ newSession: ['Meta+KeyT'], closeCard: ['Meta + Control + KeyW'], nobody: ['x'], stop: 'Meta+KeyS' }), { closeCard: ['Control+Meta+KeyW'] })
+  assert.deepEqual(K.cleanCustom(null), {})
+})
+
+test('a key press finds its command, and an unbound one none', () => {
+  const map = K.keymap()
+  assert.equal(K.commandFor({ code: 'KeyT', key: 't', metaKey: true, ctrlKey: false, altKey: false, shiftKey: false }, map), 'newSession')
+  assert.equal(K.commandFor({ code: 'KeyT', key: 't', metaKey: false, ctrlKey: false, altKey: false, shiftKey: false }, map), null)
+  assert.equal(K.commandFor({ code: 'MetaLeft', key: 'Meta', metaKey: true }, map), null)
+})
+
+test('the arrow keys go to the nearest card that way, cards in line first, and never wrap', () => {
+  // two rows: A B C on top, D under A and B, E under C
+  const A = { id: 'A', x: 0, y: 0, w: 300, h: 200 }
+  const B = { id: 'B', x: 310, y: 0, w: 300, h: 200 }
+  const C = { id: 'C', x: 620, y: 0, w: 300, h: 400 }
+  const D = { id: 'D', x: 0, y: 210, w: 610, h: 300 }
+  const E = { id: 'E', x: 620, y: 410, w: 300, h: 100 }
+  const all = [A, B, C, D, E]
+  const go = (from, way) => K.cardInDirection(from, all, way)?.id ?? null
+  assert.equal(go(A, 'right'), 'B')
+  assert.equal(go(B, 'right'), 'C')
+  assert.equal(go(C, 'left'), 'B')
+  assert.equal(go(A, 'down'), 'D')
+  assert.equal(go(B, 'down'), 'D')
+  assert.equal(go(C, 'down'), 'E')
+  assert.equal(go(D, 'up'), 'A')
+  // to the right of D lie both C and E, as near as each other: the one most in line with D's middle
+  assert.equal(go(D, 'right'), 'E')
+  // a wide card under A that reaches further right is not to A's right
+  assert.equal(K.cardInDirection(A, [A, D], 'right'), null)
+  // nothing that way: stay
+  assert.equal(go(A, 'left'), null)
+  assert.equal(go(A, 'up'), null)
+  assert.equal(go(E, 'down'), null)
+  assert.equal(K.cardInDirection(A, all, 'sideways'), null)
+  assert.equal(K.cardInDirection(null, all, 'left'), null)
+  // a card with no size (folded, hidden) is never gone to
+  assert.equal(K.cardInDirection(A, [A, { id: 'Z', x: 400, y: 0, w: 0, h: 0 }], 'right'), null)
+  assert.equal(K.firstCard([E, C, D, B, A]).id, 'A')
+  assert.equal(K.firstCard([]), null)
+})
+
+test('arrow keys in a group of buttons: along a row or a list, and on to the row above or below', () => {
+  assert.equal(K.arrowStep('ArrowRight'), 'next')
+  assert.equal(K.arrowStep('ArrowLeft'), 'previous')
+  assert.equal(K.arrowStep('ArrowDown'), 'rowDown')
+  assert.equal(K.arrowStep('ArrowUp'), 'rowUp')
+  assert.equal(K.arrowStep('Enter'), null)
+  // a list runs downwards: up and down move along it, left and right do nothing
+  assert.equal(K.arrowStep('ArrowDown', true), 'next')
+  assert.equal(K.arrowStep('ArrowUp', true), 'previous')
+  assert.equal(K.arrowStep('ArrowRight', true), null)
+  // the row below is landed in at the button most in line
+  assert.equal(K.nearestIndex([10, 120, 260], 130), 1)
+  assert.equal(K.nearestIndex([10, 120, 260], 900), 2)
+  assert.equal(K.nearestIndex([], 5), -1)
+})
+
+test('cards in reading order: next and previous go round, Cmd+9 is the last, Needs you is found after the current one', () => {
+  // a row of three whose tops differ a little, then one card under them
+  const A = { id: 'A', x: 0, y: 0, w: 300, h: 200 }
+  const B = { id: 'B', x: 310, y: 8, w: 300, h: 200 }
+  const C = { id: 'C', x: 620, y: 0, w: 300, h: 200 }
+  const D = { id: 'D', x: 0, y: 210, w: 300, h: 200 }
+  const cards = [D, C, B, A]
+  assert.deepEqual(K.readingOrder(cards).map(card => card.id), ['A', 'B', 'C', 'D'])
+  assert.equal(K.cardInOrder(cards, 'A', 1).id, 'B')
+  assert.equal(K.cardInOrder(cards, 'D', 1).id, 'A')
+  assert.equal(K.cardInOrder(cards, 'A', -1).id, 'D')
+  assert.equal(K.cardInOrder(cards, null, 1).id, 'A')
+  assert.equal(K.cardInOrder(cards, null, -1).id, 'D')
+  assert.equal(K.cardInOrder([], 'A', 1), null)
+  assert.equal(K.cardNumber(cards, 1).id, 'A')
+  assert.equal(K.cardNumber(cards, 3).id, 'C')
+  assert.equal(K.cardNumber(cards, 9).id, 'D')
+  assert.equal(K.cardNumber(cards, 6), null)
+  const waiting = new Set(['A', 'C'])
+  const isWaiting = card => waiting.has(card.id)
+  assert.equal(K.nextWaiting(cards, 'A', isWaiting).id, 'C')
+  assert.equal(K.nextWaiting(cards, 'C', isWaiting).id, 'A')
+  assert.equal(K.nextWaiting(cards, null, isWaiting).id, 'A')
+  assert.equal(K.nextWaiting(cards, 'A', card => card.id === 'A'), null)
+})
+
+
+test('a shortcut needs Cmd, Ctrl or Option, and is moved off the command that had it', () => {
+  assert.equal(K.bindProblem('Meta+KeyT'), '')
+  assert.equal(K.bindProblem('F5'), '')
+  assert.equal(K.bindProblem('KeyT'), 'Add Cmd, Ctrl or Option, so typing stays as it is.')
+  assert.equal(K.bindProblem('Shift+KeyT'), 'Add Cmd, Ctrl or Option, so typing stays as it is.')
+  assert.equal(K.bindProblem('Meta+KeyQ'), '⌘Q can’t be used: macOS quits the browser with it.')
+  assert.equal(K.bindProblem('nonsense'), 'That is not a key.')
+  // Cmd+K given to Stop: the palette loses it, and that is said
+  const { custom, movedFrom } = K.rebind({}, 'stop', 'Meta+KeyK')
+  assert.deepEqual(custom, { stop: ['Meta+KeyK'], palette: [] })
+  assert.deepEqual(movedFrom, ['palette'])
+  assert.equal(K.keymap(custom).get('Meta+KeyK'), 'stop')
+  // given one key of its two defaults, that one key is what it keeps (↺ puts both back)
+  assert.deepEqual(K.rebind(custom, 'stop', 'Meta+Period').custom, { palette: [], stop: ['Meta+Period'] })
+})
+
+test('the keys changed are kept with the settings, the rest come from the defaults', () => {
+  assert.deepEqual(L.normalizeSettings({}).keys, {})
+  // the shortcuts are off until the person turns them on
+  assert.equal(L.normalizeSettings({}).shortcuts, false)
+  assert.equal(L.normalizeSettings({ shortcuts: 'yes' }).shortcuts, false)
+  assert.equal(L.normalizeSettings({ shortcuts: true }).shortcuts, true)
+  assert.deepEqual(L.normalizeSettings({ keys: { closeCard: ['Control+KeyW'], nobody: ['Meta+KeyZ'] } }).keys, { closeCard: ['Control+KeyW'] })
+  assert.deepEqual(L.normalizeSettings({ keys: 'broken' }).keys, {})
+  assert.ok(L.SETTINGS_TABS.includes('keys'))
+})
+
+test('the palette finds commands and cards by any of their words, names that start with it first', () => {
+  const rows = [
+    { label: 'New session', detail: '⌘T' },
+    { label: 'Close the current card', detail: '⌘W' },
+    { label: 'Tandem integration', detail: 'Claude app · TQ' },
+    { label: 'Session menu', detail: '⇧⌘M' },
+  ]
+  assert.deepEqual(K.paletteMatches(rows, 'session').map(row => row.label), ['Session menu', 'New session'])
+  assert.deepEqual(K.paletteMatches(rows, 'tq tandem').map(row => row.label), ['Tandem integration'])
+  assert.equal(K.paletteMatches(rows, '').length, 4)
+  assert.deepEqual(K.paletteMatches(rows, 'nothing like it'), [])
+})
+
+test('number keys pick an option in a waiting box: 1 to 9, with no Cmd, Ctrl or Option', () => {
+  assert.equal(K.optionNumber({ code: 'Digit2' }), 2)
+  assert.equal(K.optionNumber({ code: 'Numpad9' }), 9)
+  // Shift is fine: on some keyboards the digits need it
+  assert.equal(K.optionNumber({ code: 'Digit1', shiftKey: true }), 1)
+  assert.equal(K.optionNumber({ code: 'Digit0' }), 0)
+  assert.equal(K.optionNumber({ code: 'Digit3', metaKey: true }), 0)
+  assert.equal(K.optionNumber({ code: 'KeyA' }), 0)
+  assert.equal(K.optionNumber(null), 0)
+})
+
+test('when a card closes, the one nearest to where it was is next, not the first on the board', () => {
+  const A = { id: 'A', x: 0, y: 0, w: 300, h: 200 }
+  const B = { id: 'B', x: 310, y: 0, w: 300, h: 200 }
+  const C = { id: 'C', x: 0, y: 2000, w: 300, h: 200 }
+  const D = { id: 'D', x: 310, y: 2000, w: 300, h: 200 }
+  const E = { id: 'E', x: 0, y: 2210, w: 300, h: 200 }
+  // D closes far down the board: C beside it is next, not A at the top
+  assert.equal(K.nearestCard(D, [A, B, C, E]).id, 'C')
+  assert.equal(K.nearestCard(A, [B, C, D, E]).id, 'B')
+  assert.equal(K.nearestCard(D, []), null)
+  assert.equal(K.nearestCard(null, [A]), null)
+  assert.equal(K.nearestCard(D, [D]), null)
+})
+
+
+test("a message queued while Claude worked waits for the answer to the question that turn ended with", () => {
+  const asking = { turn: { isRunning: false, startedAt: 1000, endedAt: 5000, choices: [{ label: 'Yes' }] } }
+  assert.equal(C.isHeldForAnswer(asking, { mode: 'queue', at: 3000 }), true)
+  // queued after the question, or Send now, or the buttons gone, or Claude working again: not held
+  assert.equal(C.isHeldForAnswer(asking, { mode: 'queue', at: 6000 }), false)
+  assert.equal(C.isHeldForAnswer(asking, { mode: 'now', at: 3000 }), false)
+  assert.equal(C.isHeldForAnswer({ turn: { ...asking.turn, choices: [] } }, { mode: 'queue', at: 3000 }), false)
+  assert.equal(C.isHeldForAnswer({ turn: { ...asking.turn, isRunning: true } }, { mode: 'queue', at: 3000 }), false)
+  assert.equal(C.isHeldForAnswer(undefined, { mode: 'queue', at: 3000 }), false)
+})
+
+
+test('after the bottom row closes, the board scrolls back up to the lowest card left, only for a real gap', () => {
+  // a window 800 high, scrolled to 2000: the lowest card left ends at 1900, so all of it is empty
+  assert.equal(K.backUpTo(2000, 800, 1900), 1100)
+  // the cards still fill most of it: stay
+  assert.equal(K.backUpTo(2000, 800, 2700), null)
+  assert.equal(K.backUpTo(2000, 800, 2600), null)
+  // no card left: back to the top
+  assert.equal(K.backUpTo(2000, 800, 0), 0)
+  // already at the top: nowhere to go
+  assert.equal(K.backUpTo(0, 800, 100), null)
+})
+
+
+test('a card closed hands on to its neighbour in the same row first, as a closed tab does', () => {
+  // two rows of wide cards: 2 is nearer to 4 than 3 is, but 3 is in its row
+  const one = { id: '1', x: 0, y: 0, w: 900, h: 640 }
+  const two = { id: '2', x: 910, y: 0, w: 900, h: 640 }
+  const three = { id: '3', x: 0, y: 650, w: 900, h: 640 }
+  const four = { id: '4', x: 910, y: 650, w: 900, h: 640 }
+  assert.equal(K.nearestCard(four, [one, two, three]).id, '3')
+  assert.equal(K.nearestCard(two, [one, three, four]).id, '1')
+  // alone in its row: the nearest card above or below
+  const five = { id: '5', x: 0, y: 1300, w: 900, h: 640 }
+  assert.equal(K.nearestCard(five, [one, two, three, four]).id, '3')
+})
+
+
+test('Ctrl+C stops Claude as the Stop button does, and a shell keeps its Ctrl keys', () => {
+  const map = K.keymap()
+  assert.equal(map.get('Control+KeyC'), 'stop')
+  assert.equal(map.get('Meta+Period'), 'stop')
+  assert.equal(K.isShellKey({ ctrlKey: true, code: 'KeyC' }), true)
+  assert.equal(K.isShellKey({ ctrlKey: true, shiftKey: true, code: 'Tab' }), true)
+  assert.equal(K.isShellKey({ ctrlKey: true, metaKey: true, code: 'KeyC' }), false)
+  assert.equal(K.isShellKey({ metaKey: true, code: 'KeyC' }), false)
 })

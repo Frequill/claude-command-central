@@ -717,3 +717,15 @@ export function findEmoji(search) {
   const words = String(search ?? '').toLowerCase().split(/\s+/).filter(Boolean)
   return EMOJI.filter(([, code, about]) => words.every(word => code.includes(word) || about.includes(word)))
 }
+
+/**
+ * Whether a queued message waits for the person's answer to Claude's question: it was queued while
+ * the turn ran that ended with the question, whose buttons are still up. The mod holds it so (its
+ * inbox's isHeld), and lets the answer go in first.
+ */
+export function isHeldForAnswer(session, message) {
+  const turn = session?.turn
+  const at = Number(message?.at)
+  if (!turn || turn.isRunning || !(turn.choices?.length > 0) || message?.mode !== 'queue' || !Number.isFinite(at)) return false
+  return at >= Number(turn.startedAt) && at <= Number(turn.endedAt)
+}
