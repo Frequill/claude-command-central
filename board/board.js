@@ -164,7 +164,7 @@ function applySettings(settings) {
   view.stopScene()
   view.stopScene = startScene(document.querySelector('#scene-canvas'), settings.theme, { animated: settings.animations, freezeAway: settings.freeze })
   view.decor.stop()
-  view.decor = startDecor(settings.theme, { statusBar: settings.statusBar, onEmblem: () => view.grid?.closeGaps() })
+  view.decor = startDecor(settings.theme, { statusBar: settings.statusBar, onEmblem: () => view.grid?.closeGaps(), onEmblemTwice: resetLayout })
   view.grid?.animate(settings.animations)
   followFocus()
   themeTerminals(settings.theme)
