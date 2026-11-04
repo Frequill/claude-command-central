@@ -26,7 +26,15 @@ export type InboxIo = {
   now: () => Promise<number>
   /** Whether Claude works on a turn now: a queued message waits until it is done. */
   isBusy?: () => Promise<boolean>
+  /**
+   * The turn that ended with a question for the person (its buttons still up), from its start to its
+   * end; undefined when there is none. A message queued while it ran waits for the answer.
+   */
+  heldWindow?: () => Promise<HeldWindow | undefined>
 }
+
+/** A turn that ended with a question still open, from when it started to when it ended. */
+export type HeldWindow = { from: number; to: number }
 
 const MESSAGE_ID = /^[0-9]{1,16}-[0-9a-f]{1,32}$/
 const RUN_ID = /^[A-Za-z0-9_-]{1,128}$/
@@ -80,6 +88,19 @@ export function promptFor(message: InboxMessage): string {
   return parts.filter(Boolean).join('\n\n')
 }
 
+/**
+ * Whether a queued message waits for the person's answer: it was queued while the turn ran that
+ * then ended with a question. The answer (a button, or anything written after the question) goes in
+ * first; the message then goes in once that is done, as any queued one does. One queued after the
+ * question, or before that turn began, is not held. Its time is the one the board gave it, else the
+ * one its id starts with.
+ */
+export function isHeld(message: InboxMessage, id: string, held: HeldWindow | undefined): boolean {
+  if (!held || message.mode !== 'queue' || message.isStop || message.stopRun) return false
+  const at = message.at ?? Number(id.split('-')[0])
+  return Number.isFinite(at) && at >= held.from && at <= held.to
+}
+
 export type Inbox = {
   /** Sends what waits into the session, each once and in order; how many it sent. */
   check: () => Promise<number>
@@ -103,6 +124,7 @@ export function createInbox(io: InboxIo): Inbox {
         }
         let sent = 0
         let isWorking = io.isBusy ? await io.isBusy().catch(() => false) : false
+        const held = io.heldWindow ? await io.heldWindow().catch(() => undefined) : undefined
         for (const id of waiting(entries)) {
           if (taken.has(id)) continue
           let message: InboxMessage | undefined
@@ -113,6 +135,8 @@ export function createInbox(io: InboxIo): Inbox {
           }
           // a queued message waits, untaken, while Claude works; one the person hurried is `now` by then
           if (message && !message.isStop && message.mode === 'queue' && isWorking) continue
+          // one queued before Claude's question waits for the answer, which goes in first
+          if (message && !isWorking && isHeld(message, id, held)) continue
           taken.add(id)
           // marked taken before it is sent: a message is never sent twice, even across a reload
           await io.write(`${io.dir}/${id}.taken`, String(await io.now()))
@@ -154,6 +178,7 @@ export async function inboxFor(
   isBusy?: () => Promise<boolean>,
   dress?: (text: string) => Promise<string>,
   stopRun?: (runId: string) => Promise<void>,
+  heldWindow?: () => Promise<HeldWindow | undefined>,
   before?: () => Promise<void>,
 ): Promise<Inbox | undefined> {
   const home = await $.env.get('HOME')
@@ -181,5 +206,6 @@ export async function inboxFor(
     now: () => $.clock.now(),
     ...(isBusy ? { isBusy } : {}),
     ...(stopRun ? { stopRun } : {}),
+    ...(heldWindow ? { heldWindow } : {}),
   })
 }

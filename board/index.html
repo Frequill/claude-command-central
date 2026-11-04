@@ -201,6 +201,7 @@
             <button type="button" role="tab" class="th-period" id="settings-tab-board" data-tab="board" aria-controls="settings-page-board">Board</button>
             <button type="button" role="tab" class="th-period" id="settings-tab-behaviour" data-tab="behaviour" aria-controls="settings-page-behaviour">Scrolling &amp; motion</button>
             <button type="button" role="tab" class="th-period" id="settings-tab-terminal" data-tab="terminal" aria-controls="settings-page-terminal">Terminal &amp; editor</button>
+            <button type="button" role="tab" class="th-period" id="settings-tab-keys" data-tab="keys" aria-controls="settings-page-keys">Keys</button>
           </div>
           <!-- what CCC runs on its own: a place of its own, apart from the settings -->
           <div class="th-periods settings-tabs settings-tabs-own" role="presentation">
@@ -255,7 +256,7 @@
             <fieldset>
               <legend>Layout</legend>
               <p class="hint">Drag a card by its title bar to move it: the cards in its way make room, and every card stays where you leave it, at its size. Hold Shift as you drop a card into an empty space and it fills the space. Hover an empty space for a + that starts something right there, and an empty strip across the board for a − that closes it. Drag any edge or corner of a card to resize it: the cards in its way get smaller to make room.</p>
-              <p class="hint">Close the gaps packs the cards together again, top first, keeping their sizes. Reset layout puts every card back, two to a row.</p>
+              <p class="hint">Close the gaps packs the cards together again, top first, keeping their sizes. Reset layout puts every card back, two to a row, each as tall as lets two rows fit on your screen. A new card starts at that size too.</p>
               <button id="layout-close-gaps" type="button" class="secondary">Close the gaps</button>
               <button id="layout-reset" type="button" class="secondary">Reset layout</button>
             </fieldset>
@@ -320,6 +321,18 @@
               </label>
               <p class="hint">On, the file name in an opened step (an edit, a read, a new file) opens that file in your editor at the line Claude changed or read. The files, classes and methods Claude names in its replies open where they are made.</p>
             </fieldset>
+          </section>
+          <section id="settings-page-keys" class="settings-page" role="tabpanel" aria-labelledby="settings-tab-keys" data-page="keys" hidden>
+            <div class="keys-top">
+              <label class="check">
+                <input id="opt-shortcuts" type="checkbox" />
+                Keyboard shortcuts
+              </label>
+              <button id="keys-reset" type="button" class="secondary">Reset to defaults</button>
+            </div>
+            <p class="hint">On, the board works without a mouse: <strong>⌘T</strong> starts a session, <strong>⌥⌘</strong> and an arrow goes to the card that way, <strong>⌘K</strong> opens the command palette, and the rest below. Off, every key does what it does in any window (⌘W closes it). To change a shortcut, click <strong>Change</strong> and press the new keys (Esc cancels); <strong>↺</strong> puts one back. A shortcut needs Cmd, Ctrl or Option, so typing stays as it is, and given to another command it moves there.</p>
+            <p id="keys-status" class="running-status" role="status"></p>
+            <div id="keys-list" class="keys-list"></div>
           </section>
           <section id="settings-page-background" class="settings-page" role="tabpanel" aria-labelledby="settings-tab-background" data-page="background" hidden>
             <p class="hint background-about">What CCC runs on its own, out of sight: the Claude sessions you start with + &rarr; <strong>In the background</strong>, and the shells on the board. They run in CCC's keeper, a small program of its own, so they keep going when CCC's server stops, or you close the Claude app or your terminal windows. A restart of your Mac ends them. Here you see what runs, go to it, end it, and resume what stopped.</p>
@@ -449,12 +462,21 @@
         </fieldset>
         <p id="start-problem" class="hint start-problem" role="status"></p>
         <div class="settings-actions confirm-actions">
+          <span class="hint start-keys">Enter starts · Space picks the one highlighted</span>
           <button value="cancel" class="secondary">Cancel</button>
           <button id="start-go" type="button" class="primary">Start</button>
         </div>
       </form>
     </dialog>
 
+    <!-- the command palette (Cmd+K): every command and card, found by typing -->
+    <dialog id="palette" class="settings palette" aria-label="Command palette">
+      <div class="settings-body palette-body">
+        <input id="palette-input" class="existing-search palette-input" type="text" placeholder="Type a command or a card…" autocomplete="off" spellcheck="false" aria-controls="palette-list" aria-label="Find a command or a card" />
+        <div id="palette-list" class="palette-list" role="listbox" aria-label="Commands and cards"></div>
+        <p class="hint palette-hint">↑ ↓ to move · Enter to run · Esc to close</p>
+      </div>
+    </dialog>
     <dialog id="remove-dialog" class="settings confirm" aria-labelledby="remove-title">
       <form method="dialog" class="settings-body">
         <h2 id="remove-title" class="window-title">CLOSE SESSION</h2>

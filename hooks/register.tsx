@@ -41,6 +41,7 @@ import { drawPane } from './draw'
 import type { Kit } from './draw'
 import { endChat, startChat } from './chat'
 import { closeReply, draftReply, openReply } from './reply'
+import { sessionChoice, withChoice } from './choice'
 import { publishCommands } from './commands'
 import { inboxFor } from './inbox'
 import type { Inbox } from './inbox'
@@ -96,6 +97,11 @@ export const register: Register = on => {
       async () => Boolean((await read($, turn)).isRunning),
       text => cavemanDressed($, text),
       runId => stopRun($, runId),
+      // the turn that ended with Claude's question and its buttons still up: what was queued while it ran waits for the answer
+      async () => {
+        const now = await read($, turn)
+        return !now.isRunning && (now.choices?.length ?? 0) > 0 && now.startedAt && now.endedAt ? { from: now.startedAt, to: now.endedAt } : undefined
+      },
       () => tellRuns($),
     ).catch(() => undefined)
     await publishCommands($).catch(() => undefined)
@@ -106,7 +112,8 @@ export const register: Register = on => {
 
   on('turn.start', async ($, e, next) => {
     if (e.agentId === undefined) {
-      const model = await sessionModel($)
+      // the model picked for this session in CCC's menu, else the session's own
+      const model = (await sessionChoice($)).model ?? (await sessionModel($))
       if (model) await update($, stats, now => ({ ...now, model }))
       const startedAt = await $.clock.now()
       await update($, turn, now => {
@@ -149,12 +156,16 @@ export const register: Register = on => {
     return next(e)
   })
 
-  // Claude's text as it streams, so the board can show the reply while it is being written.
-  // The pieces pass on untouched; what the board gets is written down now and then.
+  // Each request of the session goes out with the model and effort picked for it in CCC's menu
+  // (that session alone: nothing is saved as the default for others). Claude's text as it streams,
+  // so the board can show the reply while it is being written; the pieces pass on untouched, and
+  // what the board gets is written down now and then.
   on('turn.step', async function* ($, e, next) {
-    const stream = next(e)
-    if (e.agentId !== undefined) return yield* stream
-    await noteEffort($, e.effort)
+    if (e.agentId !== undefined) return yield* next(e)
+    const step = withChoice(e, await sessionChoice($))
+    const stream = next(step)
+    await noteModel($, step.model)
+    await noteEffort($, step.effort)
     const start = await replySoFar($)
     const draft = draftReply(start)
     try {
@@ -395,6 +406,14 @@ async function noteMode($: EngineInterface, mode: string | undefined) {
     await update($, stats, now => (now.mode === mode ? now : { ...now, mode }))
   } catch {
     // the mode stays as it was
+  }
+}
+
+async function noteModel($: EngineInterface, model: string) {
+  try {
+    await update($, stats, now => (now.model === model ? now : { ...now, model }))
+  } catch {
+    // the model stays as it was
   }
 }
 

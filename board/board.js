@@ -1,14 +1,16 @@
 import * as L from './board-logic.js'
 import { startDecor } from './decor.js'
 import { welcome } from './arrivals.js'
-import { chatCard, dropChat, focusChat, redrawChats, sendText, sentChoices, setupChat, updateChat, uploadFiles } from './chat.js'
-import { cavemanOf, fileProblem, fileSize, isImage } from './chat-logic.js'
+import { chatCard, dropChat, focusChat, redrawChats, renameChat, sendText, sentChoices, setupChat, showNewest, updateChat, uploadFiles } from './chat.js'
+import { cavemanOf, fileProblem, fileSize, isImage, modelVersions } from './chat-logic.js'
 import { carryAway } from './dragon.js'
 import { jelly, loadLayout, makeResizable, makeSortable, saveLayout, watchWindowMoves } from './layout.js'
 import { setupNotes } from './notes.js'
 import { loadSettings, setupSettings } from './settings.js'
 import { startScene } from './themes.js'
-import { makeGrid } from './grid.js'
+import { makeGrid, rowsToFit } from './grid.js'
+import * as K from './keys.js'
+import { rememberFocus, restoreFocus } from './refocus.js'
 import { artifactCard } from './artifact.js'
 import { closeTerminal, dropTerminal, focusTerminal, isTerminal, runCommand, setupTerminals, startTerminal, stopKeeper, terminalCard, themeTerminals, toggleTerminal, updateTerminal } from './terminal.js'
 
@@ -149,6 +151,8 @@ function applySettings(settings) {
   const isNewLook = view.settings.theme !== settings.theme || view.settings.cardSize !== settings.cardSize
   const isNewNotes = view.settings.showNotes !== settings.showNotes
   view.settings = settings
+  // the shortcuts, the person's own over the defaults; changed in the Keys tab, they count at once
+  view.keymap = K.keymap(settings.keys)
   if (isNewNotes) redrawChats()
   for (const name of [...document.body.classList]) if (name.startsWith('theme-')) document.body.classList.remove(name)
   document.body.classList.add(`theme-${settings.theme}`)
@@ -254,6 +258,11 @@ function setupLayout() {
     },
     wobbles: () => view.wobble,
     animates: () => view.settings.animations,
+    // a new card is as tall as lets two rows of cards fit on this screen
+    startRows: () => {
+      const band = visibleBand()
+      return rowsToFit(band.bottom - band.top, SHOW_GAP)
+    },
     // the + in an empty space: the start window, and what it starts lands in that space
     onAddAt: gap => {
       view.grid.placeNext(gap)
@@ -456,6 +465,397 @@ const STARTED_WAIT_MS = 3 * 60_000
 // a card that comes onto the board is gone to, unless the person typed somewhere this recently
 const TYPING_MS = 4000
 
+// ---------- keyboard shortcuts ----------
+
+/** What each shortcut's command does (keys.js says which keys run which); a command not here yet does nothing. */
+const SHORTCUT_RUNS = {
+  // the same as the + in the header
+  newSession: () => document.querySelector('#new-session')?.click(),
+  quickNew: () => quickNewSession(),
+  // the same as the card's X: a Claude card asks Close or Close and delete, a terminal asks too while it runs
+  closeCard: () => currentCard()?.querySelector('.chat-head .chat-remove, .chat-remove')?.click(),
+  cardLeft: () => goToCard('left'),
+  cardRight: () => goToCard('right'),
+  cardUp: () => goToCard('up'),
+  cardDown: () => goToCard('down'),
+  cardNext: () => goToCardIn(cards => K.cardInOrder(cards, currentCard()?.dataset.session, 1)),
+  cardPrevious: () => goToCardIn(cards => K.cardInOrder(cards, currentCard()?.dataset.session, -1)),
+  needsYou: () => {
+    // the current card's own box first, when the cursor is not on it yet
+    const here = currentCard()
+    const box = here ? waitingBoxButton(here) : null
+    if (box && !box.closest('.msg-question')?.contains(document.activeElement)) return landIn(here)
+    goToCardIn(cards => K.nextWaiting(cards, here?.dataset.session, card => Boolean(card.node.querySelector('.chat-head .pill-wait'))))
+  },
+  ...Object.fromEntries(Array.from({ length: 9 }, (_, i) => [`card${i + 1}`, () => goToCardIn(cards => K.cardNumber(cards, i + 1))])),
+  // the rest press the current card's own buttons, or the board's, as the mouse would
+  stop: () => pressIn(currentCard(), '.compose-stop:not([hidden])'),
+  renameCard: () => {
+    const card = currentCard()
+    if (card && !card.classList.contains('terminal-tile')) renameChat(card.dataset.session)
+  },
+  sessionMenu: () => openSessionMenu(),
+  factsPanel: () => pressIn(currentCard(), '.side-toggle'),
+  terminal: () => pressIn(currentCard(), '.terminal-toggle:not(:disabled)'),
+  caveman: () => pressIn(currentCard(), '.caveman-toggle'),
+  newTerminal: () => {
+    document.querySelector('#new-session')?.click()
+    document.querySelector('#start-mode [data-mode="terminal"]')?.click()
+  },
+  settings: () => document.querySelector('#settings-open')?.click(),
+  palette: () => openPalette(),
+}
+
+// commands that run again while their key is held down, as moving the cursor does
+const SHORTCUT_REPEATS = new Set(['cardLeft', 'cardRight', 'cardUp', 'cardDown', 'cardNext', 'cardPrevious'])
+
+/** Presses a button of `root` (a card), as a click would; nothing when the card has no such button now. */
+function pressIn(root, selector) {
+  root?.querySelector(selector)?.click()
+}
+
+/** To the card `pick` chooses among the board's cards (keys.js), into its write box or terminal. */
+function goToCardIn(pick) {
+  const target = pick(boardCards())
+  if (target) landIn(target.node)
+}
+
+/**
+ * Opens or closes the current card's model, effort and mode menu. Opened from the keyboard, the
+ * cursor goes onto its lit choice, so the arrow keys work at once; closed, back to the write box.
+ */
+function openSessionMenu() {
+  const card = currentCard()
+  const toggle = card?.querySelector('.setup-toggle')
+  if (!toggle) return
+  const wasOpen = toggle.getAttribute('aria-expanded') === 'true'
+  toggle.click()
+  if (wasOpen) return card.querySelector('textarea')?.focus({ preventScroll: true })
+  // the menu is drawn once the session's model list has come
+  const started = performance.now()
+  const land = () => {
+    const panel = card.querySelector('.chat-setup')
+    const choice = panel?.querySelector('.setup-choice.on') ?? panel?.querySelector('.setup-choice')
+    if (choice) return choice.focus()
+    if (performance.now() - started < 2000) setTimeout(land, 30)
+  }
+  land()
+}
+
+/** The cards on the board as the screen has them, Claude's and terminals, leaving out any not drawn. */
+function boardCards() {
+  return [...document.querySelectorAll('.expanded-tile[data-session]')]
+    .filter(node => node.offsetParent !== null)
+    .map(node => {
+      const box = node.getBoundingClientRect()
+      return { id: node.dataset.session, x: box.left, y: box.top, w: box.width, h: box.height, node }
+    })
+}
+
+/** To the card that way from the current one (keys.js picks it), or the first card when none is current. */
+function goToCard(direction) {
+  const cards = boardCards()
+  const here = currentCard()
+  // the first move after a card closed goes from where that card was: ← is what was left of it
+  const closed = view.closedPlace && view.closedPlace.handedTo === here ? view.closedPlace : null
+  view.closedPlace = null
+  if (closed) {
+    const target = K.cardInDirection({ ...closed.place, y: closed.place.y - window.scrollY }, cards, direction)
+    if (target) return landIn(target.node)
+  }
+  const from = here ? cards.find(card => card.node === here) : null
+  const target = from ? K.cardInDirection(from, cards, direction) : K.firstCard(cards)
+  if (target) landIn(target.node)
+}
+
+// ---------- the command palette ----------
+
+// commands the palette leaves out: itself, and Card 1–9, as the cards are listed by name
+const PALETTE_SKIPS = new Set(['palette', ...Array.from({ length: 9 }, (_, i) => `card${i + 1}`)])
+// the keyboard's own letters, for showing shortcuts as this keyboard writes them
+let keyboardLayout = null
+navigator.keyboard
+  ?.getLayoutMap?.()
+  .then(map => {
+    keyboardLayout = map
+  })
+  .catch(() => {})
+
+/**
+ * Cmd+K: every card and command in one list, found by typing any of their words. Enter goes to the
+ * card or runs the command, each command shown with its shortcut, so the palette is the cheat sheet too.
+ */
+function openPalette() {
+  const dialog = document.querySelector('#palette')
+  const input = document.querySelector('#palette-input')
+  const list = document.querySelector('#palette-list')
+  if (!dialog || dialog.open) return
+  const bound = K.bindings(view.settings.keys)
+  const cards = K.readingOrder(boardCards()).map(card => {
+    const title = card.node.querySelector('.chat-title')?.textContent?.trim() || card.node.getAttribute('aria-label') || 'Card'
+    const isTerminal = card.node.classList.contains('terminal-tile')
+    const state = card.node.querySelector('.chat-head .pill')?.textContent?.trim()
+    return { label: title, detail: [isTerminal ? 'Terminal' : 'Claude', state].filter(Boolean).join(' · '), kind: 'card', run: () => landIn(card.node) }
+  })
+  const commands = K.COMMANDS.filter(command => !PALETTE_SKIPS.has(command.id) && SHORTCUT_RUNS[command.id]).map(command => ({
+    label: command.label,
+    detail: bound[command.id].map(chord => K.formatChord(chord, keyboardLayout)).join('  '),
+    kind: 'command',
+    run: SHORTCUT_RUNS[command.id],
+  }))
+  const rows = [...cards, ...commands]
+  let shown = rows
+  let at = 0
+  const draw = () => {
+    list.replaceChildren(
+      ...shown.map((row, i) => {
+        const item = el('div', { class: `palette-row${i === at ? ' active' : ''}`, role: 'option', 'aria-selected': String(i === at) }, el('span', { class: `palette-kind palette-${row.kind}` }, row.kind === 'card' ? 'Card' : 'Do'), el('span', { class: 'palette-label' }, row.label), el('span', { class: 'palette-detail' }, row.detail))
+        item.addEventListener('click', () => choose(row))
+        return item
+      }),
+    )
+    if (!shown.length) list.append(el('p', { class: 'palette-none' }, 'Nothing by that name.'))
+    list.querySelector('.active')?.scrollIntoView({ block: 'nearest' })
+  }
+  const choose = row => {
+    dialog.close()
+    // after the window closes, so the focus it gives back does not undo what the row does
+    setTimeout(() => row.run(), 0)
+  }
+  input.value = ''
+  input.oninput = () => {
+    shown = K.paletteMatches(rows, input.value)
+    at = 0
+    draw()
+  }
+  input.onkeydown = event => {
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      event.preventDefault()
+      if (shown.length) at = (at + (event.key === 'ArrowDown' ? 1 : shown.length - 1)) % shown.length
+      draw()
+    } else if (event.key === 'Enter') {
+      event.preventDefault()
+      if (shown[at]) choose(shown[at])
+    }
+  }
+  dialog.onclick = event => {
+    if (event.target === dialog) dialog.close()
+  }
+  draw()
+  dialog.showModal()
+  input.focus()
+}
+
+// ---------- arrow keys in menus, dialogs and boxes ----------
+
+// a group of buttons the arrow keys move along: a row of the session menu, a question's options,
+// a dialog's choices; and what holds the groups the up and down keys go between
+const ARROW_GROUPS = '[role="group"], [role="radiogroup"], [role="toolbar"], .close-choices, .settings-actions, .q-actions, .existing-actions'
+const ARROW_PANELS = '.chat-setup, dialog, .msg-question, .q-card'
+const ARROW_ITEMS = 'button, [role="radio"], [role="option"], a[href]'
+
+/**
+ * The arrow keys in a group of buttons, as in an app's menus: along a row with ← →, along a list
+ * (a group laid out downwards) with ↑ ↓, and to the row above or below with ↑ ↓, landing on the
+ * button most in line. Enter and Space press the button, as the browser already does. Only on a
+ * button with focus: in a text field the arrow keys move the cursor as always.
+ */
+function setupArrowKeys() {
+  document.addEventListener('keydown', event => {
+    if (event.defaultPrevented || event.altKey || event.metaKey || event.ctrlKey || event.shiftKey) return
+    const at = document.activeElement
+    if (!at?.matches?.(ARROW_ITEMS) || at.matches('input, textarea, [contenteditable="true"]')) return
+    const group = at.closest(ARROW_GROUPS)
+    if (!group) return
+    const isVertical = getComputedStyle(group).flexDirection.startsWith('column')
+    const step = K.arrowStep(event.key, isVertical)
+    if (!step) return
+    let target = null
+    if (step === 'next' || step === 'previous') {
+      const items = arrowItems(group)
+      target = items[items.indexOf(at) + (step === 'next' ? 1 : -1)] ?? null
+      // past the end of a list: on to the row below it, or above
+      if (!target && isVertical) target = nextGroupItem(group, at, step === 'next' ? 1 : -1)
+    } else {
+      target = nextGroupItem(group, at, step === 'rowDown' ? 1 : -1)
+    }
+    if (!target) return
+    event.preventDefault()
+    document.body.classList.add('keys-used')
+    target.focus()
+  })
+}
+
+/** The buttons of a group the keys can land on: shown, not switched off, and not in a group inside it. */
+function arrowItems(group) {
+  return [...group.querySelectorAll(ARROW_ITEMS)].filter(item => !item.disabled && item.offsetParent !== null && item.closest(ARROW_GROUPS) === group)
+}
+
+/** The button to land on in the group `by` groups on (1 below, -1 above), in the same menu or box: in a row the one most in line with `at`. */
+function nextGroupItem(group, at, by) {
+  const panel = group.closest(ARROW_PANELS)
+  if (!panel) return null
+  const groups = [...panel.querySelectorAll(ARROW_GROUPS)].filter(one => arrowItems(one).length > 0)
+  const next = groups[groups.indexOf(group) + by]
+  if (!next) return null
+  const items = arrowItems(next)
+  // a list is come into at its end nearest: from below at its last, from above at its first
+  if (getComputedStyle(next).flexDirection.startsWith('column')) return (by > 0 ? items[0] : items.at(-1)) ?? null
+  const middle = node => {
+    const box = node.getBoundingClientRect()
+    return box.left + box.width / 2
+  }
+  return items[K.nearestIndex(items.map(middle), middle(at))] ?? null
+}
+
+/** The first button of a question or approval box that waits in a card for an answer from here, or null. */
+function waitingBoxButton(node) {
+  return node.querySelector('.msg-approval.q-open .a-choice:not([disabled]), .msg-question.q-open .q-option:not([disabled])')
+}
+
+// room kept under the lowest card when the board glides back up to it, as between two cards
+const BOUNDS_ROOM = 24
+
+/**
+ * After cards closed (the bottom row, say): when the window shows only empty board below the lowest
+ * card left, the board glides up until that card's bottom sits at the bottom of the window, or to the
+ * top when none is left. Looking at cards still, nothing moves. The room the board kept under the
+ * view (so it never jumped as a card closed) is given back as it scrolls up.
+ */
+function backInBounds() {
+  const cards = boardCards()
+  const lowest = cards.length ? Math.max(...cards.map(card => card.y + card.h)) + window.scrollY + BOUNDS_ROOM : 0
+  // what the window shows of the board ends at the status bar along its bottom, when there is one
+  const bar = document.querySelector('#decor-bottom')
+  const barTop = bar?.offsetHeight ? bar.getBoundingClientRect().top : window.innerHeight
+  const shown = Math.min(window.innerHeight, barTop)
+  // only a real gap: the board's own little room under its last card is no reason to move (keys.js)
+  const to = K.backUpTo(window.scrollY, shown, lowest)
+  if (to !== null) glideTo(to, () => {})
+}
+
+/** A card's place as the keys reckon it: on the page, so it still means something once the card is gone. */
+function cardPlace(node, id) {
+  const box = node.getBoundingClientRect()
+  return { id, x: box.left, y: box.top + window.scrollY, w: box.width, h: box.height }
+}
+
+/**
+ * After the current card closed: the card nearest to where it was is the current one, with the cursor
+ * in it, and the board stays where it is. The cursor moves only if it was in the closed card or
+ * nowhere, never out of a field the person is typing in elsewhere.
+ */
+function handOff(gone) {
+  const cards = boardCards().map(card => ({ ...card, y: card.y + window.scrollY }))
+  const next = K.nearestCard(gone, cards)
+  view.currentCard = null
+  if (!next) return
+  markCurrent(next.node)
+  // kept for the next ⌥⌘ arrow: it goes from where the closed card was
+  view.closedPlace = { place: gone, handedTo: next.node }
+  const at = document.activeElement
+  if (at && at !== document.body && at.isConnected) return
+  const top = window.scrollY
+  if (next.node.classList.contains('terminal-tile')) focusTerminal(next.id)
+  else focusChat(next.id)
+  window.scrollTo({ top, behavior: 'instant' })
+}
+
+/** Makes a card the current one, shown from its top with its newest messages, the cursor in its write box or in its terminal. */
+function landIn(node) {
+  markCurrent(node)
+  const id = node.dataset.session
+  if (node.classList.contains('terminal-tile')) focusTerminal(id)
+  else {
+    focusChat(id)
+    // its newest messages, as when the chat follows Claude
+    showNewest(id)
+    // a question or approval waits: the cursor goes onto it, so a number key answers it
+    waitingBoxButton(node)?.focus({ preventScroll: true })
+  }
+  // the card in full view, at once, with no glide: the page stays put when it shows whole already, so
+  // cards on the screen together are gone between without it moving. One taller than the screen lands
+  // from its top, so the keys never land halfway down a card
+  cancelAnimationFrame(view.glide ?? 0)
+  const box = node.getBoundingClientRect()
+  const most = document.scrollingElement.scrollHeight - window.innerHeight
+  const top = K.landingScroll({ band: visibleBand(), card: { top: box.top, bottom: box.bottom }, scrollY: window.scrollY, most, gap: SHOW_GAP })
+  if (top !== window.scrollY) window.scrollTo({ top, behavior: 'instant' })
+}
+
+/**
+ * The room on the screen the board shows in, in px from the window's top: below the bars along the
+ * top (the taskbar, the live feed) and above the status bar along the bottom, whichever a theme has.
+ */
+function visibleBand() {
+  const height = window.innerHeight
+  const bars = [...document.querySelectorAll('.taskbar, #decor-top, #decor-bottom > *')].map(node => node.getBoundingClientRect()).filter(box => box.height > 0 && box.bottom > 0 && box.top < height)
+  return {
+    top: Math.max(0, ...bars.filter(box => box.top < height / 2).map(box => box.bottom)),
+    bottom: Math.min(height, ...bars.filter(box => box.top >= height / 2).map(box => box.top)),
+  }
+}
+
+/**
+ * The card the person works in: the last one focus went into or that was clicked. The shortcuts that
+ * act on "the current card" act on it. Its ring shows once the keyboard is used, as browsers show a
+ * focus ring, and goes away on a click, so the board looks as before to the mouse.
+ */
+function setupCurrentCard() {
+  const cardOf = target => target?.closest?.('.expanded-tile[data-session]') ?? null
+  document.addEventListener('focusin', event => markCurrent(cardOf(event.target)), true)
+  document.addEventListener(
+    'pointerdown',
+    event => {
+      document.body.classList.remove('keys-used')
+      markCurrent(cardOf(event.target))
+    },
+    true,
+  )
+  // Tab moves focus as a shortcut does: the ring shows where it went
+  window.addEventListener('keydown', event => event.key === 'Tab' && document.body.classList.add('keys-used'), true)
+}
+
+function markCurrent(card) {
+  if (!card || card === view.currentCard) return
+  if (view.closedPlace && view.closedPlace.handedTo !== card) view.closedPlace = null
+  view.currentCard?.classList.remove('is-current')
+  view.currentCard = card
+  card.classList.add('is-current')
+}
+
+/** The current card while it is still on the board, else null. */
+function currentCard() {
+  return view.currentCard?.isConnected ? view.currentCard : null
+}
+
+/**
+ * The board's one listener for shortcuts. It hears a key before anything else does (a write box, a
+ * terminal), so a shortcut works wherever the focus is; a key that is no shortcut goes on untouched.
+ */
+function setupShortcuts() {
+  window.addEventListener(
+    'keydown',
+    event => {
+      // off (Settings, Keys), every key does what it does in any window
+      if (!view.settings.shortcuts) return
+      // an open dialog (the start window, Settings and its key picker) has the keys to itself
+      if (document.querySelector('dialog[open]')) return
+      const id = K.commandFor(event, view.keymap ?? K.keymap())
+      const run = id ? SHORTCUT_RUNS[id] : null
+      if (!run) return
+      // in a terminal, Ctrl and a key is the shell's (Ctrl+C stops what runs there), as in iTerm
+      if (K.isShellKey(event) && event.target.closest?.('.terminal-tile')) return
+      event.preventDefault()
+      event.stopPropagation()
+      document.body.classList.add('keys-used')
+      // a key held down runs it once, but moving keeps on moving
+      if (!event.repeat || SHORTCUT_REPEATS.has(id)) run()
+    },
+    true,
+  )
+}
+
 /** The + in the header: pick a folder, the Claude app or the Terminal, and a session starts there. */
 function setupStart() {
   const dialog = document.querySelector('#start-dialog')
@@ -477,6 +877,28 @@ function setupStart() {
   document.querySelector('#existing-search').addEventListener('input', event => {
     view.start.search = event.target.value
     drawExisting()
+  })
+  // the list from the keyboard: ↓ from the search goes into it, ↑ from its first row back up, and
+  // Enter in the search takes the top match (added to CCC, or gone to when it is on the board already)
+  const search = document.querySelector('#existing-search')
+  const list = document.querySelector('#existing-list')
+  const rowButton = row => row?.querySelector('.existing-add') ?? row?.querySelector('.existing-open')
+  search.addEventListener('keydown', event => {
+    if (event.altKey || event.metaKey || event.ctrlKey || event.isComposing) return
+    const first = list.querySelector('.existing-row')
+    if (event.key === 'ArrowDown' && first) {
+      event.preventDefault()
+      rowButton(first)?.focus()
+    } else if (event.key === 'Enter' && first) {
+      event.preventDefault()
+      first.querySelector('.existing-add')?.click()
+    }
+  })
+  list.addEventListener('keydown', event => {
+    if (event.key !== 'ArrowUp' || event.altKey || event.metaKey || event.ctrlKey || event.shiftKey) return
+    if (event.target.closest('.existing-row') !== list.querySelector('.existing-row')) return
+    event.preventDefault()
+    search.focus()
   })
   // closed without starting anything, a space kept by a + is let go
   dialog.addEventListener('close', () => {
@@ -530,6 +952,22 @@ function setupStart() {
   if (perm.selectedIndex < 0) perm.value = ''
   perm.addEventListener('change', () => writeStored(START_MODE_KEY, perm.value))
   document.querySelector('#start-go').addEventListener('click', () => startSession(dialog))
+  // Enter starts, whatever is highlighted: Space picks a folder, a place or a mode. So ⌘T and then
+  // Enter starts a session as the window shows it. In the first message's box Enter is a new line,
+  // and ⌘Enter starts, as before; in a menu Enter picks, as menus do
+  dialog.addEventListener(
+    'keydown',
+    event => {
+      if (event.key !== 'Enter' || event.metaKey || event.ctrlKey || event.altKey || event.shiftKey || event.isComposing) return
+      if (event.target.closest?.('textarea, select')) return
+      // a conversation from history has no Start: Enter presses the button highlighted, or takes the top match
+      if (view.start.mode === 'existing') return
+      event.preventDefault()
+      event.stopPropagation()
+      if (!document.querySelector('#start-go').disabled) startSession(dialog)
+    },
+    true,
+  )
   document.querySelector('#start-background-info').addEventListener('click', explainBackground)
   prompt.addEventListener('input', () => drawStart())
   prompt.addEventListener('keydown', event => {
@@ -620,7 +1058,10 @@ function explainBackground() {
 function drawStart() {
   const start = view.start
   const state = L.startState({ ...start, appName: chosenApp().name, prompt: document.querySelector('#start-prompt').value })
-  document.querySelector('#start-folders').replaceChildren(
+  // picked with Space, the folder list is drawn again: the cursor stays on that folder
+  const folders = document.querySelector('#start-folders')
+  const kept = rememberFocus(folders)
+  folders.replaceChildren(
     ...(start.folders.length
       ? start.folders.map(folder => {
           const label = L.folderLabel(folder)
@@ -634,6 +1075,7 @@ function drawStart() {
         })
       : [el('p', { class: 'hint' }, 'No folders yet. Choose one.')]),
   )
+  restoreFocus(folders, kept)
   const isArtifact = start.mode === 'artifact'
   // an artifact is picked from its list, as a conversation is: no folder, no place to start in
   const isExisting = start.mode === 'existing' || isArtifact
@@ -704,25 +1146,26 @@ function drawExisting() {
   const now = Date.now()
   list.replaceChildren(
     ...shown.map(conversation => {
-      const add = el('button', { type: 'button', class: 'primary existing-add', disabled: conversation.onBoard }, conversation.onBoard ? 'On the board' : 'Add to CCC')
-      add.addEventListener('click', () => addExisting(conversation, add))
+      // on the board already, the button goes to its card: pressing it always brings the conversation into view
+      const add = el('button', { type: 'button', class: 'primary existing-add', title: conversation.onBoard ? 'It is on the board: go to its card' : 'Put it on the board' }, conversation.onBoard ? 'Show it' : 'Add to CCC')
+      add.addEventListener('click', () => (conversation.onBoard ? showOnBoard(conversation.sessionId) : addExisting(conversation, add)))
       const open = openExisting(conversation)
       return el(
         'div',
-        { class: 'existing-row', role: 'listitem' },
+        { class: 'existing-row', role: 'listitem', 'data-conversation': conversation.sessionId },
         el(
           'div',
           { class: 'existing-main' },
           el('span', { class: 'existing-title', title: conversation.title }, conversation.title),
-          el('span', { class: 'existing-meta', title: conversation.folder }, [L.folderLabel(conversation.folder).name, L.timeAgo(conversation.modifiedAt, now), WHERE_LABEL[conversation.where]].filter(Boolean).join(' · ')),
+          el('span', { class: 'existing-meta', title: conversation.folder }, [L.folderLabel(conversation.folder).name, L.timeAgo(conversation.modifiedAt, now), WHERE_LABEL[conversation.where], L.conversationState(conversation)].filter(Boolean).join(' · ')),
         ),
-        el('div', { class: 'existing-actions' }, open, add),
+        el('div', { class: 'existing-actions' }, ...[open, add].filter(Boolean)),
       )
     }),
   )
 }
 
-/** The second way in for a conversation: open it where it lives (the app, VS Code), or pick it up again in a Terminal. */
+/** The second way in for a conversation: open it where it lives (the app, VS Code), or pick it up again in a Terminal (none while it runs there). */
 function openExisting(conversation) {
   const link = L.openLink({ sessionId: conversation.sessionId, appSessionId: conversation.appSessionId, entrypoint: conversation.where === 'vscode' ? 'claude-vscode' : '' })
   if (link) {
@@ -730,23 +1173,35 @@ function openExisting(conversation) {
     anchor.addEventListener('click', () => addExisting(conversation, null))
     return anchor
   }
+  // running in its terminal now: picking it up in a second one would clash with it
+  if (conversation.isRunning) return null
   const appName = chosenApp().name
   const resume = el('button', { type: 'button', class: 'secondary existing-open', title: `Opens ${appName} in its folder, picks this conversation up again there, and adds it to CCC` }, `Resume in ${appName}`)
   resume.addEventListener('click', async () => {
     resume.disabled = true
-    const problem = document.querySelector('#start-problem')
-    try {
-      const response = await fetch('/api/start', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-CCC-Action': 'start' }, body: JSON.stringify({ sessionId: conversation.sessionId, resume: true, app: view.settings.terminalApp }) })
-      const data = response.ok ? await response.json() : { problem: 'Could not open the Terminal. Is the board still running?' }
-      if (!data.ok) problem.textContent = data.problem || 'Could not open the Terminal.'
-      else await addExisting(conversation, null)
-    } catch {
-      problem.textContent = 'Could not open the Terminal. Is the board still running?'
-    } finally {
-      resume.disabled = false
-    }
+    const problem = await resumeInTerminal(conversation.sessionId)
+    document.querySelector('#start-problem').textContent = problem
+    resume.disabled = false
+    if (!problem) await addExisting(conversation, null)
   })
   return resume
+}
+
+/** Opens the terminal app in the conversation's folder and picks it up again there: '' when it opened, else what went wrong. */
+async function resumeInTerminal(sessionId) {
+  try {
+    const response = await fetch('/api/start', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-CCC-Action': 'start' }, body: JSON.stringify({ sessionId, resume: true, app: view.settings.terminalApp }) })
+    const data = response.ok ? await response.json() : { problem: 'Could not open the Terminal. Is the board still running?' }
+    return data.ok ? '' : data.problem || 'Could not open the Terminal.'
+  } catch {
+    return 'Could not open the Terminal. Is the board still running?'
+  }
+}
+
+/** Closes the window and brings the chat of a conversation on the board already into view. */
+function showOnBoard(sessionId) {
+  document.querySelector('#start-dialog').close()
+  window.dispatchEvent(new CustomEvent('ccc:show-session', { detail: { sessionId } }))
 }
 
 /** Puts the conversation on the board, closes the window and brings its chat into view. */
@@ -890,16 +1345,13 @@ async function startSession(dialog) {
     })
     const data = response.ok ? await response.json() : { problem: 'Could not start it. Is the board still running?' }
     if (data.ok && data.planned) {
-      // its card is on the board at once, with the cursor in it for the first message
       start.didStart = true
-      dialog.close()
-      await poll()
-      window.dispatchEvent(new CustomEvent('ccc:show-session', { detail: { sessionId: data.sessionId } }))
-      setTimeout(() => focusChat(data.sessionId), 400)
+      closeKeepingPlace(dialog)
+      await showPlanned(data.sessionId)
     } else if (data.ok) {
       start.didStart = true
       start.files = []
-      dialog.close()
+      closeKeepingPlace(dialog)
       // the board goes to the session's card once it shows up; to its terminal, when Claude asks
       // something there first
       view.startedAt = Date.now()
@@ -912,6 +1364,60 @@ async function startSession(dialog) {
   } finally {
     start.isStarting = false
     drawStart()
+  }
+}
+
+/** A short note at the bottom of the board, gone after a few seconds: for a shortcut that could not do its job. */
+function showToast(text) {
+  let note = document.querySelector('#board-toast')
+  if (!note) {
+    note = el('div', { id: 'board-toast', class: 'board-toast', role: 'status' })
+    document.body.append(note)
+  }
+  note.textContent = text
+  note.classList.add('shown')
+  clearTimeout(note.timer)
+  note.timer = setTimeout(() => note.classList.remove('shown'), 4000)
+}
+
+/** A background session's card, just made: on the board at once, gone to, with the cursor in it for the first message. */
+async function showPlanned(sessionId) {
+  await poll()
+  // the current card at once, so the keys go on from it; the board glides down to it once it is in its place
+  const card = document.querySelector(`.expanded-tile[data-session="${CSS.escape(sessionId)}"]`)
+  if (card) markCurrent(card)
+  window.dispatchEvent(new CustomEvent('ccc:show-session', { detail: { sessionId } }))
+}
+
+/**
+ * Quick new session: a session in the background at once, with no window: in the folder and the
+ * mode the start window would take (the one picked last, else the most recent folder). Its card
+ * comes onto the board with the cursor in it, for the first message.
+ */
+async function quickNewSession() {
+  const start = view.start
+  if (start.isStarting) return
+  start.isStarting = true
+  try {
+    let folder = start.folder
+    if (!folder) {
+      const response = await fetch('/api/folders', { cache: 'no-store' })
+      const data = response.ok ? await response.json() : {}
+      folder = Array.isArray(data.folders) ? (data.folders.find(one => typeof one === 'string') ?? '') : ''
+    }
+    if (!folder) return showToast('Quick new session needs a folder: start one with ⌘T first.')
+    const response = await fetch('/api/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-CCC-Action': 'start' },
+      body: JSON.stringify({ folder, where: 'background', prompt: '', app: view.settings.terminalApp, mode: readStored(START_MODE_KEY) ?? '' }),
+    })
+    const data = response.ok ? await response.json() : { problem: 'Could not start it. Is the board still running?' }
+    if (data.ok && data.planned) await showPlanned(data.sessionId)
+    else showToast(data.problem || 'Could not start it.')
+  } catch {
+    showToast('Could not start it. Is the board still running?')
+  } finally {
+    start.isStarting = false
   }
 }
 
@@ -928,7 +1434,7 @@ async function openTerminal(dialog) {
     return
   }
   start.didStart = true
-  dialog.close()
+  closeKeepingPlace(dialog)
   await poll()
   window.dispatchEvent(new CustomEvent('ccc:show-session', { detail: { sessionId: id } }))
 }
@@ -1012,10 +1518,13 @@ function drawStopped(stopped) {
   )
 }
 
-/** Resumes a stopped background session: '' when it is on its way, else what went wrong. */
-async function resumeBackground(sessionId, text) {
+/**
+ * Resumes a stopped background session: '' when it is on its way, else what went wrong. `takeOver`:
+ * one that ended in its terminal may be picked up in CCC's background too.
+ */
+async function resumeBackground(sessionId, text, takeOver = false) {
   try {
-    const response = await fetch('/api/background/resume', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-CCC-Action': 'background-resume' }, body: JSON.stringify({ sessionId, text }) })
+    const response = await fetch('/api/background/resume', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-CCC-Action': 'background-resume' }, body: JSON.stringify({ sessionId, text, ...(takeOver ? { takeOver: true } : {}) }) })
     const data = response.ok ? await response.json() : { problem: 'Could not resume it. Is the board still running?' }
     if (!data.ok) return data.problem || 'Could not resume it.'
     if (data.shown && typeof data.terminalId === 'string') view.awaited = data.terminalId
@@ -1670,8 +2179,14 @@ function renderTiles(sessions, now, day, tags) {
     seen.add(card.id)
   }
   for (const id of L.arrivals(view.onBoard, opened.map(card => card.id))) arriving.add(id)
+  // the current card leaving the board (closed, deleted, ended elsewhere): where it was, so the card
+  // nearest to it is the current one next, not the first on the board
+  let leftFrom = null
+  let isAnyGone = false
   for (const [id, tile] of view.tiles) {
     if (seen.has(id)) continue
+    isAnyGone = true
+    if (tile.node === view.currentCard) leftFrom = cardPlace(tile.node, id)
     view.grid.drop(id)
     if (tile.isChat) dropChat(id)
     if (tile.isTerminal) dropTerminal(id)
@@ -1679,6 +2194,8 @@ function renderTiles(sessions, now, day, tags) {
     view.tiles.delete(id)
     view.newestLog.delete(id)
   }
+  if (leftFrom) handOff(leftFrom)
+  if (isAnyGone) backInBounds()
   document.querySelector('#sessions-empty').hidden = sessions.length + shells.length + opened.length > 0
   view.order = [...arranged.map(session => session.sessionId), ...shells.map(card => card.id), ...opened.map(card => card.id)]
   drawRunning()
@@ -2681,6 +3198,10 @@ setupLost()
 document.querySelector('#map-clear').addEventListener('click', clearFinishedRuns)
 setupChat({
   sessionOf: id => view.byId.get(id),
+  // whether the keyboard shortcuts are on: waiting boxes then take number keys and show them
+  shortcutsOn: () => Boolean(view.settings.shortcuts),
+  // the version each model family runs now ("opus" is Opus 5.5), from the models the board's sessions ran
+  modelVersions: () => modelVersions([...view.byId.values()]),
   // the editor a step's file opens in, or null while the setting is off
   editorOf: () => L.editorChoice(view.settings.editor, view.editorApps),
   titleOf: id => view.tags.get(id),
@@ -2700,8 +3221,11 @@ setupChat({
   isResumable: id => (view.stopped ?? []).some(one => one.sessionId === id),
   // it stopped with CCC's keeper (a crash, or a force quit): its card is greyed out, with Restart
   isLost: id => L.lostSessions(view.keeper, view.stopped).some(one => one.sessionId === id),
-  // the message was just sent, so it waits in the inbox and goes in first
-  onResume: id => resumeBackground(id, ''),
+  // the message was just sent, so it waits in the inbox and goes in first. One that ended in its
+  // terminal is handed to CCC's background as it resumes
+  onResume: id => resumeBackground(id, '', true),
+  terminalAppName: () => chosenApp().name,
+  onResumeInTerminal: id => resumeInTerminal(id),
   // the facts panel starts folded away, as every session now opens into its chat; opened, it stays open
   isSideHidden: id => !view.layout.chats?.[id]?.showSide,
   onSide: (id, isHidden) => {
@@ -2737,14 +3261,45 @@ window.addEventListener('ccc:show-session', event => {
   if (!node) return
   // put in a gap by its +, the card is where the person is looking: no glide, the cursor goes in
   if (view.grid?.isInGap(id)) return isTerminal(id) ? focusTerminal(id) : focusChat(id)
+  // a card just drawn may not be in its place on the grid yet: measured before, it would seem near the
+  // top of the board, and the board would scroll up to it first. So the glide waits until it holds still
+  settledOnBoard(node).then(() => {
+    if (!node.isConnected) return
+    node.classList.remove('spotlit')
+    void node.offsetWidth
+    node.classList.add('spotlit')
+    glideTo(cardTop(node), () => (isTerminal(id) ? focusTerminal(id) : focusChat(id)))
+  })
+})
+
+/** Resolves once a card's place on the page holds still: the same at two looks a moment apart, or at most `most` ms on. */
+async function settledOnBoard(node, most = 800) {
+  const end = performance.now() + most
+  let last = null
+  while (performance.now() < end) {
+    const top = node.getBoundingClientRect().top + window.scrollY
+    if (last !== null && Math.abs(top - last) < 1) return
+    last = top
+    await new Promise(resolve => setTimeout(resolve, 40))
+  }
+}
+
+/**
+ * Closes a window after something was started from it, with the board left where it is: on closing,
+ * the browser puts the cursor back where it was (in the card it came from) and would scroll to it.
+ */
+function closeKeepingPlace(dialog) {
+  const top = window.scrollY
+  dialog.close()
+  window.scrollTo({ top, behavior: 'instant' })
+}
+
+/** Where the page is scrolled to show a card from its top: just under the bars pinned at the top of the board. */
+function cardTop(node) {
   const pinned = Math.max(...['.taskbar', '#decor-top'].map(selector => document.querySelector(selector)?.getBoundingClientRect().bottom ?? 0))
   const most = document.scrollingElement.scrollHeight - window.innerHeight
-  const top = Math.min(most, Math.max(0, window.scrollY + node.getBoundingClientRect().top - pinned - SHOW_GAP))
-  node.classList.remove('spotlit')
-  void node.offsetWidth
-  node.classList.add('spotlit')
-  glideTo(top, () => (isTerminal(id) ? focusTerminal(id) : focusChat(id)))
-})
+  return Math.min(most, Math.max(0, window.scrollY + node.getBoundingClientRect().top - pinned - SHOW_GAP))
+}
 
 /** Scrolls the page to `top` with an ease in and out; a turn of the wheel or a touch stops it there. */
 function glideTo(top, done) {
@@ -2786,6 +3341,9 @@ setupTokenHistory()
 setupAgentSteps()
 followFocus()
 setupStart()
+setupCurrentCard()
+setupShortcuts()
+setupArrowKeys()
 setupShiftScroll()
 pollTokens()
 setInterval(pollTokens, TOKENS_POLL_MS)

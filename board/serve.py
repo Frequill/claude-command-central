@@ -34,6 +34,7 @@ SESSIONS_DIR = Path(os.environ.get("CCC_SESSIONS_DIR", CCC_DIR / "sessions"))
 REMOVED_FILE = Path(os.environ.get("CCC_REMOVED_FILE", CCC_DIR / "removed.json"))
 NOTES_FILE = Path(os.environ.get("CCC_NOTES_FILE", CCC_DIR / "notes.json"))
 PINNED_FILE = Path(os.environ.get("CCC_PINNED_FILE", CCC_DIR / "pinned.json"))
+NAMES_FILE = Path(os.environ.get("CCC_NAMES_FILE", CCC_DIR / "names.json"))
 PROJECTS_DIR = Path(os.environ.get("CCC_PROJECTS_DIR", Path.home() / ".claude" / "projects"))
 APP_SESSIONS_DIR = Path(os.environ.get("CCC_APP_SESSIONS_DIR", Path.home() / "Library" / "Application Support" / "Claude" / "claude-code-sessions"))
 APP_SESSION_ID = re.compile(r"^local_[A-Za-z0-9-]{1,64}$")
@@ -49,6 +50,8 @@ CAVEMAN_DIR = Path(os.environ.get("CCC_CAVEMAN_DIR", CCC_DIR / "caveman"))
 # the commands the person ran from a code block in a session's chat (Run), a folder per session; the
 # mod reads them and tells Claude (hooks/runs.ts)
 RUNS_DIR = Path(os.environ.get("CCC_RUNS_DIR", CCC_DIR / "runs"))
+# the model and effort picked for each session in its card's menu, which the session's mod sends its requests with
+CHOICES_DIR = Path(os.environ.get("CCC_CHOICES_DIR", CCC_DIR / "choices"))
 BACKGROUND_FILE = Path(os.environ.get("CCC_BACKGROUND_FILE", CCC_DIR / "background.json"))
 DELETED_FILE = Path(os.environ.get("CCC_DELETED_FILE", CCC_DIR / "deleted.json"))
 # after a conversation is deleted, what a Claude that was stopping writes late follows it to the Trash
@@ -58,7 +61,7 @@ LATE_SWEEPS_S = (2, 10, 30)
 CLAUDE_HOME = Path(os.environ.get("CCC_CLAUDE_HOME", Path.home() / ".claude"))
 TRASH_DIR = Path(os.environ.get("CCC_TRASH_DIR", Path.home() / ".Trash"))
 # what CCC keeps per session, each named after its id
-CCC_SESSION_DIRS = (SESSIONS_DIR, PROMPTS_DIR, COMMANDS_DIR, CAVEMAN_DIR, ANSWERS_DIR, APPROVALS_DIR, INBOX_DIR, UPLOADS_DIR, RUNS_DIR)
+CCC_SESSION_DIRS = (SESSIONS_DIR, PROMPTS_DIR, COMMANDS_DIR, CAVEMAN_DIR, ANSWERS_DIR, APPROVALS_DIR, INBOX_DIR, UPLOADS_DIR, CHOICES_DIR, RUNS_DIR)
 CAVEMAN_LEVELS = ("off", "lite", "full", "ultra")
 COMMANDS_MAX = 400
 COMMAND_NAME = re.compile(r"^[A-Za-z0-9_:.-]{1,80}$")
@@ -121,6 +124,10 @@ SYSTEM_BLOCK = re.compile(r"<system-reminder>.*?</system-reminder>", re.S)
 # a slash command or skill the person ran, as Claude Code writes it down
 COMMAND_NAME_TAG = re.compile(r"<command-name>\s*(/?[^<\s]+)\s*</command-name>")
 COMMAND_ARGS_TAG = re.compile(r"<command-args>(.*?)</command-args>", re.S)
+# "/model opus", "/effort high": a setting of the session's, shown as a note in the chat
+SETTING_COMMAND = re.compile(r"^/(model|effort)\s+([A-Za-z0-9._\[\]-]{1,80})$")
+# "/rename Fix the login bug": a new name for the conversation, shown as a note in the chat
+RENAME_COMMAND = re.compile(r"^/rename\s+(.{1,200})$", re.S)
 # the big base64 strings of a transcript line, which the chat never shows: images, thinking signatures
 PAYLOAD = re.compile(rb'("(?:data|base64|signature)":\s*")[A-Za-z0-9+/=]{1024,}"')
 # how the mod names the images of a message written in CCC (hooks/inbox.ts, promptFor)
@@ -157,7 +164,7 @@ BOARD_FILES = {"/": "index.html", "/index.html": "index.html", "/board.css": "bo
                "/layout.js": "layout.js", "/settings.js": "settings.js", "/notes.js": "notes.js",
                "/decor.js": "decor.js", "/dragon.js": "dragon.js",
                "/arrivals.js": "arrivals.js", "/chat.js": "chat.js", "/chat-logic.js": "chat-logic.js",
-               "/markdown.js": "markdown.js", "/placement.js": "placement.js",
+               "/markdown.js": "markdown.js", "/placement.js": "placement.js", "/keys.js": "keys.js", "/refocus.js": "refocus.js",
                "/eva-logo.png": "eva-logo.png",
                "/terminal.js": "terminal.js", "/xterm.js": "xterm.js", "/xterm.css": "xterm.css", "/xterm-fit.js": "xterm-fit.js",
                "/grid.js": "grid.js", "/gridstack.js": "gridstack.js", "/gridstack.css": "gridstack.css",
@@ -258,6 +265,52 @@ def split_removed(sessions: list, removed: dict):
         else:
             hidden.append({"sessionId": session_id, "today": session.get("today")})
     return shown, hidden, back
+
+
+class Names:
+    """Names the person gave cards in CCC, { sessionId: name }: the card's name before any other,
+    at once, for any session (one in the Claude app, a terminal, the background)."""
+
+    def __init__(self, path: Path):
+        self.path = path
+        self.lock = threading.Lock()
+
+    def load(self) -> dict:
+        try:
+            data = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        names = data.get("names") if isinstance(data, dict) else None
+        if not isinstance(names, dict):
+            return {}
+        return {key: name for key, name in names.items() if SAFE_ID.match(key) and isinstance(name, str) and name.strip()}
+
+    def set(self, session_id: str, name: str):
+        """Keeps the name; an empty one takes it away, and the card is named as before."""
+        with self.lock:
+            names = self.load()
+            if name:
+                names[session_id] = name
+            else:
+                names.pop(session_id, None)
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = self.path.with_suffix(".tmp")
+            temporary.write_text(json.dumps({"names": names}), encoding="utf-8")
+            temporary.replace(self.path)
+
+
+# the longest name a card is given in CCC
+NAME_MAX = 120
+
+
+def clean_name(text) -> str:
+    """A name as kept: one line, the spaces in it single, at most NAME_MAX long; '' for none."""
+    return " ".join(str(text).split())[:NAME_MAX] if isinstance(text, str) else ""
+
+
+def with_names(sessions: list, names: dict) -> list:
+    """Each session with the name the person gave its card in CCC, over any other it has."""
+    return [{**session, "title": names[session["sessionId"]], "isNamedInCcc": True} if isinstance(session, dict) and session.get("sessionId") in names else session for session in sessions]
 
 
 class Pins:
@@ -439,9 +492,10 @@ def first_prompt(path: Path) -> str:
 EXISTING_SHOWN = 60
 
 
-def existing_conversations(projects_dir: Path, transcripts, app_ids: dict, on_board: set, limit: int = EXISTING_SHOWN) -> list:
+def existing_conversations(projects_dir: Path, transcripts, app_ids: dict, on_board: set, limit: int = EXISTING_SHOWN, runs=lambda session_id: False) -> list:
     """The conversations in Claude's history on this Mac, the most recent first, for "+" to add
-    to the board: each with its name, its folder, when it was last written in and where it lives."""
+    to the board: each with its name, its folder, when it was last written in, where it lives and
+    whether Claude runs it now (`runs`)."""
     files = []
     for folder, _dirs, names in os.walk(projects_dir):
         if "subagents" in Path(folder).parts:
@@ -465,7 +519,7 @@ def existing_conversations(projects_dir: Path, transcripts, app_ids: dict, on_bo
         folder = folder_of(path) or ""
         app_id = app_ids.get(session_id)
         where = "app" if app_id else ("vscode" if facts.get("entrypoint") == "claude-vscode" else "terminal")
-        found.append({"sessionId": session_id, "title": title, "folder": folder, "modifiedAt": int(mtime * 1000), "where": where, **({"appSessionId": app_id} if app_id else {}), "onBoard": session_id in on_board})
+        found.append({"sessionId": session_id, "title": title, "folder": folder, "modifiedAt": int(mtime * 1000), "where": where, **({"appSessionId": app_id} if app_id else {}), "onBoard": session_id in on_board, "isRunning": bool(runs(session_id))})
         if len(found) >= limit:
             break
     return found
@@ -585,8 +639,13 @@ class Transcripts:
 def read_transcript_facts(path: Path, size: int) -> dict:
     """The newest name and permission mode in a transcript: its tail first, the whole file if needed."""
     facts = facts_in(read_tail(path, size, TAIL_BYTES))
-    if ("title" not in facts or "permissionMode" not in facts) and TAIL_BYTES < size <= WHOLE_FILE_LIMIT:
-        facts = {**facts_in(read_tail(path, size, size)), **facts}
+    # a summary in the tail does not hide a name given further back (/rename, the app's): that one wins
+    if ("title" not in facts or facts.get("isSummaryTitle") or "permissionMode" not in facts) and TAIL_BYTES < size <= WHOLE_FILE_LIMIT:
+        whole = facts_in(read_tail(path, size, size))
+        named = {"title": whole["title"]} if "title" in whole and not whole.get("isSummaryTitle") else {}
+        facts = {**whole, **facts, **named}
+        if named:
+            facts.pop("isSummaryTitle", None)
     if "permissionMode" not in facts and size > WHOLE_FILE_LIMIT:
         mode = last_mode_before(path, size - TAIL_BYTES)
         if mode:
@@ -894,20 +953,30 @@ def read_bytes(path: Path, start: int, length: int) -> bytes:
 
 
 def facts_in(text: str) -> dict:
-    """The last name record (whole JSON lines only), the last permission mode, and where the session
-    was started (the Claude app, VS Code, a terminal), as Claude Code writes it on each record."""
+    """The session's name, the last permission mode, and where the session was started (the Claude
+    app, VS Code, a terminal), as Claude Code writes it on each record. The name is the last one given
+    (by /rename, or the Claude app's own), else the last summary Claude Code wrote of the conversation
+    (its ai-title): a terminal or background session gets one too, and is not named after the start of
+    its first message. Whole JSON lines only."""
     facts = {}
+    summary = None
     for line in reversed(text.splitlines()):
-        if "custom-title" not in line:
+        if "custom-title" not in line and (summary is not None or "ai-title" not in line):
             continue
         try:
             record = json.loads(line)
         except ValueError:
             continue
-        title = record.get("customTitle") if isinstance(record, dict) and record.get("type") == "custom-title" else None
-        if isinstance(title, str) and title.strip():
-            facts["title"] = title.strip()[:200]
+        if not isinstance(record, dict):
+            continue
+        if record.get("type") == "custom-title" and isinstance(record.get("customTitle"), str) and record["customTitle"].strip():
+            facts["title"] = record["customTitle"].strip()[:200]
             break
+        if summary is None and record.get("type") == "ai-title" and isinstance(record.get("aiTitle"), str) and record["aiTitle"].strip():
+            summary = record["aiTitle"].strip()[:200]
+    if "title" not in facts and summary:
+        facts["title"] = summary
+        facts["isSummaryTitle"] = True
     modes = MODE_FIELD.findall(text)
     if modes:
         facts["permissionMode"] = modes[-1]
@@ -1656,6 +1725,13 @@ def user_items(content, at) -> list:
         return []
     text = SYSTEM_BLOCK.sub("", "\n".join(texts)).strip()
     text = command_line(text) or text
+    # a model or effort picked in CCC's session menu (or typed) is a setting changed, not words to Claude
+    renamed = RENAME_COMMAND.match(text)
+    if renamed:
+        return [{"kind": "note", "text": f"Renamed to {clean_name(renamed.group(1))}", "at": at}]
+    setting = SETTING_COMMAND.match(text)
+    if setting:
+        return [{"kind": "note", "setting": setting.group(1), "value": setting.group(2), "text": f"{setting.group(1).capitalize()} set to {setting.group(2)}", "at": at}]
     sent = SENT_IMAGES.search(text)
     uploads = []
     if sent:
@@ -2122,12 +2198,46 @@ class Inbox:
         return waiting
 
 
-def chat_payload(session_id: str, transcripts: Transcripts, inbox: Inbox) -> dict:
+def chat_payload(session_id: str, transcripts: Transcripts, inbox: Inbox, answers_dir: Path = None, now_ms: float = None) -> dict:
     """The chat window's view of a session: its exchanges, and what waits to be sent to it."""
     if not isinstance(session_id, str) or not SAFE_ID.match(session_id):
         return {"items": [], "pending": []}
     path = transcripts.find(session_id)
-    return {"items": read_chat(path) if path else [], "pending": inbox.pending(session_id)}
+    items = read_chat(path) if path else []
+    if answers_dir is not None:
+        items = with_waiting_question(items, question_note(answers_dir, session_id, time.time() * 1000 if now_ms is None else now_ms))
+    return {"items": items, "pending": inbox.pending(session_id)}
+
+
+def question_note(answers_dir: Path, session_id: str, now_ms: float):
+    """The question box that the session's hook (answer_from_ccc.py) says waits for an answer right
+    now: {box, at, questions}, or None. Its hook renews it while it waits, so an old one is gone."""
+    try:
+        note = json.loads((answers_dir / f"{session_id}.box.json").read_text())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(note, dict) or not isinstance(note.get("box"), str) or not BOX_ID.match(note["box"]):
+        return None
+    at, beat = note.get("at"), note.get("beat")
+    if not all(isinstance(value, (int, float)) and not isinstance(value, bool) for value in (at, beat)) or now_ms - beat > APPROVAL_BEAT_MS:
+        return None
+    item = question_item({"questions": note.get("questions")}, at)
+    return {"box": note["box"], "at": at, "questions": item["questions"]} if item["questions"] else None
+
+
+def with_waiting_question(items: list, note) -> list:
+    """The chat with the question box its hook waits on marked so (it can be answered from CCC). A
+    session in a terminal writes its box down only once it is answered, so until then the box comes
+    from the hook's note, as the last thing in the chat."""
+    if note is None:
+        return items
+    texts = [one["question"] for one in note["questions"]]
+    for at in range(len(items) - 1, -1, -1):
+        item = items[at]
+        # only a box still open is the one the hook waits on: one asked before with the same questions has ended
+        if item.get("kind") == "question" and "answers" not in item and not item.get("isDeclined") and [one["question"] for one in item.get("questions", [])] == texts:
+            return items[:at] + [{**item, "isWaiting": True}] + items[at + 1:]
+    return items + [{"kind": "question", "questions": note["questions"], "at": note["at"], "toolId": f"box-{note['box']}", "isWaiting": True}]
 
 
 # ---------- answers to Claude's question boxes, given in CCC ----------
@@ -2167,7 +2277,8 @@ class Answers:
         """Leaves the answer (one per question, or the person's own words for the whole box); what
         went wrong, or '' when it is on its way."""
         path = self.transcripts.find(session_id)
-        box = next((item for item in read_chat(path) if item.get("kind") == "question" and item.get("toolId") == tool_id), None) if path else None
+        items = with_waiting_question(read_chat(path) if path else [], question_note(self.dir, session_id, now_ms))
+        box = next((item for item in items if item.get("kind") == "question" and item.get("toolId") == tool_id), None)
         if box is None:
             return "That question is no longer in the chat."
         if "answers" in box or box.get("isDeclined"):
@@ -2633,6 +2744,35 @@ def resume_background(terms, backgrounds, inbox, transcripts, session_id: str, t
     return {"sessionId": session_id, "terminalId": terminal_id, "shown": not is_hidden, **({"begun": True} if is_new else {})}, ""
 
 
+def runs_somewhere(terms, sessions_dir: Path, session_id: str, now_ms: int) -> bool:
+    """Whether Claude runs this session anywhere now: in CCC's background, or where it was started
+    (its snapshot is written every few seconds while it runs)."""
+    return is_running_background(terms, session_id) or runs_now(sessions_dir / f"{session_id}.json", now_ms)
+
+
+def take_over(backgrounds, terms, transcripts, app_ids: dict, sessions_dir: Path, session_id: str, now_ms: int) -> tuple:
+    """Hands a session that ended in its terminal to CCC's background, so resume_background can pick
+    it up there: (True if it was handed over just now, '') or (False, why it cannot be). One CCC started
+    in the background already is left as it is. It must have ended: two Claudes in one conversation
+    would write over each other. One the Claude app or VS Code holds is woken there instead."""
+    path = transcripts.find(session_id)
+    if path is None:
+        return False, "That conversation is not in Claude's history on this Mac."
+    if backgrounds.get(session_id):
+        return False, ""
+    if session_id in app_ids:
+        return False, "It lives in the Claude app: open it there to wake it."
+    facts = transcripts.describe(session_id)
+    if facts.get("entrypoint") == "claude-vscode":
+        return False, "It lives in VS Code: open it there to wake it."
+    if runs_somewhere(terms, sessions_dir, session_id, now_ms):
+        return False, "It still runs in its terminal. Write to it there, or end it there first."
+    # it goes on in the mode it was in, when the background can start in that one
+    mode = facts.get("permissionMode") if facts.get("permissionMode") in ("acceptEdits", "plan", "auto") else ""
+    backgrounds.keep(session_id, folder_of(path) or "", mode, now_ms)
+    return True, ""
+
+
 def start_attachments(body: bytes, inbox, now_ms: int):
     """The images and files sent ahead for a new session's first message, kept where Claude can open
     them: ({images, files} as paths, '') or (None, what is wrong). They were sent under a name of
@@ -2726,6 +2866,23 @@ def screen_mode(output: bytes):
     """The mode Claude's screen shows last in this output, or None when it shows none."""
     found = MODE_LINE.findall(terminals.ESCAPES.sub(b"", output or b""))
     return MODE_LINES[found[-1]] if found else None
+
+
+def is_running_background(terms, session_id: str) -> bool:
+    """Whether Claude runs for this session in CCC's background now."""
+    return any(isinstance(card, dict) and card.get("kind") == "claude" and card.get("sessionId") == session_id and not card.get("endedAt") for card in terms.list())
+
+
+def pick_start_mode(backgrounds, session_id: str, mode: str) -> str:
+    """The mode a background session that does not run now starts in, when its first message is sent
+    or it is resumed. '' when kept, else what is wrong."""
+    if mode not in SWITCHED_MODES:
+        return "Pick one of the modes in the list."
+    kept = backgrounds.get(session_id)
+    if not kept:
+        return "This session was not started in CCC's background."
+    backgrounds.keep(session_id, kept.get("folder", ""), mode, kept.get("at") or int(time.time() * 1000), planned=bool(kept.get("planned")), begun_at=kept.get("begunAt"))
+    return ""
 
 
 def switch_mode(terms, session_id: str, mode: str, wait_s: float = MODE_WAIT_S, sleep=time.sleep) -> str:
@@ -3344,6 +3501,7 @@ ANSWERS = Answers(ANSWERS_DIR, TRANSCRIPTS)
 APPROVALS = Approvals(APPROVALS_DIR)
 REMOVALS = Removals(REMOVED_FILE)
 PINS = Pins(PINNED_FILE)
+NAMES = Names(NAMES_FILE)
 DELETED = Deleted(DELETED_FILE)
 SCREEN_BOXES = {}
 CAVEMAN = Caveman(CAVEMAN_DIR)
@@ -3525,6 +3683,66 @@ def open_step_file(transcripts, data: dict, open_file=editors.open_file, install
     return {"ok": not problem, "editor": editor["name"], **({"problem": problem} if problem else {})}
 
 
+# ---------- the model and effort picked for one session ----------
+
+CHOICE_EFFORTS = ("low", "medium", "high", "xhigh", "max")
+# an alias (opus, opus[1m], opusplan) or a full id (claude-opus-5-5), as the mod takes them
+CHOICE_MODEL = re.compile(r"^[A-Za-z0-9._-]{1,80}(\[1m\])?$")
+
+
+def read_choice(choices_dir: Path, session_id) -> dict:
+    """The model and effort picked for the session in its card's menu: {model?, effort?}, {} for none."""
+    if not isinstance(session_id, str) or not SAFE_ID.match(session_id):
+        return {}
+    try:
+        data = json.loads((choices_dir / f"{session_id}.json").read_text())
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    model, effort = data.get("model"), data.get("effort")
+    return {**({"model": model} if isinstance(model, str) and CHOICE_MODEL.match(model) else {}), **({"effort": effort} if effort in CHOICE_EFFORTS else {})}
+
+
+def choose(choices_dir: Path, session_id, data: dict) -> str:
+    """Keeps a model or effort picked for one session, for its mod to send its requests with: that
+    session alone, nothing saved as the default for others. A model of "default" (or None) takes the
+    pick away, so the session runs its own model again. '' when kept, else what is wrong."""
+    if not isinstance(session_id, str) or not SAFE_ID.match(session_id):
+        return "That session could not be found."
+    choice = read_choice(choices_dir, session_id)
+    if "model" in data:
+        model = data["model"]
+        if model in (None, "default"):
+            choice.pop("model", None)
+        elif isinstance(model, str) and CHOICE_MODEL.match(model):
+            choice["model"] = model
+        else:
+            return "Pick a model in the list."
+    if "effort" in data:
+        if data["effort"] not in CHOICE_EFFORTS:
+            return "Pick an effort in the list."
+        choice["effort"] = data["effort"]
+    choices_dir.mkdir(parents=True, exist_ok=True)
+    target = choices_dir / f"{session_id}.json"
+    if not choice:
+        target.unlink(missing_ok=True)
+        return ""
+    temporary = choices_dir / f".{session_id}.{secrets.token_hex(4)}.tmp"
+    temporary.write_text(json.dumps(choice))
+    os.replace(temporary, target)
+    return ""
+
+
+def with_choices(sessions: list, choices_dir: Path) -> list:
+    """Each session with the model and effort picked for it in its card's menu, when there is a pick."""
+    marked = []
+    for session in sessions:
+        choice = read_choice(choices_dir, session.get("sessionId")) if isinstance(session, dict) else {}
+        marked.append({**session, "choice": choice} if choice else session)
+    return marked
+
+
 def session_folder(transcripts, session_id):
     """The folder a session works in, from its own transcript; None when that cannot be told."""
     path = transcripts.find(session_id) if isinstance(session_id, str) and SAFE_ID.match(session_id) else None
@@ -3617,7 +3835,8 @@ class Handler(SimpleHTTPRequestHandler):
             cards = with_screen_modes(TERMINALS, named_backgrounds(reveal_waiting(TERMINALS, TERMINALS.list(), SESSIONS_DIR, now_ms), TRANSCRIPTS, REMOVALS.load()))
             RUNS.settle(TERMINALS, now_ms, cards)
             cards = with_run_labels(cards, RUNS.terminals())
-            payload["sessions"] = with_artifacts(with_designs(with_screen_boxes(payload["sessions"], cards, now_ms, SCREEN_BOXES), TRANSCRIPTS), TRANSCRIPTS)
+            payload["sessions"] = with_names(payload["sessions"], NAMES.load())
+            payload["sessions"] = with_choices(with_artifacts(with_designs(with_screen_boxes(payload["sessions"], cards, now_ms, SCREEN_BOXES), TRANSCRIPTS), TRANSCRIPTS), CHOICES_DIR)
             lost, seen = KEEPER_WATCH.look(TERMINALS.keeper_id, cards, now_ms)
             stopped = stopped_backgrounds(BACKGROUNDS, cards, SESSIONS_DIR, TRANSCRIPTS, now_ms, lost)
             lost_now = [one["sessionId"] for one in stopped if one["sessionId"] in lost]
@@ -3662,7 +3881,8 @@ class Handler(SimpleHTTPRequestHandler):
         if route == "/api/existing":
             shown = board_payload(SESSIONS_DIR, REMOVALS, TRANSCRIPTS, APP_SESSIONS, pins=PINS)["sessions"]
             on_board = {session.get("sessionId") for session in shown}
-            conversations = existing_conversations(PROJECTS_DIR, TRANSCRIPTS, APP_SESSIONS.ids(), on_board)
+            now_ms = int(time.time() * 1000)
+            conversations = existing_conversations(PROJECTS_DIR, TRANSCRIPTS, APP_SESSIONS.ids(), on_board, runs=lambda session_id: runs_somewhere(TERMINALS, SESSIONS_DIR, session_id, now_ms))
             return self.send_json({"conversations": without_deleted(conversations, DELETED.load())})
         if route == "/api/tokens":
             return self.send_json(TOKENS.summary(time.time()))
@@ -3682,7 +3902,7 @@ class Handler(SimpleHTTPRequestHandler):
             session_id = parse_qs(urlsplit(self.path).query).get("session", [""])[0]
             if SAFE_ID.match(session_id):
                 RUNS.settle(TERMINALS, int(time.time() * 1000), session_id=session_id)
-            return self.send_json({**chat_payload(session_id, TRANSCRIPTS, INBOX), "runs": RUNS.shown(session_id)})
+            return self.send_json({**chat_payload(session_id, TRANSCRIPTS, INBOX, ANSWERS_DIR), "runs": RUNS.shown(session_id)})
         if route == "/api/step":
             query = parse_qs(urlsplit(self.path).query)
             session_id, tool_id = query.get("session", [""])[0], query.get("tool", [""])[0]
@@ -3710,10 +3930,10 @@ class Handler(SimpleHTTPRequestHandler):
 
     def do_POST(self):
         route = self.path.split("?", 1)[0]
-        action = {"/api/remove": "remove", "/api/notes": "notes", "/api/send": "send", "/api/answer": "answer", "/api/approve": "approve", "/api/start": "start", "/api/pick-folder": "pick", "/api/interrupt": "interrupt", "/api/add": "add", "/api/hurry": "hurry", "/api/open-file": "open-file", "/api/code-links": "code-links", "/api/open-code": "open-code", "/api/caveman": "caveman", "/api/background/resume": "background-resume", "/api/background/forget": "background-forget", "/api/background/dismiss": "background-dismiss", "/api/background/mode": "background-mode", "/api/stop-run": "stop-run", "/api/upload": "upload", "/api/delete": "delete", **TERMINAL_ROUTES}.get(route)
+        action = {"/api/remove": "remove", "/api/notes": "notes", "/api/send": "send", "/api/answer": "answer", "/api/approve": "approve", "/api/start": "start", "/api/pick-folder": "pick", "/api/interrupt": "interrupt", "/api/add": "add", "/api/hurry": "hurry", "/api/open-file": "open-file", "/api/code-links": "code-links", "/api/open-code": "open-code", "/api/caveman": "caveman", "/api/background/resume": "background-resume", "/api/background/forget": "background-forget", "/api/background/dismiss": "background-dismiss", "/api/background/mode": "background-mode", "/api/stop-run": "stop-run", "/api/upload": "upload", "/api/delete": "delete", "/api/choose": "choose", "/api/rename": "rename", **TERMINAL_ROUTES}.get(route)
         if not is_local_host(self.headers.get("Host", ""), PORT) or action is None or not is_from_board(self.headers, PORT, action):
             return self.send_error(403 if action else 404)
-        limits = {"remove": MAX_BODY_BYTES, "notes": MAX_NOTES_BODY_BYTES, "send": MAX_SEND_BODY_BYTES, "answer": MAX_ANSWER_BODY_BYTES, "approve": MAX_BODY_BYTES, "start": MAX_START_BODY_BYTES, "pick": MAX_BODY_BYTES, "interrupt": MAX_BODY_BYTES, "add": MAX_BODY_BYTES, "hurry": MAX_BODY_BYTES, "open-file": MAX_BODY_BYTES, "code-links": MAX_CODE_LINKS_BODY_BYTES, "open-code": MAX_BODY_BYTES * 2, "caveman": MAX_BODY_BYTES, "background-resume": MAX_START_BODY_BYTES, "background-forget": MAX_BODY_BYTES, "background-dismiss": MAX_BODY_BYTES, "background-mode": MAX_BODY_BYTES, "stop-run": MAX_BODY_BYTES, "delete": MAX_BODY_BYTES}
+        limits = {"remove": MAX_BODY_BYTES, "notes": MAX_NOTES_BODY_BYTES, "send": MAX_SEND_BODY_BYTES, "answer": MAX_ANSWER_BODY_BYTES, "approve": MAX_BODY_BYTES, "start": MAX_START_BODY_BYTES, "pick": MAX_BODY_BYTES, "interrupt": MAX_BODY_BYTES, "add": MAX_BODY_BYTES, "hurry": MAX_BODY_BYTES, "open-file": MAX_BODY_BYTES, "code-links": MAX_CODE_LINKS_BODY_BYTES, "open-code": MAX_BODY_BYTES * 2, "caveman": MAX_BODY_BYTES, "background-resume": MAX_START_BODY_BYTES, "background-forget": MAX_BODY_BYTES, "background-dismiss": MAX_BODY_BYTES, "background-mode": MAX_BODY_BYTES, "stop-run": MAX_BODY_BYTES, "delete": MAX_BODY_BYTES, "choose": MAX_BODY_BYTES, "rename": MAX_BODY_BYTES}
         if action.startswith("terminal-"):
             if not has_terminal_key(self.headers, TERMINALS.key):
                 return self.send_error(403)
@@ -3759,6 +3979,8 @@ class Handler(SimpleHTTPRequestHandler):
             request = read_resume_request(body, TRANSCRIPTS)
             if request is None:
                 return self.send_json({"ok": False, "problem": "That conversation's folder is not on this Mac any more."})
+            if runs_somewhere(TERMINALS, SESSIONS_DIR, request[1], int(time.time() * 1000)):
+                return self.send_json({"ok": False, "problem": "It still runs somewhere. Write to it there, or end it there first."})
             app = terminals.chosen_app((json_object(body) or {}).get("app"), terminals.installed_apps())
             try:
                 done = subprocess.run(resume_command(*request, app), capture_output=True, text=True, timeout=30)
@@ -3831,6 +4053,10 @@ class Handler(SimpleHTTPRequestHandler):
             session_id, mode = data.get("sessionId"), data.get("mode")
             if not isinstance(session_id, str) or not SAFE_ID.match(session_id) or not isinstance(mode, str):
                 return self.send_error(400)
+            # not running now (its first message not sent yet, or stopped): it starts in the mode picked
+            if not is_running_background(TERMINALS, session_id) and BACKGROUNDS.get(session_id):
+                problem = pick_start_mode(BACKGROUNDS, session_id, mode)
+                return self.send_json({"ok": not problem, **({"problem": problem} if problem else {})})
             problem = switch_mode(TERMINALS, session_id, mode)
             if not problem:
                 # resumed later, it starts in this mode again
@@ -3850,7 +4076,15 @@ class Handler(SimpleHTTPRequestHandler):
                 BACKGROUNDS.forget(session_id)
                 return self.send_json({"ok": True})
             text = data.get("text") if isinstance(data.get("text"), str) else ""
+            # one that ended in its terminal is handed to the background first, and picked up there
+            handed = False
+            if data.get("takeOver") is True:
+                handed, problem = take_over(BACKGROUNDS, TERMINALS, TRANSCRIPTS, APP_SESSIONS.ids(), SESSIONS_DIR, session_id, int(time.time() * 1000))
+                if problem:
+                    return self.send_json({"ok": False, "problem": problem})
             started, problem = resume_background(TERMINALS, BACKGROUNDS, INBOX, TRANSCRIPTS, session_id, text[:START_PROMPT_MAX])
+            if handed and not started:
+                BACKGROUNDS.forget(session_id)
             if started:
                 # it comes back onto the board, as one added from the history does
                 REMOVALS.forget([session_id])
@@ -3877,6 +4111,20 @@ class Handler(SimpleHTTPRequestHandler):
             return self.send_json({"ok": is_hurried, **({} if is_hurried else {"problem": "It has gone in already."})})
         if action == "open-file":
             return self.send_json(open_step_file(TRANSCRIPTS, json_object(body) or {}))
+        if action == "rename":
+            data = json_object(body) or {}
+            session_id, name = data.get("sessionId"), clean_name(data.get("name"))
+            if not isinstance(session_id, str) or not SAFE_ID.match(session_id):
+                return self.send_error(400)
+            NAMES.set(session_id, name)
+            # Claude's own lists (/resume, the app's) get the name too, from a session that takes messages
+            if name and data.get("tellClaude") is True:
+                INBOX.send(session_id, f"/rename {name}", [], "queue", int(time.time() * 1000), [])
+            return self.send_json({"ok": True, "name": name})
+        if action == "choose":
+            data = json_object(body) or {}
+            problem = choose(CHOICES_DIR, data.get("sessionId"), data)
+            return self.send_json({"ok": not problem, **({"problem": problem} if problem else {}), "choice": read_choice(CHOICES_DIR, data.get("sessionId"))})
         if action == "code-links":
             return self.send_json(code_places(TRANSCRIPTS, FILE_LISTS, json_object(body) or {}))
         if action == "open-code":
@@ -3905,6 +4153,7 @@ class Handler(SimpleHTTPRequestHandler):
                 sweep.daemon = True
                 sweep.start()
             PINS.drop(session_id)
+            NAMES.set(session_id, "")
             BACKGROUNDS.forget(session_id)
             REMOVALS.forget([session_id])
             return self.send_json({"ok": True, "moved": moved})

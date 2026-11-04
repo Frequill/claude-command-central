@@ -94,17 +94,32 @@ export function cellsOf(pixels, boardWidth) {
 }
 
 /**
- * Where a new card goes: at the very bottom of the board, where new things are added. It goes under
- * the half (left or right) that ends lowest: the board lifts cards into any room above them, so under
- * the other half it would rise into the room there instead of staying at the bottom.
+ * How many rows tall a new card is, so that two cards one above the other fit on the screen at once:
+ * `room` is the height between the bars at the top and the bottom of the window, in px, and `gap` the
+ * room kept between a card and a bar. Four cards, two by two, are then gone between with the keys
+ * without the page scrolling. Never smaller than a card can be, nor taller than a card starts at on a
+ * big screen.
  */
-export function lowestSpot(nodes) {
+export function rowsToFit(room, gap = 0) {
+  if (!Number.isFinite(room) || room <= 0) return FIRST.h
+  // two cards stacked take two of their heights, less the margin above the first and below the second
+  const rows = Math.floor((room - 2 * gap + 2 * MARGIN - 2) / (2 * ROW))
+  return Math.max(LEAST.h, Math.min(FIRST.h, rows))
+}
+
+/**
+ * Where a new card goes: the board fills row by row, as a page is read. It goes under the half (left
+ * or right) that ends highest, the left one when both end alike, so the first card is at the top on
+ * the left, the second beside it, the third under the first, and so on; never stacked under one half
+ * with room left beside it. `h` is how many rows tall it is (rowsToFit).
+ */
+export function nextSpot(nodes, h = FIRST.h) {
   const halves = [0, FIRST.w].map(x => ({
     x,
     bottom: Math.max(0, ...nodes.filter(node => node.x < x + FIRST.w && node.x + node.w > x).map(node => node.y + node.h)),
   }))
-  const spot = halves[1].bottom > halves[0].bottom ? halves[1] : halves[0]
-  return { ...FIRST, x: spot.x, y: spot.bottom }
+  const spot = halves[1].bottom < halves[0].bottom ? halves[1] : halves[0]
+  return { ...FIRST, h, x: spot.x, y: spot.bottom }
 }
 
 /**
@@ -250,9 +265,9 @@ const IN_GAP_MS = 10_000
 /**
  * Makes `box` the grid. `onStart` and `onEnd` mark the time a card is held, so the board does not
  * redraw under it; `oldPlace(id)` is a card's place on the old free board, in pixels, if it had one;
- * `onAddAt(gap)` is the + in an empty space, clicked.
+ * `onAddAt(gap)` is the + in an empty space, clicked; `startRows()` how many rows tall a new card is.
  */
-export function makeGrid(box, { onStart, onEnd, oldPlace, wobbles, animates, onAddAt }) {
+export function makeGrid(box, { onStart, onEnd, oldPlace, wobbles, animates, onAddAt, startRows = () => FIRST.h }) {
   // the bundle puts the class itself on the page
   const GridStack = window.GridStack.GridStack ?? window.GridStack
   // GridStack scrolls the page while a card is resized with the pointer within a row of the window's
@@ -438,7 +453,7 @@ export function makeGrid(box, { onStart, onEnd, oldPlace, wobbles, animates, onA
         placedInGap.set(id, Date.now())
       }
       const place = spot ? { x: spot.x, y: spot.y, w: spot.w, h: spot.h } : kept[id] ?? cellsOf(oldPlace?.(id), box.clientWidth)
-      grid.makeWidget(el, { id, minW: LEAST.w, minH: LEAST.h, ...(place ?? lowestSpot(grid.engine.nodes)) })
+      grid.makeWidget(el, { id, minW: LEAST.w, minH: LEAST.h, ...(place ?? nextSpot(grid.engine.nodes, startRows())) })
       items.set(id, { el, card })
     },
     /** Takes a card off the grid; the cards below rise into its place. */
@@ -496,10 +511,11 @@ export function makeGrid(box, { onStart, onEnd, oldPlace, wobbles, animates, onA
     /** Every card back to the first free spots, in the board's order, at the size a card starts at. */
     reset(order) {
       for (const id of Object.keys(kept)) delete kept[id]
+      const h = startRows()
       grid.batchUpdate()
       order.forEach((id, index) => {
         const item = items.get(id)
-        if (item) grid.update(item.el, { x: (index % 2) * FIRST.w, y: Math.floor(index / 2) * FIRST.h, w: FIRST.w, h: FIRST.h })
+        if (item) grid.update(item.el, { x: (index % 2) * FIRST.w, y: Math.floor(index / 2) * h, w: FIRST.w, h })
       })
       grid.batchUpdate(false)
       save()

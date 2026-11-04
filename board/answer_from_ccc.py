@@ -2,25 +2,28 @@
 """Run by Claude Code's PermissionRequest hook for AskUserQuestion: lets the person answer a
 question box from CCC's chat window instead of the Claude app.
 
-Claude Code puts the box in front of the person and runs this hook at the same time; whichever
-answers first wins, and the other is withdrawn. This hook waits for an answer the board's server
-leaves for the session, and hands it over as the box's answers. When the person answers in the app
-instead, or nothing comes, it ends without a word and the app decides as usual.
+Claude Code puts the box in front of the person and runs this hook at the same time, in the app,
+in VS Code and in a terminal alike; whichever answers first wins, and the other is withdrawn. While
+the box waits, this hook leaves a note of it for the board (the questions and their options: a
+session in a terminal writes its box into the transcript only once it is answered), and waits for
+an answer the board's server leaves for the session, to hand over as the box's answers. When the
+person answers where the session runs instead, or nothing comes, it takes its note away and ends
+without a word, and the session decides as usual.
 
-Only the desktop app and VS Code run the two side by side, so in a terminal session it ends at once.
 It never fails the session: any problem ends it quietly.
 """
 
 import json
 import os
 import re
+import secrets
+import signal
 import sys
 import time
 from pathlib import Path
 
 ANSWERS_DIR = Path(os.environ.get("CCC_ANSWERS_DIR", Path.home() / ".claude" / "ccc" / "answers"))
 SAFE_ID = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
-SIDE_BY_SIDE = {"claude-desktop", "claude-vscode"}
 QUESTION_TOOL = "AskUserQuestion"
 MAX_INPUT_BYTES = 1024 * 1024
 POLL_S = 0.5
@@ -87,19 +90,36 @@ def decision(given: dict, answers: dict) -> dict:
     return {"hookSpecificOutput": {"hookEventName": "PermissionRequest", "decision": {"behavior": "allow", "updatedInput": {**given, "answers": answers}}}}
 
 
-def answered_elsewhere(transcript, texts: list) -> bool:
-    """Whether the transcript already holds the result of the latest box with these questions: the
-    person answered it in the app, turned it down, or the turn was stopped."""
+def size_of(transcript) -> int:
+    """How long the transcript is now, in bytes; 0 when there is none yet."""
+    try:
+        return Path(transcript).stat().st_size
+    except (OSError, TypeError, ValueError):
+        return 0
+
+
+def answered_elsewhere(transcript, texts: list, since: int = 0) -> bool:
+    """Whether the transcript holds the result of a box with these questions, written from byte
+    `since` on (where the transcript ended when the hook began): the person answered it where the
+    session runs, turned it down, or the turn was stopped. A box asked before with the same questions
+    and ended then is not this one: a terminal writes the box itself down only once it is answered."""
     try:
         path = Path(transcript)
         size = path.stat().st_size
+        start = max(0, size - TRANSCRIPT_TAIL_BYTES)
         with path.open("rb") as handle:
-            handle.seek(max(0, size - TRANSCRIPT_TAIL_BYTES))
+            handle.seek(start)
             lines = handle.read().split(b"\n")
     except (OSError, TypeError, ValueError):
         return False
-    box_id = None
+    # where each line begins in the file, to tell what was written since the hook began
+    at = start
+    starts = []
     for line in lines:
+        starts.append(at)
+        at += len(line) + 1
+    box_id = None
+    for line, line_at in zip(lines, starts):
         if box_id is None and QUESTION_TOOL.encode() not in line:
             continue
         try:
@@ -114,37 +134,77 @@ def answered_elsewhere(transcript, texts: list) -> bool:
                 asked = (block.get("input") or {}).get("questions") if isinstance(block.get("input"), dict) else None
                 if isinstance(asked, list) and [one.get("question") for one in asked if isinstance(one, dict)] == texts:
                     box_id = block.get("id")
-            elif block.get("type") == "tool_result" and box_id and block.get("tool_use_id") == box_id:
+            elif block.get("type") == "tool_result" and box_id and block.get("tool_use_id") == box_id and line_at >= since:
                 return True
     return False
 
 
+def write_whole(path: Path, data: dict):
+    """Writes the file whole, so the server never reads half of it."""
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    temporary.write_text(json.dumps(data))
+    os.replace(temporary, path)
+
+
+def is_ours(path: Path, box_id: str) -> bool:
+    try:
+        return json.loads(path.read_text()).get("box") == box_id
+    except (OSError, ValueError, AttributeError):
+        return False
+
+
+def take_note_away(path: Path, box_id: str):
+    """Takes the note down, unless another box of the session has put its own there since."""
+    try:
+        if is_ours(path, box_id):
+            path.unlink()
+    except OSError:
+        pass
+
+
 def wait_for_answer(session_id: str, given: dict, texts: list, transcript, clock=time.time, sleep=time.sleep):
-    """The decision to print once an answer comes from CCC, or None when the box ended otherwise."""
+    """The decision to print once an answer comes from CCC, or None when the box ended otherwise.
+    The note stays up while the box waits, renewed now and then so the board knows the hook still runs."""
     started = clock()
+    since = size_of(transcript)
     path = ANSWERS_DIR / f"{session_id}.json"
-    checked = started
-    while clock() - started < MAX_WAIT_S:
-        answers = read_answer(path, texts, started * 1000)
-        if answers is not None:
-            take(path)
-            return decision(given, answers)
-        if clock() - checked >= TRANSCRIPT_EVERY_S:
-            checked = clock()
-            if answered_elsewhere(transcript, texts):
-                return None
-        sleep(POLL_S)
-    return None
+    note_path = ANSWERS_DIR / f"{session_id}.box.json"
+    box_id = secrets.token_hex(8)
+    note = {"box": box_id, "at": int(started * 1000), "beat": int(started * 1000), "questions": given.get("questions")}
+    ANSWERS_DIR.mkdir(parents=True, exist_ok=True)
+    write_whole(note_path, note)
+    try:
+        checked = started
+        while clock() - started < MAX_WAIT_S:
+            answers = read_answer(path, texts, started * 1000)
+            if answers is not None:
+                take(path)
+                return decision(given, answers)
+            if clock() - checked >= TRANSCRIPT_EVERY_S:
+                checked = clock()
+                if answered_elsewhere(transcript, texts, since):
+                    return None
+                if is_ours(note_path, box_id):
+                    write_whole(note_path, {**note, "beat": int(checked * 1000)})
+            sleep(POLL_S)
+        return None
+    finally:
+        take_note_away(note_path, box_id)
+
+
+def leave_on_signal(signum, _frame):
+    """Claude Code withdraws the hook when the box was answered where the session runs: the note comes down."""
+    raise SystemExit(0)
 
 
 def main():
     try:
-        if os.environ.get("CLAUDE_CODE_ENTRYPOINT") not in SIDE_BY_SIDE:
-            return 0
         notice = json.loads(sys.stdin.buffer.read(MAX_INPUT_BYTES) or b"null")
         box = box_of(notice)
         if box is None:
             return 0
+        for signum in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
+            signal.signal(signum, leave_on_signal)
         session_id, given, texts = box
         answer = wait_for_answer(session_id, given, texts, notice.get("transcript_path"))
         if answer is not None:

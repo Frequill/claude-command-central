@@ -5,9 +5,10 @@ import * as L from './board-logic.js'
 import { nearestCrater } from './arrivals.js'
 import { blocks, inline } from './markdown.js'
 import * as C from './chat-logic.js'
+import * as K from './keys.js'
 import { chooseCrater, planFlight } from './dragon.js'
 import * as P from './placement.js'
-import { cellsOf, closedStrip, gapAt, isRoomForCard, lowestSpot, movedBack, movedBy, passedAt, resizedTo, stripAt } from './grid.js'
+import { cellsOf, closedStrip, gapAt, isRoomForCard, movedBack, movedBy, nextSpot, passedAt, resizedTo, rowsToFit, stripAt } from './grid.js'
 
 const NOW = 1_000_000_000
 
@@ -470,8 +471,8 @@ test('a card is one card wide, two when large, or the width it was pulled to', (
 })
 
 test('settings fall back to their defaults; wobble follows the mode', () => {
-  assert.deepEqual(L.normalizeSettings(null), { theme: 'clean', animations: true, wobble: 'aero', cardSize: 'compact', freeze: false, statusBar: true, sidePanel: true, shiftScroll: false, scrollButtons: ['key:Shift'], showNotes: true, terminalApp: 'auto', editor: 'off' })
-  assert.deepEqual(L.normalizeSettings({ theme: 'doom', animations: 'yes', wobble: 'x', cardSize: 'huge', freeze: 'no', statusBar: 1 }), { theme: 'clean', animations: true, wobble: 'aero', cardSize: 'compact', freeze: false, statusBar: true, sidePanel: true, shiftScroll: false, scrollButtons: ['key:Shift'], showNotes: true, terminalApp: 'auto', editor: 'off' })
+  assert.deepEqual(L.normalizeSettings(null), { theme: 'clean', animations: true, wobble: 'aero', cardSize: 'compact', freeze: false, statusBar: true, sidePanel: true, shiftScroll: false, scrollButtons: ['key:Shift'], showNotes: true, terminalApp: 'auto', editor: 'off', shortcuts: false, keys: {} })
+  assert.deepEqual(L.normalizeSettings({ theme: 'doom', animations: 'yes', wobble: 'x', cardSize: 'huge', freeze: 'no', statusBar: 1 }), { theme: 'clean', animations: true, wobble: 'aero', cardSize: 'compact', freeze: false, statusBar: true, sidePanel: true, shiftScroll: false, scrollButtons: ['key:Shift'], showNotes: true, terminalApp: 'auto', editor: 'off', shortcuts: false, keys: {} })
   assert.equal(L.normalizeSettings({ statusBar: false }).statusBar, false)
   assert.equal(L.normalizeSettings({ freeze: true }).freeze, true)
   assert.equal(L.normalizeSettings({ cardSize: 'large' }).cardSize, 'large')
@@ -556,10 +557,31 @@ test('a box answered here: one pick replaces the last, many go in and out, Other
   assert.equal(C.isDraftReady([], draft), false)
 })
 
-test('only boxes in the Claude app and VS Code can be answered from CCC', () => {
-  assert.equal(C.ANSWERS_FROM_CCC.has('claude-desktop'), true)
-  assert.equal(C.ANSWERS_FROM_CCC.has('claude-vscode'), true)
-  assert.equal(C.ANSWERS_FROM_CCC.has('cli'), false)
+test('a box is answered from CCC wherever the session runs, while its hook waits with it', () => {
+  const box = { kind: 'question', toolId: 'toolu_q1', questions: [] }
+  // a box in the app's or VS Code's transcript, as before
+  assert.equal(C.canAnswerQuestion(box, { entrypoint: 'claude-desktop' }), true)
+  assert.equal(C.canAnswerQuestion(box, { entrypoint: 'claude-vscode' }), true)
+  // a terminal's box, CCC's background ones too, once its hook says it waits
+  assert.equal(C.canAnswerQuestion(box, { entrypoint: 'cli' }), false)
+  assert.equal(C.canAnswerQuestion({ ...box, toolId: 'box-0123456789abcdef', isWaiting: true }, { entrypoint: 'cli' }), true)
+  assert.equal(C.canAnswerQuestion({ ...box, toolId: undefined, isWaiting: true }, { entrypoint: 'cli' }), false)
+  assert.equal(C.canAnswerQuestion(undefined, { entrypoint: 'claude-desktop' }), false)
+})
+
+test('a box only its hook knows of is told from one in the transcript', () => {
+  assert.equal(C.isHookBox({ kind: 'question', toolId: 'box-0123456789abcdef' }), true)
+  assert.equal(C.isHookBox({ kind: 'question', toolId: 'toolu_q1' }), false)
+  assert.equal(C.isHookBox({ kind: 'tool', toolId: 'box-0123456789abcdef' }), false)
+  assert.equal(C.isHookBox(null), false)
+})
+
+test('the box says where else it can be answered', () => {
+  assert.equal(C.answerPlace({ entrypoint: 'claude-desktop' }), 'the app')
+  assert.equal(C.answerPlace({ entrypoint: 'claude-vscode' }), 'VS Code')
+  assert.equal(C.answerPlace({ entrypoint: 'cli' }), 'its terminal')
+  assert.equal(C.answerPlace(undefined), 'its terminal')
+  assert.equal(C.approvalStatus(undefined, 'its terminal'), 'Answer here, or in its terminal.')
 })
 
 test('the next-step box offers its buttons while its question waits, in a session that takes messages', () => {
@@ -904,7 +926,10 @@ test('the window says when it can write and when the message has to wait', () =>
   assert.deepEqual(C.composeState({ turn: { isRunning: false } }), { canSend: false, note: 'This session runs an older CCC. Restart it to write to it from here.' })
   assert.deepEqual(C.composeState({ takesMessages: true, turn: { isRunning: false } }), { canSend: true, note: '' })
   assert.match(C.composeState({ takesMessages: true, turn: { isRunning: true } }).note, /Enter or Send queues it until Claude is done; ⌘Enter stops Claude/)
-  assert.match(C.composeState({ takesMessages: true, endedAt: 5, turn: {} }).note, /has ended/)
+  // one that ended in its terminal is picked up in CCC's background by sending to it
+  const ended = C.composeState({ takesMessages: true, endedAt: 5, turn: {} })
+  assert.match(ended.note, /ended in its terminal. Sending resumes it here/)
+  assert.equal(ended.resumeHere, true)
   // a stopped session of the Claude app or VS Code is woken by opening it there
   const asleep = C.composeState({ takesMessages: true, endedAt: 5, turn: {}, appSessionId: 'local_abc-1' })
   assert.deepEqual([asleep.canSend, asleep.wakeIn], [true, 'the Claude app'])
@@ -1139,8 +1164,8 @@ test('the "/" menu opens on the first word and narrows to what is typed', () => 
 })
 
 test('the session settings mark what the session runs now', () => {
-  assert.deepEqual(C.sessionSetup({ stats: { model: 'claude-opus-5-5', effort: 'high', mode: 'auto' } }), { modelId: 'claude-opus-5-5', effort: 'high', mode: 'auto' })
-  assert.deepEqual(C.sessionSetup(undefined), { modelId: '', effort: '', mode: '' })
+  assert.deepEqual(C.sessionSetup({ stats: { model: 'claude-opus-5-5', effort: 'high', mode: 'auto' } }), { modelId: 'claude-opus-5-5', picked: null, effort: 'high', mode: 'auto' })
+  assert.deepEqual(C.sessionSetup(undefined), { modelId: '', picked: null, effort: '', mode: '' })
   assert.equal(C.sessionSetup({ stats: {}, permissionMode: 'auto' }).mode, 'auto')
   assert.equal(C.sessionSetup({ stats: { mode: 'plan' }, permissionMode: 'auto' }).mode, 'plan')
   // in CCC's background its own screen says the mode; Claude's default mode is named manual
@@ -1164,6 +1189,55 @@ test('the session settings mark what the session runs now', () => {
   assert.equal(C.sameChoice('high', 'high'), true)
   assert.deepEqual(C.modelChoices([]), ['default', 'sonnet', 'opus', 'haiku', 'fable', 'best', 'opusplan'])
   assert.deepEqual(C.modelChoices(['opus', 5]), ['opus'])
+})
+
+test('the model menu names each model as Claude\'s picker does, with its version from the sessions', () => {
+  const sessions = [{ stats: { model: 'claude-opus-5-5' } }, { stats: { model: 'claude-opus-4-1' } }, { stats: { model: 'claude-sonnet-4-5-20250929' } }, { stats: { model: 'claude-fable-5-1[1m]' } }, { stats: {} }, null]
+  const versions = C.modelVersions(sessions)
+  assert.deepEqual(versions, { opus: '5.5', sonnet: '4.5', fable: '5.1' })
+  assert.equal(C.modelLabel('opus', versions), 'Opus 5.5')
+  assert.equal(C.modelLabel('haiku', versions), 'Haiku')
+  assert.equal(C.modelLabel('sonnet[1m]', versions), 'Sonnet 4.5 · 1M')
+  assert.equal(C.modelLabel('default', versions), 'Default')
+  assert.equal(C.modelLabel('opusplan'), 'Opus Plan')
+  assert.equal(C.modelLabel('claude-opus-5-5[1m]'), 'Opus 5.5 · 1M')
+  assert.equal(C.modelLabel('something-else'), 'something-else')
+  assert.equal(C.modelAbout('best'), 'The most capable model there is')
+  assert.equal(C.modelAbout('opus'), '')
+  // the 1M versions are a switch of their own, not five more models
+  const options = ['default', 'sonnet', 'opus', 'haiku', 'fable', 'best', 'sonnet[1m]', 'opus[1m]', 'fable[1m]', 'opusplan']
+  const menu = C.modelMenu(options, 'opus', versions)
+  assert.deepEqual(menu.choices.map(choice => choice.label), ['Default', 'Sonnet 4.5', 'Opus 5.5', 'Haiku', 'Fable 5.1', 'Best', 'Opus Plan'])
+  assert.deepEqual(menu.choices.filter(choice => choice.isOn).map(choice => choice.option), ['opus'])
+  assert.deepEqual(menu.long, { isOn: false, canSwitch: true, option: 'opus[1m]' })
+  const long = C.modelMenu(options, 'opus[1m]', versions)
+  assert.deepEqual(long.choices.filter(choice => choice.isOn).map(choice => choice.option), ['opus'])
+  assert.deepEqual(long.long, { isOn: true, canSwitch: true, option: 'opus' })
+  // nothing picked for the session in CCC: Default, the session's own model
+  const own = C.modelMenu(options, null, versions)
+  assert.deepEqual(own.choices.filter(choice => choice.isOn).map(choice => choice.option), ['default'])
+  assert.deepEqual(own.long, { isOn: false, canSwitch: false, option: null })
+  // Haiku has no 1M version: the switch waits for a model that has one
+  assert.deepEqual(C.modelMenu(options, 'haiku', versions).long, { isOn: false, canSwitch: false, option: null })
+  assert.equal(C.modelMenu(['opus', 'haiku'], 'opus').long, null)
+})
+
+test('a model or effort picked in CCC for one session shows on that card at once, over what it ran last', () => {
+  const session = { stats: { model: 'claude-fable-5-1', effort: 'high' }, choice: { model: 'opus', effort: 'max' } }
+  assert.deepEqual([C.sessionSetup(session).modelId, C.sessionSetup(session).picked, C.sessionSetup(session).effort], ['opus', 'opus', 'max'])
+  const own = { stats: { model: 'claude-fable-5-1', effort: 'high' } }
+  assert.deepEqual([C.sessionSetup(own).modelId, C.sessionSetup(own).picked, C.sessionSetup(own).effort], ['claude-fable-5-1', null, 'high'])
+  assert.equal(C.modelLabel(C.sessionSetup(session).modelId, { opus: '5.5' }), 'Opus 5.5')
+})
+
+test('a model or effort changed shows as a note, and waits as one while Claude works', () => {
+  assert.equal(C.settingNote({ setting: 'model', value: 'opus' }, { opus: '5.5' }), 'Model set to Opus 5.5')
+  assert.equal(C.settingNote({ setting: 'effort', value: 'high' }), 'Effort set to high')
+  assert.equal(C.settingNote({ text: 'Background work reported back' }), 'Background work reported back')
+  assert.deepEqual(C.settingCommand('/model opus[1m]'), { setting: 'model', value: 'opus[1m]' })
+  assert.deepEqual(C.settingCommand(' /effort max '), { setting: 'effort', value: 'max' })
+  assert.equal(C.settingCommand('/model'), null)
+  assert.equal(C.settingCommand('please /model opus'), null)
 })
 
 
@@ -1487,14 +1561,20 @@ test('the file of a step opens in the editor picked, and only with the setting o
   assert.equal(L.editorChoice('auto', []), null)
 })
 
-test('a new card goes to the very bottom of the board, under the half that ends lowest', () => {
-  assert.deepEqual(lowestSpot([]), { x: 0, y: 0, w: 6, h: 32 })
-  // the left half ends at 64, the right at 32: under the right one it would rise, so it goes under the left
-  const nodes = [{ x: 0, y: 0, w: 6, h: 32 }, { x: 6, y: 0, w: 6, h: 32 }, { x: 0, y: 32, w: 6, h: 32 }]
-  assert.deepEqual(lowestSpot(nodes), { x: 0, y: 64, w: 6, h: 32 })
-  assert.deepEqual(lowestSpot([{ x: 6, y: 0, w: 6, h: 90 }]), { x: 6, y: 90, w: 6, h: 32 })
+test('new cards fill the board row by row: left, then right, then the next row', () => {
+  assert.deepEqual(nextSpot([]), { x: 0, y: 0, w: 6, h: 32 })
+  // one card on the left: the next goes beside it, not under it
+  const one = [{ x: 0, y: 0, w: 6, h: 32 }]
+  assert.deepEqual(nextSpot(one), { x: 6, y: 0, w: 6, h: 32 })
+  // both halves end alike: the next row starts on the left
+  const two = [...one, { x: 6, y: 0, w: 6, h: 32 }]
+  assert.deepEqual(nextSpot(two), { x: 0, y: 32, w: 6, h: 32 })
+  const three = [...two, { x: 0, y: 32, w: 6, h: 32 }]
+  assert.deepEqual(nextSpot(three), { x: 6, y: 32, w: 6, h: 32 })
+  // a tall card on the right: the left, ending higher, gets the next one
+  assert.deepEqual(nextSpot([{ x: 6, y: 0, w: 6, h: 90 }]), { x: 0, y: 0, w: 6, h: 32 })
   // a card as wide as the board ends both halves
-  assert.deepEqual(lowestSpot([{ x: 0, y: 0, w: 12, h: 40 }]), { x: 0, y: 40, w: 6, h: 32 })
+  assert.deepEqual(nextSpot([{ x: 0, y: 0, w: 12, h: 40 }]), { x: 0, y: 40, w: 6, h: 32 })
 })
 
 test("caveman mode: a session's own level wins over the default, and unknown levels count as none", () => {
@@ -1695,7 +1775,8 @@ test('a background session that stopped is resumed by sending to it', () => {
   assert.equal(state.canSend, true)
   assert.equal(state.resumeHere, true)
   assert.match(state.note, /Sending resumes it there/)
-  assert.equal(C.composeState(ended).resumeHere, undefined)
+  // not one of CCC's: it ended in its terminal, and is resumed here all the same
+  assert.match(C.composeState(ended).note, /ended in its terminal/)
   // running, it takes the message as any session does
   assert.equal(C.composeState({ takesMessages: true }, true).resumeHere, undefined)
 })
@@ -1759,4 +1840,346 @@ test('a run says where Claude is with it', () => {
   assert.equal(C.runHeard({ typedAt: 1, endedAt: 2, exitCode: 0, sentAt: 3, told: true }), 'Claude has seen this')
   // closed before it ended: nothing was sent, the next message tells of it
   assert.equal(C.runHeard({ typedAt: 1, endedAt: 2, exitCode: null }), 'Claude sees this with your next message')
+})
+
+test('a key press is a shortcut by its physical key, the modifiers in one order', () => {
+  const press = (code, mods = {}, key = 'x') => ({ code, key, ctrlKey: false, altKey: false, shiftKey: false, metaKey: false, ...mods })
+  assert.equal(K.chordOf(press('ArrowLeft', { altKey: true, metaKey: true })), 'Alt+Meta+ArrowLeft')
+  assert.equal(K.chordOf(press('KeyT', { metaKey: true }, 't')), 'Meta+KeyT')
+  assert.equal(K.chordOf(press('Tab', { shiftKey: true, ctrlKey: true })), 'Control+Shift+Tab')
+  // with Cmd held Chrome says "7" for Cmd+Shift+7 on a Swedish keyboard: the key is what counts
+  assert.equal(K.chordOf(press('Digit7', { metaKey: true, shiftKey: true }, '7')), 'Shift+Meta+Digit7')
+  // a modifier on its own is no shortcut
+  assert.equal(K.chordOf(press('MetaLeft', { metaKey: true }, 'Meta')), null)
+  assert.equal(K.chordOf(press('ShiftRight', { shiftKey: true }, 'Shift')), null)
+  assert.equal(K.chordOf({}), null)
+  assert.equal(K.normalChord('Meta + Alt + ArrowLeft'), 'Alt+Meta+ArrowLeft')
+  for (const bad of ['', 'Meta', 'Meta+', 'Hyper+KeyT', 'Meta+Meta+KeyT', 'Meta+key t', null]) assert.equal(K.normalChord(bad), null, String(bad))
+})
+
+test('a shortcut shows as a Mac writes it, symbols as this keyboard has them', () => {
+  assert.equal(K.formatChord('Alt+Meta+ArrowLeft'), '⌥⌘←')
+  assert.equal(K.formatChord('Meta+KeyT'), '⌘T')
+  assert.equal(K.formatChord('Control+Shift+Tab'), '⌃⇧Tab')
+  assert.equal(K.formatChord('Meta+Digit1'), '⌘1')
+  assert.equal(K.formatChord('Meta+Comma'), '⌘,')
+  // a Swedish keyboard's own letters, from the browser's layout map
+  const swedish = new Map([['Minus', '+'], ['Slash', '-'], ['KeyT', 't']])
+  assert.equal(K.formatChord('Meta+Minus', swedish), '⌘+')
+  assert.equal(K.formatChord('Meta+KeyT', swedish), '⌘T')
+  assert.equal(K.formatChord('nonsense'), '')
+})
+
+test('the defaults are the ones agreed, every one a key the board window gets', () => {
+  const map = K.keymap()
+  assert.equal(map.get('Meta+KeyT'), 'newSession')
+  assert.equal(map.get('Meta+KeyW'), 'closeCard')
+  assert.equal(map.get('Alt+Meta+ArrowRight'), 'cardRight')
+  assert.equal(map.get('Control+Tab'), 'cardNext')
+  assert.equal(map.get('Meta+Digit9'), 'card9')
+  // Quick new session has no key until the person gives it one
+  assert.deepEqual(K.bindings().quickNew, [])
+  assert.equal([...map.values()].includes('quickNew'), false)
+  assert.deepEqual(K.clashes(), [])
+  // no default is a key Chrome or macOS keeps, nor a symbol key that moves between layouts
+  const defaults = K.COMMANDS.flatMap(command => command.keys)
+  assert.deepEqual(defaults.filter(chord => K.takenBy(chord)), [])
+  assert.deepEqual(defaults.filter(chord => /\+(Slash|BracketLeft|BracketRight|Backslash|Semicolon|Quote|Minus|Equal|Backquote)$/.test(chord)), [])
+  assert.equal(K.takenBy('Meta+KeyE'), 'Chrome keeps it')
+  assert.equal(new Set(K.COMMANDS.map(command => command.id)).size, K.COMMANDS.length)
+  // each default is written the one way key presses are, or it would never match
+  assert.deepEqual(defaults.filter(chord => K.normalChord(chord) !== chord), [])
+  assert.equal(map.get('Shift+Meta+KeyM'), 'sessionMenu')
+})
+
+test('the person\'s own keys replace a default, can leave a command with none, and clashes are found', () => {
+  const custom = { closeCard: ['Control+KeyW'], palette: [], nobody: ['Meta+KeyZ'], stop: ['broken'] }
+  const map = K.keymap(custom)
+  assert.equal(map.get('Control+KeyW'), 'closeCard')
+  assert.equal(map.get('Meta+KeyW'), undefined)
+  assert.equal(map.get('Meta+KeyK'), undefined)
+  // a broken shortcut is dropped, which leaves that command with none
+  assert.equal([...map.values()].includes('stop'), false)
+  assert.equal(map.get('Meta+KeyZ'), undefined)
+  // two commands on one key: the first listed wins, and the Keys tab is told
+  const clash = { stop: ['Meta+KeyT'] }
+  assert.equal(K.keymap(clash).get('Meta+KeyT'), 'newSession')
+  assert.deepEqual(K.clashes(clash), [{ chord: 'Meta+KeyT', ids: ['newSession', 'stop'] }])
+  // what is kept: only real changes, written the one way
+  assert.deepEqual(K.cleanCustom({ newSession: ['Meta+KeyT'], closeCard: ['Meta + Control + KeyW'], nobody: ['x'], stop: 'Meta+KeyS' }), { closeCard: ['Control+Meta+KeyW'] })
+  assert.deepEqual(K.cleanCustom(null), {})
+})
+
+test('a key press finds its command, and an unbound one none', () => {
+  const map = K.keymap()
+  assert.equal(K.commandFor({ code: 'KeyT', key: 't', metaKey: true, ctrlKey: false, altKey: false, shiftKey: false }, map), 'newSession')
+  assert.equal(K.commandFor({ code: 'KeyT', key: 't', metaKey: false, ctrlKey: false, altKey: false, shiftKey: false }, map), null)
+  assert.equal(K.commandFor({ code: 'MetaLeft', key: 'Meta', metaKey: true }, map), null)
+})
+
+test('the arrow keys go to the nearest card that way, cards in line first, and never wrap', () => {
+  // two rows: A B C on top, D under A and B, E under C
+  const A = { id: 'A', x: 0, y: 0, w: 300, h: 200 }
+  const B = { id: 'B', x: 310, y: 0, w: 300, h: 200 }
+  const C = { id: 'C', x: 620, y: 0, w: 300, h: 400 }
+  const D = { id: 'D', x: 0, y: 210, w: 610, h: 300 }
+  const E = { id: 'E', x: 620, y: 410, w: 300, h: 100 }
+  const all = [A, B, C, D, E]
+  const go = (from, way) => K.cardInDirection(from, all, way)?.id ?? null
+  assert.equal(go(A, 'right'), 'B')
+  assert.equal(go(B, 'right'), 'C')
+  assert.equal(go(C, 'left'), 'B')
+  assert.equal(go(A, 'down'), 'D')
+  assert.equal(go(B, 'down'), 'D')
+  assert.equal(go(C, 'down'), 'E')
+  assert.equal(go(D, 'up'), 'A')
+  // to the right of D lie both C and E, as near as each other: the one most in line with D's middle
+  assert.equal(go(D, 'right'), 'E')
+  // a wide card under A that reaches further right is not to A's right
+  assert.equal(K.cardInDirection(A, [A, D], 'right'), null)
+  // nothing that way: stay
+  assert.equal(go(A, 'left'), null)
+  assert.equal(go(A, 'up'), null)
+  assert.equal(go(E, 'down'), null)
+  assert.equal(K.cardInDirection(A, all, 'sideways'), null)
+  assert.equal(K.cardInDirection(null, all, 'left'), null)
+  // a card with no size (folded, hidden) is never gone to
+  assert.equal(K.cardInDirection(A, [A, { id: 'Z', x: 400, y: 0, w: 0, h: 0 }], 'right'), null)
+  assert.equal(K.firstCard([E, C, D, B, A]).id, 'A')
+  assert.equal(K.firstCard([]), null)
+})
+
+test('arrow keys in a group of buttons: along a row or a list, and on to the row above or below', () => {
+  assert.equal(K.arrowStep('ArrowRight'), 'next')
+  assert.equal(K.arrowStep('ArrowLeft'), 'previous')
+  assert.equal(K.arrowStep('ArrowDown'), 'rowDown')
+  assert.equal(K.arrowStep('ArrowUp'), 'rowUp')
+  assert.equal(K.arrowStep('Enter'), null)
+  // a list runs downwards: up and down move along it, left and right do nothing
+  assert.equal(K.arrowStep('ArrowDown', true), 'next')
+  assert.equal(K.arrowStep('ArrowUp', true), 'previous')
+  assert.equal(K.arrowStep('ArrowRight', true), null)
+  // the row below is landed in at the button most in line
+  assert.equal(K.nearestIndex([10, 120, 260], 130), 1)
+  assert.equal(K.nearestIndex([10, 120, 260], 900), 2)
+  assert.equal(K.nearestIndex([], 5), -1)
+})
+
+test('cards in reading order: next and previous go round, Cmd+9 is the last, Needs you is found after the current one', () => {
+  // a row of three whose tops differ a little, then one card under them
+  const A = { id: 'A', x: 0, y: 0, w: 300, h: 200 }
+  const B = { id: 'B', x: 310, y: 8, w: 300, h: 200 }
+  const C = { id: 'C', x: 620, y: 0, w: 300, h: 200 }
+  const D = { id: 'D', x: 0, y: 210, w: 300, h: 200 }
+  const cards = [D, C, B, A]
+  assert.deepEqual(K.readingOrder(cards).map(card => card.id), ['A', 'B', 'C', 'D'])
+  assert.equal(K.cardInOrder(cards, 'A', 1).id, 'B')
+  assert.equal(K.cardInOrder(cards, 'D', 1).id, 'A')
+  assert.equal(K.cardInOrder(cards, 'A', -1).id, 'D')
+  assert.equal(K.cardInOrder(cards, null, 1).id, 'A')
+  assert.equal(K.cardInOrder(cards, null, -1).id, 'D')
+  assert.equal(K.cardInOrder([], 'A', 1), null)
+  assert.equal(K.cardNumber(cards, 1).id, 'A')
+  assert.equal(K.cardNumber(cards, 3).id, 'C')
+  assert.equal(K.cardNumber(cards, 9).id, 'D')
+  assert.equal(K.cardNumber(cards, 6), null)
+  const waiting = new Set(['A', 'C'])
+  const isWaiting = card => waiting.has(card.id)
+  assert.equal(K.nextWaiting(cards, 'A', isWaiting).id, 'C')
+  assert.equal(K.nextWaiting(cards, 'C', isWaiting).id, 'A')
+  assert.equal(K.nextWaiting(cards, null, isWaiting).id, 'A')
+  assert.equal(K.nextWaiting(cards, 'A', card => card.id === 'A'), null)
+})
+
+
+test('a shortcut needs Cmd, Ctrl or Option, and is moved off the command that had it', () => {
+  assert.equal(K.bindProblem('Meta+KeyT'), '')
+  assert.equal(K.bindProblem('F5'), '')
+  assert.equal(K.bindProblem('KeyT'), 'Add Cmd, Ctrl or Option, so typing stays as it is.')
+  assert.equal(K.bindProblem('Shift+KeyT'), 'Add Cmd, Ctrl or Option, so typing stays as it is.')
+  assert.equal(K.bindProblem('Meta+KeyQ'), '⌘Q can’t be used: macOS quits the browser with it.')
+  assert.equal(K.bindProblem('nonsense'), 'That is not a key.')
+  // Cmd+K given to Stop: the palette loses it, and that is said
+  const { custom, movedFrom } = K.rebind({}, 'stop', 'Meta+KeyK')
+  assert.deepEqual(custom, { stop: ['Meta+KeyK'], palette: [] })
+  assert.deepEqual(movedFrom, ['palette'])
+  assert.equal(K.keymap(custom).get('Meta+KeyK'), 'stop')
+  // given one key of its two defaults, that one key is what it keeps (↺ puts both back)
+  assert.deepEqual(K.rebind(custom, 'stop', 'Meta+Period').custom, { palette: [], stop: ['Meta+Period'] })
+})
+
+test('the keys changed are kept with the settings, the rest come from the defaults', () => {
+  assert.deepEqual(L.normalizeSettings({}).keys, {})
+  // the shortcuts are off until the person turns them on
+  assert.equal(L.normalizeSettings({}).shortcuts, false)
+  assert.equal(L.normalizeSettings({ shortcuts: 'yes' }).shortcuts, false)
+  assert.equal(L.normalizeSettings({ shortcuts: true }).shortcuts, true)
+  assert.deepEqual(L.normalizeSettings({ keys: { closeCard: ['Control+KeyW'], nobody: ['Meta+KeyZ'] } }).keys, { closeCard: ['Control+KeyW'] })
+  assert.deepEqual(L.normalizeSettings({ keys: 'broken' }).keys, {})
+  assert.ok(L.SETTINGS_TABS.includes('keys'))
+})
+
+test('the palette finds commands and cards by any of their words, names that start with it first', () => {
+  const rows = [
+    { label: 'New session', detail: '⌘T' },
+    { label: 'Close the current card', detail: '⌘W' },
+    { label: 'Tandem integration', detail: 'Claude app · TQ' },
+    { label: 'Session menu', detail: '⇧⌘M' },
+  ]
+  assert.deepEqual(K.paletteMatches(rows, 'session').map(row => row.label), ['Session menu', 'New session'])
+  assert.deepEqual(K.paletteMatches(rows, 'tq tandem').map(row => row.label), ['Tandem integration'])
+  assert.equal(K.paletteMatches(rows, '').length, 4)
+  assert.deepEqual(K.paletteMatches(rows, 'nothing like it'), [])
+})
+
+test('number keys pick an option in a waiting box: 1 to 9, with no Cmd, Ctrl or Option', () => {
+  assert.equal(K.optionNumber({ code: 'Digit2' }), 2)
+  assert.equal(K.optionNumber({ code: 'Numpad9' }), 9)
+  // Shift is fine: on some keyboards the digits need it
+  assert.equal(K.optionNumber({ code: 'Digit1', shiftKey: true }), 1)
+  assert.equal(K.optionNumber({ code: 'Digit0' }), 0)
+  assert.equal(K.optionNumber({ code: 'Digit3', metaKey: true }), 0)
+  assert.equal(K.optionNumber({ code: 'KeyA' }), 0)
+  assert.equal(K.optionNumber(null), 0)
+})
+
+test('when a card closes, the one nearest to where it was is next, not the first on the board', () => {
+  const A = { id: 'A', x: 0, y: 0, w: 300, h: 200 }
+  const B = { id: 'B', x: 310, y: 0, w: 300, h: 200 }
+  const C = { id: 'C', x: 0, y: 2000, w: 300, h: 200 }
+  const D = { id: 'D', x: 310, y: 2000, w: 300, h: 200 }
+  const E = { id: 'E', x: 0, y: 2210, w: 300, h: 200 }
+  // D closes far down the board: C beside it is next, not A at the top
+  assert.equal(K.nearestCard(D, [A, B, C, E]).id, 'C')
+  assert.equal(K.nearestCard(A, [B, C, D, E]).id, 'B')
+  assert.equal(K.nearestCard(D, []), null)
+  assert.equal(K.nearestCard(null, [A]), null)
+  assert.equal(K.nearestCard(D, [D]), null)
+})
+
+
+test("a message queued while Claude worked waits for the answer to the question that turn ended with", () => {
+  const asking = { turn: { isRunning: false, startedAt: 1000, endedAt: 5000, choices: [{ label: 'Yes' }] } }
+  assert.equal(C.isHeldForAnswer(asking, { mode: 'queue', at: 3000 }), true)
+  // queued after the question, or Send now, or the buttons gone, or Claude working again: not held
+  assert.equal(C.isHeldForAnswer(asking, { mode: 'queue', at: 6000 }), false)
+  assert.equal(C.isHeldForAnswer(asking, { mode: 'now', at: 3000 }), false)
+  assert.equal(C.isHeldForAnswer({ turn: { ...asking.turn, choices: [] } }, { mode: 'queue', at: 3000 }), false)
+  assert.equal(C.isHeldForAnswer({ turn: { ...asking.turn, isRunning: true } }, { mode: 'queue', at: 3000 }), false)
+  assert.equal(C.isHeldForAnswer(undefined, { mode: 'queue', at: 3000 }), false)
+})
+
+
+test('after the bottom row closes, the board scrolls back up to the lowest card left, only for a real gap', () => {
+  // a window 800 high, scrolled to 2000: the lowest card left ends at 1900, so all of it is empty
+  assert.equal(K.backUpTo(2000, 800, 1900), 1100)
+  // the cards still fill most of it: stay
+  assert.equal(K.backUpTo(2000, 800, 2700), null)
+  assert.equal(K.backUpTo(2000, 800, 2600), null)
+  // no card left: back to the top
+  assert.equal(K.backUpTo(2000, 800, 0), 0)
+  // already at the top: nowhere to go
+  assert.equal(K.backUpTo(0, 800, 100), null)
+})
+
+
+test('a card closed hands on to its neighbour in the same row first, as a closed tab does', () => {
+  // two rows of wide cards: 2 is nearer to 4 than 3 is, but 3 is in its row
+  const one = { id: '1', x: 0, y: 0, w: 900, h: 640 }
+  const two = { id: '2', x: 910, y: 0, w: 900, h: 640 }
+  const three = { id: '3', x: 0, y: 650, w: 900, h: 640 }
+  const four = { id: '4', x: 910, y: 650, w: 900, h: 640 }
+  assert.equal(K.nearestCard(four, [one, two, three]).id, '3')
+  assert.equal(K.nearestCard(two, [one, three, four]).id, '1')
+  // alone in its row: the nearest card above or below
+  const five = { id: '5', x: 0, y: 1300, w: 900, h: 640 }
+  assert.equal(K.nearestCard(five, [one, two, three, four]).id, '3')
+})
+
+
+test('Ctrl+C stops Claude as the Stop button does, and a shell keeps its Ctrl keys', () => {
+  const map = K.keymap()
+  assert.equal(map.get('Control+KeyC'), 'stop')
+  assert.equal(map.get('Meta+Period'), 'stop')
+  assert.equal(K.isShellKey({ ctrlKey: true, code: 'KeyC' }), true)
+  assert.equal(K.isShellKey({ ctrlKey: true, shiftKey: true, code: 'Tab' }), true)
+  assert.equal(K.isShellKey({ ctrlKey: true, metaKey: true, code: 'KeyC' }), false)
+  assert.equal(K.isShellKey({ metaKey: true, code: 'KeyC' }), false)
+})
+
+test('a card says how its session comes back, by where it was started', () => {
+  const terminal = { takesMessages: true, endedAt: 5, entrypoint: 'cli' }
+  // running, or not started yet: nothing to bring back
+  assert.equal(C.comeBack(terminal, 'done'), null)
+  assert.equal(C.comeBack(terminal, 'working'), null)
+  assert.equal(C.comeBack({ ...terminal, planned: true }, 'ended'), null)
+  assert.equal(C.comeBack(undefined, 'ended'), null)
+  const ended = C.comeBack(terminal, 'ended')
+  assert.deepEqual([ended.kind, ended.label, ended.actions], ['terminal', 'ENDED', ['resume', 'terminal']])
+  assert.match(ended.text, /ended in its terminal/)
+  // not answering for a while: its terminal may have closed without a word
+  const stale = C.comeBack({ ...terminal, endedAt: undefined }, 'stale')
+  assert.deepEqual([stale.label, stale.actions], ['STALE', ['resume', 'terminal']])
+  assert.match(stale.text, /may have closed/)
+  // the Claude app and VS Code wake their own sessions
+  const app = C.comeBack({ ...terminal, appSessionId: 'local_abc-1' }, 'ended')
+  assert.deepEqual([app.kind, app.label, app.actions], ['app', 'ASLEEP', ['wake']])
+  assert.match(app.text, /Only the Claude app can wake it/)
+  assert.equal(C.comeBack({ ...terminal, entrypoint: 'claude-vscode', sessionId: '6f1f2c1e-1111-4222-8333-944455556666' }, 'ended').kind, 'vscode')
+  // one CCC ran in its background resumes there
+  const background = C.comeBack(terminal, 'ended', true)
+  assert.deepEqual([background.kind, background.label, background.actions], ['background', 'STOPPED', ['resume']])
+})
+
+test('a conversation of the history says whether Claude runs it now', () => {
+  assert.equal(L.conversationState({ where: 'terminal', isRunning: true }), 'running now')
+  assert.equal(L.conversationState({ where: 'terminal', isRunning: false }), 'ended')
+  assert.equal(L.conversationState({ where: 'app', isRunning: false }), 'asleep')
+  assert.equal(L.conversationState({ where: 'vscode', isRunning: false }), 'asleep')
+  // from an older server, which does not say
+  assert.equal(L.conversationState({ where: 'terminal' }), '')
+})
+
+test('an address written in a reply is a link, without the sentence around it', () => {
+  const link = address => ({ t: 'link', text: address, href: address })
+  assert.deepEqual(inline('Created and verified: https://aurora.jira.com/browse/ASG-1927'), [{ t: 'text', text: 'Created and verified: ' }, link('https://aurora.jira.com/browse/ASG-1927')])
+  // a full stop, comma or bracket that ends the sentence stays words; brackets of the address stay in it
+  assert.deepEqual(inline('(at https://x.com/y), done'), [{ t: 'text', text: '(at ' }, link('https://x.com/y'), { t: 'text', text: '), done' }])
+  assert.deepEqual(inline('See https://x.com/a_(b). Then'), [{ t: 'text', text: 'See ' }, link('https://x.com/a_(b)'), { t: 'text', text: '. Then' }])
+  assert.deepEqual(inline('Go <https://x.com/q?a=1&b=2> now'), [{ t: 'text', text: 'Go ' }, link('https://x.com/q?a=1&b=2'), { t: 'text', text: ' now' }])
+  // an address in code stays code, and one in a written link is that link
+  assert.deepEqual(inline('`https://in.code`'), [{ t: 'code', text: 'https://in.code' }])
+  assert.deepEqual(inline('[ASG](https://jira/x)'), [{ t: 'link', text: 'ASG', href: 'https://jira/x' }])
+  // only http and https
+  assert.deepEqual(inline('ftp://x.com'), [{ t: 'text', text: 'ftp://x.com' }])
+})
+
+test('a new card is as tall as lets two rows of cards fit on the screen', () => {
+  // 752 px between the bars, 14 kept at each end: two cards of 18 rows (360 px each, less margins)
+  assert.equal(rowsToFit(752, 14), 18)
+  assert.ok(14 + 2 * 18 * 20 - 2 * 6 <= 752 - 14)
+  assert.deepEqual(nextSpot([{ x: 0, y: 0, w: 6, h: 18 }], 18), { x: 6, y: 0, w: 6, h: 18 })
+  // never smaller than a card can be, nor taller than a card starts at on a big screen
+  assert.equal(rowsToFit(300, 14), 16)
+  assert.equal(rowsToFit(4000, 14), 32)
+  // unknown room (a window not drawn yet): the size a card starts at
+  assert.equal(rowsToFit(0), 32)
+  assert.equal(rowsToFit(NaN), 32)
+})
+
+test('the keys scroll only as far as a card needs to show whole', () => {
+  const band = { top: 73, bottom: 825 }
+  const at = (top, height, scrollY = 1000) => K.landingScroll({ band, card: { top, bottom: top + height }, scrollY, most: 5000, gap: 14 })
+  // whole on the screen already: the page stays put, so two rows of cards are gone between without moving
+  assert.equal(at(87, 348), 1000)
+  assert.equal(at(447, 348), 1000)
+  // partly below: the least way up, until its bottom is just above the status bar
+  assert.equal(at(600, 348), 1000 + 600 + 348 - 825 + 14)
+  // partly above: its top just under the bars
+  assert.equal(at(40, 348), 1000 + 40 - 73 - 14)
+  // taller than the room: from its top, wherever it is
+  assert.equal(at(300, 900), 1000 + 300 - 73 - 14)
+  assert.equal(at(-200, 900), 1000 - 200 - 73 - 14)
+  // never past the ends of the page
+  assert.equal(at(40, 348, 0), 0)
 })

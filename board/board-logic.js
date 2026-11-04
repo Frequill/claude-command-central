@@ -1,3 +1,5 @@
+import { cleanCustom } from './keys.js'
+
 // What the board computes from the sessions' snapshots: no DOM here, so node can test it.
 
 export const STALE_MS = 30_000
@@ -166,7 +168,7 @@ export function editorChoice(setting, apps) {
   return named ?? { id: 'auto', name: known.length === 1 ? known[0].name : 'your editor' }
 }
 
-export const SETTINGS_TABS = ['look', 'board', 'behaviour', 'terminal', 'background']
+export const SETTINGS_TABS = ['look', 'board', 'behaviour', 'terminal', 'keys', 'background']
 
 // wheel events closer together than this are one movement: a push of the wheel and the glide a Mac adds after it
 export const WHEEL_GAP_MS = 120
@@ -480,6 +482,17 @@ const SOURCES = {
   'claude-desktop': { kind: 'app', label: 'Claude app', about: 'Started in the Claude app' },
   'claude-vscode': { kind: 'vscode', label: 'VS Code', about: 'Started in VS Code' },
   cli: { kind: 'terminal', label: 'Terminal', about: 'Started in a terminal' },
+}
+
+/**
+ * Whether Claude runs a conversation of the history now, in a word for its row: one that ended in a
+ * terminal is picked up again from its card on the board, one asleep in an app wakes there.
+ * Nothing when the server did not say.
+ */
+export function conversationState(conversation) {
+  if (typeof conversation?.isRunning !== 'boolean') return ''
+  if (conversation.isRunning) return 'running now'
+  return conversation.where === 'app' || conversation.where === 'vscode' ? 'asleep' : 'ended'
 }
 
 /** Where a session runs: the Claude app, VS Code or a terminal; nothing for a place the board does not know. */
@@ -1273,6 +1286,10 @@ export function normalizeSettings(raw) {
     terminalApp: TERMINAL_APPS.includes(value.terminalApp) ? value.terminalApp : 'auto',
     // file names in opened steps open the file in this editor; off unless the person turns it on
     editor: EDITOR_CHOICES.includes(value.editor) ? value.editor : 'off',
+    // the board's keyboard shortcuts (⌘T, ⌘W, ⌥⌘arrows…); off unless the person turns them on
+    shortcuts: value.shortcuts === true,
+    // the keyboard shortcuts the person changed, { commandId: [shortcut] }; the rest keep their defaults (keys.js)
+    keys: cleanCustom(value.keys),
   }
 }
 

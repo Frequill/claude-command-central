@@ -59,6 +59,14 @@ Sessions already running pick CCC up when their current turn ends; new ones have
 
 The **+** in the header starts a session **in the background** by default: its card comes onto the board at once, and the first message you write there, with any images, videos or files, starts it. CCC runs `claude` itself, in the folder and mode you pick, and nothing opens. It works like any other session on the board, and you chat with it, answer its questions and approve its steps there. Its `>_` button shows the terminal it runs in; the × on that terminal hides it again, and Claude keeps working. The ⓘ next to the choice says what it means. Its settings (the model chip on its card) switch its **mode** too: manual, accept edits, plan or auto. CCC presses Shift+Tab in its terminal until Claude's own mode line shows the one you picked, and the card always shows the mode that line says.
 
+**When a session has ended**, its card says so and shows how to bring it back. What works depends on where the session was started: CCC can only write to a Claude that runs.
+
+- **Ended in a terminal** (the pill says ENDED): **Resume here** picks it up again in CCC's background, from then on like a session started on the board. **Resume in iTerm** (or your terminal app) opens it in a terminal again. Writing in the card resumes it here too, with your message.
+- **Asleep in the Claude app or VS Code** (ASLEEP): only that app can wake it. **Open in app** opens it there. Writing in the card opens it too.
+- **Stopped in CCC's background** (STOPPED): **Resume** starts it there again.
+
+CCC never resumes a session that still runs somewhere, as two Claudes in one conversation would clash. In + → From an existing conversation, each conversation says whether it is running now, ended or asleep, and one on the board already has **Show it**, which goes to its card.
+
 A card's × offers two things. **Close**: a session in the background stops (one Claude runs in the Claude app or a terminal goes on there), and the conversation stays in Claude's history, to pick up again from + → From an existing conversation or `claude --resume`. **Close and delete**: the conversation is gone from Claude (its history, `claude --resume` and + → From an existing conversation), and everything kept for it moves to your Trash, in one folder, so it can be put back. A session in the background is stopped first; one Claude still runs in the Claude app or a terminal has to be closed there first. The Claude app keeps its own list of sessions, which only the app can change: delete it there too.
 
 In a folder Claude was never told to trust, Claude asks first. Its terminal then comes onto the board, so you can answer.
@@ -70,6 +78,41 @@ In Activity Monitor the board's server shows as **Claude Command Central** and t
 **Settings → Background sessions** lists what runs in the keeper, with Show and End for each and End everything for all. A background session that stopped without you ending it (your Mac restarted) is listed there under Stopped, to resume in the background again; Claude starts only with a message, so it goes in with one. Nothing resumes by itself. If the keeper goes away while background sessions run in it, without you ending it (it crashed, or was force-quit in Activity Monitor), they stop with it. A message in the middle of the board says so, with **Resume all** and **Close**; closed, it leaves each one's card greyed out with a **Restart** button until it runs again. CCC can only notice this while its server runs. After an update of CCC, a keeper with things running in it keeps its old code until you restart it there.
 
 Every working agent and background command on the agent map has a **Stop**: click it, then click again within a few seconds, and that one ends while its session's turn goes on.
+
+## The keyboard
+
+Everything on the board can work without a mouse. Turn it on in **Settings → Keys → Keyboard shortcuts** (it is off until you do; off, every key does what it does in any window). Then **⌘K** opens the command palette: type part of any card's name or any command, and press Enter to go there or run it. It also lists every shortcut. The defaults:
+
+| Keys | Does |
+| --- | --- |
+| ⌘T / ⌥⌘T | New session / new terminal. In the start window **Enter starts** and Space picks the one highlighted, so ⌘T then Enter starts as the window shows it |
+| (none) | **Quick new session**: one in the background at once, with no window, in the folder and mode the start window would take. Give it a key in Settings → Keys |
+| ⌘W | Close the current card (its Close dialog, as its X) |
+| ⌥⌘← → ↑ ↓ | The card in that direction, into its write box or terminal; from inside a text field too. The board moves only when the card is not wholly on the screen, and then at once, the least way (a card taller than the screen from its top); its chat goes to its newest messages. A new card is as tall as lets two rows of cards fit on your screen, so four cards, two by two, are gone between without scrolling |
+| ⌃Tab / ⌃⇧Tab | Next / previous card, row by row |
+| ⌘1 … ⌘9 | Card 1 to 8, and ⌘9 the last |
+| ⌥⌘N | The next card that needs you, with the cursor on its question or approval (the current card's own first) |
+| 1 … 9 | Answers the box that waits, as Claude's own boxes do: in a question that option (one question with one choice is sent at once), in an approval 1 allows once and 2 denies, in the next-step box that answer (its last number, Write your own, leaves you typing). Works with the cursor on the box, or in the empty write box; once you have typed something, numbers are text. Each answer shows its number |
+| ⌘. or ⌃C | Stop Claude in the current card, as its Stop button does. In a terminal card ⌃C (and every Ctrl key) stays the shell's |
+| F2 | Rename the current card (or double-click its name) |
+| ⇧⌘M | Its model, effort and mode menu |
+| ⌘J / ⇧⌘E / ⇧⌘K | Its facts panel / its terminal (in the background) / caveman |
+| ⌘, | Settings |
+| ⌘K | The command palette |
+
+The current card is the one you last clicked or went to; once you use the keyboard it has a ring. In menus, dialogs and boxes the arrow keys move between the buttons, Enter or Space presses one and Esc closes the session menu. **Settings → Keys** changes any shortcut, removes one, puts one back (**↺**) or all of them (**Reset to defaults**). A shortcut needs Cmd, Ctrl or Option, so typing stays as it is, and a shortcut given to another command moves there. Shortcuts follow the keys' places, so they work on any keyboard layout, and they are shown as your keyboard writes them.
+
+## Messages that wait
+
+A message written while Claude works waits in the queue, shown under the chat with **Send now**, and goes in once Claude is done. When that turn ends with a question for you (its buttons in the chat), the queued message waits for your answer instead: a button, or anything you write after the question, goes in first, and the queued message follows once that turn is done. **Send now** still sends it at once.
+
+## Card names
+
+A card is named, first to last: by the name you gave it in CCC (double-click its name in the header, or F2; Enter keeps it, Esc doesn't, and an empty name goes back to the automatic one), by a name given with `/rename` or the Claude app's own title, by the short summary Claude Code writes of the conversation, and only then by the start of your first message. A background session gets its summary once Claude has answered its first message. Renamed in CCC, a session that runs CCC's mod is sent `/rename` too, so Claude's own `/resume` list shows the same name; the chat shows it as a short note.
+
+## A session's model and effort
+
+The settings button in a card's header opens its menu: the model, named as Claude's own picker names it (Opus 5.5, Sonnet 5.5, Default and the rest, with **1M context** as a switch of its own), and the effort. A pick is for that session alone and counts from Claude's very next request: CCC's mod sends the session's requests with it. It is not a `/model` or `/effort` command, so nothing is saved as the default for new sessions, no other card changes, and no "Switch model?" box waits in a terminal. **Default** takes the pick away, and the session runs its own model again. The Claude app's or terminal's own model menu still shows the model the session was started with. A `/model` or `/effort` typed in a chat shows there as a short note.
 
 ## Opening code in your editor
 

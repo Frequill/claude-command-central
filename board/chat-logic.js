@@ -169,13 +169,50 @@ export function composeState(session, isResumable = false) {
   }
   if (session.endedAt !== undefined) {
     const where = isWakeable(session)
-    const note = where
-      ? `The session is asleep. Sending opens it in ${where}, which wakes it, and your message goes in.`
-      : 'The session has ended. Your message goes in when it runs again.'
-    return { canSend: true, note, wakeIn: where || undefined }
+    if (where) return { canSend: true, note: `The session is asleep. Sending opens it in ${where}, which wakes it, and your message goes in.`, wakeIn: where }
+    // ended in its terminal: CCC picks it up in its own background, with the message
+    return { canSend: true, note: 'The session ended in its terminal. Sending resumes it here, in CCC\u2019s background, and your message goes in.', resumeHere: true }
   }
   if (session.turn?.isRunning) return { canSend: true, note: 'Claude is working. Enter or Send queues it until Claude is done; ⌘Enter stops Claude and sends it now.' }
   return { canSend: true, note: '' }
+}
+
+/**
+ * How a card's session comes back once Claude no longer runs it: null while it runs (or has not
+ * started yet). What can bring it back depends on where it was started:
+ * - 'app' / 'vscode': it is asleep there, and only that app can wake it (`actions` ['wake']);
+ * - 'background': CCC ran it in its background, and it resumes there (['resume']);
+ * - 'terminal': it ended in its terminal. CCC can resume it in its own background, or open it in a
+ *   terminal app again (['resume', 'terminal']).
+ * `state` is the card's (sessionState): 'stale' is a session that has not answered for a while, whose
+ * terminal may have closed without a word. `isResumable`: it ran in CCC's background and stopped.
+ * `label` is the word on the card's state pill, `text` the line on its bar.
+ */
+export function comeBack(session, state, isResumable = false) {
+  if (!session || session.planned || (state !== 'ended' && state !== 'stale')) return null
+  const isEnded = state === 'ended'
+  const where = isWakeable(session)
+  if (where) {
+    return {
+      kind: session.entrypoint === 'claude-vscode' ? 'vscode' : 'app',
+      label: isEnded ? 'ASLEEP' : 'STALE',
+      text: isEnded
+        ? `Asleep in ${where}. Only ${where} can wake it: open it there, or write here and it opens.`
+        : `It has not answered for a while. If ${where} closed it, open it there to wake it.`,
+      actions: ['wake'],
+    }
+  }
+  if (isResumable) {
+    return { kind: 'background', label: 'STOPPED', text: 'It ran in CCC\u2019s background and stopped. Resume it there, or write here and it resumes with your message.', actions: ['resume'] }
+  }
+  return {
+    kind: 'terminal',
+    label: isEnded ? 'ENDED' : 'STALE',
+    text: isEnded
+      ? 'It ended in its terminal. Resume it here, in CCC\u2019s background, or in a terminal again.'
+      : 'It has not answered for a while: its terminal may have closed. If so, resume it here or in a terminal.',
+    actions: ['resume', 'terminal'],
+  }
 }
 
 /**
@@ -232,11 +269,15 @@ const DEFAULT_MODELS = ['default', 'sonnet', 'opus', 'haiku', 'fable', 'best', '
  */
 export function sessionSetup(session, terminal = null) {
   const stats = session?.stats ?? {}
-  const modelId = typeof stats.model === 'string' ? stats.model : ''
+  // a model or effort picked in CCC's menu for this session alone counts from its very next request
+  const choice = session?.choice ?? {}
+  const picked = typeof choice.model === 'string' && choice.model ? choice.model : null
+  const modelId = picked ?? (typeof stats.model === 'string' ? stats.model : '')
   const written = typeof stats.mode === 'string' && stats.mode ? stats.mode : typeof session?.permissionMode === 'string' ? session.permissionMode : ''
   return {
     modelId,
-    effort: typeof stats.effort === 'string' ? stats.effort : '',
+    picked,
+    effort: typeof choice.effort === 'string' && choice.effort ? choice.effort : typeof stats.effort === 'string' ? stats.effort : '',
     // else the mode as the session's hooks saw it, else as its transcript last wrote it down
     mode: typeof terminal?.mode === 'string' && terminal.mode ? terminal.mode : written === 'default' ? 'manual' : written,
   }
@@ -291,6 +332,94 @@ export function cavemanOf(choices, sessionId) {
 export function cavemanToggled(level, lastOn) {
   if (level !== 'off') return 'off'
   return CAVEMAN_LEVELS.includes(lastOn) && lastOn !== 'off' ? lastOn : 'full'
+}
+
+// the model families Claude Code's aliases name
+const MODEL_FAMILIES = ['opus', 'sonnet', 'haiku', 'fable']
+// a full model id: claude-opus-5-5, claude-sonnet-4-5-20250929, claude-opus-5-5[1m]
+const MODEL_ID = /^claude-([a-z]+)-(\d+)(?:-(\d{1,2}))?(?:-\d{8})?(\[1m\])?$/i
+// what the aliases that are no family stand for, as Claude's own model picker words them
+const MODEL_ALIASES = {
+  default: { name: 'Default', about: 'What your account uses unless you pick one' },
+  best: { name: 'Best', about: 'The most capable model there is' },
+  opusplan: { name: 'Opus Plan', about: 'Opus while planning, then Sonnet' },
+}
+
+function parsedModel(id) {
+  const match = MODEL_ID.exec(String(id ?? '').trim())
+  if (!match) return null
+  const [, family, major, minor, long] = match
+  return { family: family.toLowerCase(), version: [Number(major), Number(minor ?? 0)], text: minor ? `${major}.${minor}` : major, isLong: Boolean(long) }
+}
+
+/**
+ * The version each model family runs now, from the models the board's sessions ran: the newest
+ * seen of each ({ opus: '5.5', sonnet: '5.5' }). Read from the sessions, so it follows each new model.
+ */
+export function modelVersions(sessions) {
+  const newest = {}
+  for (const session of Array.isArray(sessions) ? sessions : []) {
+    const model = parsedModel(session?.stats?.model)
+    if (!model || !MODEL_FAMILIES.includes(model.family)) continue
+    const known = newest[model.family]
+    if (!known || model.version[0] > known.version[0] || (model.version[0] === known.version[0] && model.version[1] > known.version[1])) newest[model.family] = model
+  }
+  return Object.fromEntries(Object.entries(newest).map(([family, model]) => [family, model.text]))
+}
+
+/** A model's name as Claude's picker shows it: "Opus 5.5", "Default", "Sonnet 5.5 · 1M"; an alias, a full id or anything else. */
+export function modelLabel(option, versions = {}) {
+  const raw = String(option ?? '').trim()
+  const isLong = /\[1m\]$/i.test(raw)
+  const bare = raw.replace(/\[1m\]$/i, '').toLowerCase()
+  const long = isLong ? ' · 1M' : ''
+  if (MODEL_ALIASES[bare]) return MODEL_ALIASES[bare].name + long
+  if (MODEL_FAMILIES.includes(bare)) return `${bare[0].toUpperCase()}${bare.slice(1)}${versions[bare] ? ` ${versions[bare]}` : ''}${long}`
+  const model = parsedModel(raw)
+  return model ? `${model.family[0].toUpperCase()}${model.family.slice(1)} ${model.text}${model.isLong ? ' · 1M' : ''}` : raw
+}
+
+/** The line under a model in the picker, for the aliases whose meaning is not their name; '' for the rest. */
+export function modelAbout(option) {
+  return MODEL_ALIASES[String(option ?? '').trim().toLowerCase()]?.about ?? ''
+}
+
+/**
+ * The session menu's model row, as Claude's picker has it: each model once, and "1M context" as a
+ * switch of its own for the families that have a 1M version. `picked` is the model picked for this
+ * session in CCC, or null when none is: then Default is on, the session's own model.
+ * Each choice is { option (what the session is sent with), label, about, isOn }; `long` is the switch, or null.
+ */
+export function modelMenu(options, picked, versions = {}) {
+  const list = modelChoices(options)
+  const current = picked ?? 'default'
+  const isLongNow = /\[1m\]$/i.test(String(current ?? ''))
+  const longOf = option => list.find(one => one.toLowerCase() === `${option.toLowerCase()}[1m]`)
+  const choices = list
+    .filter(option => !/\[1m\]$/i.test(option))
+    .map(option => ({
+      option,
+      label: modelLabel(option, versions),
+      about: modelAbout(option),
+      isOn: sameChoice(option, current) || (isLongNow && Boolean(longOf(option)) && sameChoice(longOf(option), current)),
+      long: longOf(option) ?? null,
+    }))
+  const lit = choices.find(choice => choice.isOn)
+  const hasLong = choices.some(choice => choice.long)
+  return { choices, long: hasLong ? { isOn: isLongNow, canSwitch: Boolean(lit?.long), option: lit ? (isLongNow ? lit.option : lit.long) : null } : null }
+}
+
+/** What a setting note in the chat says: "Model set to Opus 5.5", "Effort set to high". */
+export function settingNote(item, versions = {}) {
+  if (item?.setting === 'model') return `Model set to ${modelLabel(item.value, versions)}`
+  if (item?.setting === 'effort') return `Effort set to ${item.value}`
+  return String(item?.text ?? '')
+}
+
+/** A queued /model or /effort, as the chat says it waits: { setting, value }, or null for any other message. */
+export function settingCommand(text) {
+  const match = /^\/(model|effort)\s+([A-Za-z0-9._[\]-]{1,80})$/.exec(String(text ?? '').trim())
+  return match ? { setting: match[1], value: match[2] } : null
 }
 
 /** The models to offer: the session's own list, else the usual aliases. */
@@ -476,16 +605,36 @@ export function toolLabel(tool) {
 }
 
 /** What the approval box says once the person answered it here, or while that goes out. */
-export function approvalStatus(draft) {
+export function approvalStatus(draft, place = 'the app') {
   if (draft?.problem) return draft.problem
   if (draft?.state === 'sending') return 'Sending…'
   if (draft?.state === 'sent' && (draft.branch || draft.said)) return 'Sent. Claude goes on in a moment.'
   if (draft?.state === 'sent') return draft.choice === 'allow' ? 'Allowed. Claude goes on in a moment.' : 'Denied. Claude hears it in a moment.'
-  return 'Answer here, or in the app.'
+  return `Answer here, or in ${place}.`
 }
 
-/** Where a question box can be answered from CCC: sessions in the Claude app and in VS Code. */
+/** Where a question box in the transcript can be answered from CCC with no word from its hook: the app and VS Code. */
 export const ANSWERS_FROM_CCC = new Set(['claude-desktop', 'claude-vscode'])
+
+/**
+ * Whether a question box can be answered from CCC: CCC's question hook waits with it (wherever the
+ * session runs, the app, VS Code or a terminal), or the session runs in the app or VS Code.
+ */
+export function canAnswerQuestion(item, session) {
+  return Boolean(item?.toolId) && (item.isWaiting === true || ANSWERS_FROM_CCC.has(session?.entrypoint))
+}
+
+/** A question box that only its hook knows of so far: a terminal writes its box down once it is answered. */
+export function isHookBox(item) {
+  return item?.kind === 'question' && typeof item.toolId === 'string' && item.toolId.startsWith('box-')
+}
+
+/** Where else a box can be answered, as the board's lines name it: the app, VS Code or its terminal. */
+export function answerPlace(session) {
+  if (session?.entrypoint === 'claude-desktop') return 'the app'
+  if (session?.entrypoint === 'claude-vscode') return 'VS Code'
+  return 'its terminal'
+}
 
 /** A fresh draft answer for a box: nothing picked, no words of the person's own. */
 export function emptyDraft(questions) {
@@ -654,4 +803,16 @@ export function emojifyAt(text, caret) {
 export function findEmoji(search) {
   const words = String(search ?? '').toLowerCase().split(/\s+/).filter(Boolean)
   return EMOJI.filter(([, code, about]) => words.every(word => code.includes(word) || about.includes(word)))
+}
+
+/**
+ * Whether a queued message waits for the person's answer to Claude's question: it was queued while
+ * the turn ran that ended with the question, whose buttons are still up. The mod holds it so (its
+ * inbox's isHeld), and lets the answer go in first.
+ */
+export function isHeldForAnswer(session, message) {
+  const turn = session?.turn
+  const at = Number(message?.at)
+  if (!turn || turn.isRunning || !(turn.choices?.length > 0) || message?.mode !== 'queue' || !Number.isFinite(at)) return false
+  return at >= Number(turn.startedAt) && at <= Number(turn.endedAt)
 }
