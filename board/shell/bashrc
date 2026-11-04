@@ -1,0 +1,18 @@
+# CCC: how the terminal a chat's Run commands go to starts, when it is bash (serve.py run_shell):
+# the person's own .bashrc, then marks where each command starts and ends, with codes a terminal
+# does not show. CCC reads from them what a Run printed and how it ended.
+[ -f "$HOME/.bashrc" ] && source "$HOME/.bashrc"
+
+__ccc_at_prompt=
+__ccc_preexec() {
+  # once per command line typed at the prompt; not for the prompt's own commands or a completion
+  [ -n "$__ccc_at_prompt" ] && [ -z "$COMP_LINE" ] || return 0
+  __ccc_at_prompt=
+  printf '\033]7770;ccc;start\007'
+}
+__ccc_precmd() {
+  printf '\033]7770;ccc;done;%s\007' "$__ccc_code"
+  __ccc_at_prompt=1
+}
+trap '__ccc_preexec' DEBUG
+PROMPT_COMMAND="__ccc_code=\$?${PROMPT_COMMAND:+; $PROMPT_COMMAND}; __ccc_precmd"

@@ -122,6 +122,14 @@ With **Settings → Terminal & editor → Open Claude's files and code in** set 
 
 When Claude makes a design in a session (Claude Design), its card gets a **Design** button, with a dot while there are screens you have not looked at. It shows the design's screens in place of the chat, laid out as the canvas has them and scaled to the card, each a live page that follows Claude's changes; click one to see it large. **Open the canvas** opens the real canvas in Claude, for panning, comments and sharing: claude.ai does not let its canvas be shown inside another page, so the card shows the screens' own files, run walled off from the board.
 
+## Run
+
+A shell command Claude writes in a chat (a `bash`, `sh`, `zsh` or `shell` code block) gets a **Run** button beside Copy, as in the Claude app. Each session has one terminal for them on the board, in its folder: the first Run starts it, and each Run types its command into it, once the one before is done. It is your own shell with your own start files (your PATH, aliases and functions), so you can type into it too, a password or a y/n. How a command went shows under its code block: waiting, running, done or failed with its exit code, and the last lines it printed. **>_ Terminal** goes to the terminal.
+
+Claude gets it at once, as in the Claude app: once the last command you ran has ended, CCC tells the session how they went ("Ran `npm test` from the chat: failed, exit 1"), with what they printed beside it, and Claude looks and answers. While Claude works, that waits its turn. A command you wrote to Claude about while it ran, from CCC, the Claude app or a terminal, goes in beside that message instead. Under the block, CCC shows where Claude is with it.
+
+To tell where each command starts and ends and how it ended, the terminal starts your shell through CCC's own start files (`board/shell/`), which read yours first and then add two marks around each command, codes a terminal does not show, as VS Code's terminal does. zsh and bash are read that way; another shell starts as zsh there.
+
 ## Themes
 
 Twelve of them, from Clean to Cyberpunk 2077. Pick one in Settings.

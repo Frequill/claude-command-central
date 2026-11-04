@@ -11,7 +11,7 @@ import { startScene } from './themes.js'
 import { makeGrid, rowsToFit } from './grid.js'
 import * as K from './keys.js'
 import { rememberFocus, restoreFocus } from './refocus.js'
-import { closeTerminal, dropTerminal, focusTerminal, isTerminal, setupTerminals, startTerminal, stopKeeper, terminalCard, themeTerminals, toggleTerminal, updateTerminal } from './terminal.js'
+import { closeTerminal, dropTerminal, focusTerminal, isTerminal, runCommand, setupTerminals, startTerminal, stopKeeper, terminalCard, themeTerminals, toggleTerminal, updateTerminal } from './terminal.js'
 
 const POLL_MS = 1000
 const TOKENS_POLL_MS = 15_000
@@ -1574,8 +1574,21 @@ function askToCloseTerminal(id, title, isEnded) {
   document.querySelector('#terminal-close-confirm').focus()
 }
 
+/**
+ * Run on a code block in a chat: the command runs in the session's terminal on the board. The
+ * board goes to the terminal as it opens, as to any new card; later runs are typed into it where it
+ * is. A new one takes the place of the session's terminal that ended. The cursor stays in the chat.
+ */
+async function runFromChat(sessionId, command) {
+  const started = await runCommand(sessionId, command)
+  if (started.problem) return started
+  const [replaced] = started.replaced
+  await (replaced ? moveTerminalPlace(replaced, started.id, false) : poll())
+  return started
+}
+
 /** A shell started again takes the old card's place and size on the board. */
-function moveTerminalPlace(oldId, newId) {
+function moveTerminalPlace(oldId, newId, isFocused = true) {
   for (const part of ['cards', 'chats']) {
     if (view.layout[part]?.[oldId]) {
       view.layout[part][newId] = view.layout[part][oldId]
@@ -1583,7 +1596,7 @@ function moveTerminalPlace(oldId, newId) {
     }
   }
   saveLayout(view.layout)
-  poll().then(() => focusTerminal(newId))
+  return poll().then(() => isFocused && focusTerminal(newId))
 }
 
 // what the top bar gives up, first to last, while it does not fit: whole parts, never one cut off
@@ -3086,6 +3099,7 @@ setupChat({
   onRemove: (id, title) => askToRemove(id, title),
   terminalOf: id => L.backgroundTerminal(view.terminals, id),
   onShowTerminal: showTerminal,
+  onRun: runFromChat,
   // the board's data again at once, as after a change made from a card
   refreshBoard: () => poll(),
   isResumable: id => (view.stopped ?? []).some(one => one.sessionId === id),

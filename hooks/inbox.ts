@@ -169,7 +169,8 @@ export function createInbox(io: InboxIo): Inbox {
 
 /**
  * This session's inbox, or undefined where none can be read. `dress` turns a message that is not a
- * slash command into what goes in (caveman mode sends it through its skill).
+ * slash command into what goes in (caveman mode sends it through its skill); `before` runs just
+ * before each message goes in (it tells Claude what the person ran from the chat, hooks/runs.ts).
  */
 export async function inboxFor(
   $: EngineInterface,
@@ -178,6 +179,7 @@ export async function inboxFor(
   dress?: (text: string) => Promise<string>,
   stopRun?: (runId: string) => Promise<void>,
   heldWindow?: () => Promise<HeldWindow | undefined>,
+  before?: () => Promise<void>,
 ): Promise<Inbox | undefined> {
   const home = await $.env.get('HOME')
   const sessionId = await $.session.id()
@@ -192,6 +194,8 @@ export async function inboxFor(
     },
     write: (path, text) => $.fs.write(path, text),
     submit: async text => {
+      // what Claude hears first: a prompt of the mod's own passes none of its own hooks
+      await before?.().catch(() => undefined)
       // a slash command the session knows (a skill, /model, /effort...) runs as one, as if typed
       if (await runSlash($, text).catch(() => false)) return
       const dressed = dress ? await dress(text).catch(() => text) : text

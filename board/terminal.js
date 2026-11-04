@@ -125,6 +125,19 @@ export async function startTerminal(folder) {
   }
 }
 
+/**
+ * Runs a command from a session's chat (Run on a code block) in the session's terminal, started in
+ * its folder when it has none: { id, replaced } (the ended terminal the new one replaces) or { problem }.
+ */
+export async function runCommand(sessionId, command) {
+  try {
+    const data = await ask('/api/terminal/run', 'terminal-run', { sessionId, command })
+    return data.ok ? { id: data.terminalId, replaced: data.replaced ?? [] } : { problem: data.problem || 'Could not run it.' }
+  } catch {
+    return { problem: 'Could not run it. Is the board still running?' }
+  }
+}
+
 /** Puts a background session's terminal on the board, or takes it off it; Claude runs on either way. */
 export async function toggleTerminal(id, isHidden) {
   try {
@@ -352,7 +365,7 @@ function drawHead(term) {
   term.head.replaceChildren(
     el('span', { class: 'terminal-glyph', 'aria-hidden': 'true' }, '>_'),
     el('span', { class: 'chat-title' }, title),
-    el('span', { class: 'source source-terminal' }, isClaude ? 'Claude in the background' : 'Terminal'),
+    el('span', { class: 'source source-terminal' }, isClaude ? 'Claude in the background' : term.card.run ? 'The chat’s terminal' : 'Terminal'),
     el('span', { class: 'chat-where', title: where }, `${label.parent}/${label.name}`.replace('//', '/')),
     el('span', { class: `pill ${term.ended ? 'pill-done' : 'pill-work'}` }, term.ended ? 'ended' : 'running'),
     ...[open, close].filter(Boolean),
@@ -363,13 +376,16 @@ function drawHead(term) {
 function drawEnded(term) {
   const code = term.ended?.exitCode
   const isClaude = term.card.kind === 'claude'
-  // a shell is started again in its folder; Claude ended, its conversation is picked up from + instead
-  const again = isClaude ? null : el('button', { type: 'button', class: 'primary' }, 'Start again')
+  const isRun = Boolean(term.card.run)
+  // a shell is started again in its folder; a chat's terminal by its next Run; Claude ended, its
+  // conversation is picked up from + instead
+  const again = isClaude || isRun ? null : el('button', { type: 'button', class: 'primary' }, 'Start again')
   again?.addEventListener('click', () => restart(term, again))
   const close = el('button', { type: 'button', class: 'secondary' }, 'Close')
   close.addEventListener('click', () => context.onClose(term.id, L.terminalTitle(term.title, term.card.where || term.card.folder), true))
   const what = isClaude ? 'Claude' : 'The shell'
-  term.endBar.replaceChildren(el('span', {}, Number.isInteger(code) && code !== 0 ? `${what} ended (exit ${code}).` : `${what} ended.`), ...[again, close].filter(Boolean))
+  const ended = Number.isInteger(code) && code !== 0 ? `${what} ended (exit ${code}).` : `${what} ended.`
+  term.endBar.replaceChildren(el('span', {}, isRun ? `${ended} The next Run in its chat starts it again.` : ended), ...[again, close].filter(Boolean))
   term.endBar.hidden = false
 }
 

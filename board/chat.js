@@ -23,7 +23,8 @@ const chats = new Map()
  * The board's view of a session: `sessionOf(id)`, `titleOf(id)`, `colorOf(id)`, its facts
  * (`statsOf(id)`: a signature and a node), `onRemove(id, title)` when the person closes it, the
  * terminal it runs in when CCC started it in the background (`terminalOf(id)`, shown or hidden with
- * `onShowTerminal(terminalId, isHidden)`), `refreshBoard()` to read the board's data again, whether it stopped there and can be resumed
+ * `onShowTerminal(terminalId, isHidden)`), `onRun(id, command)` for Run on a code block ({ id } or
+ * { problem }), `refreshBoard()` to read the board's data again, whether it stopped there and can be resumed
  * (`isResumable(id)`, done by `onResume(id)`, which says what went wrong or ''), whether it
  * stopped because CCC's keeper crashed (`isLost(id)`: its card is greyed out, with Restart), the
  * terminal app it opens in again once it ended in a terminal (`terminalAppName()`, done by
@@ -1126,8 +1127,15 @@ async function refresh(chat) {
   }
   if (!chats.has(chat.id)) return
   keepSideAboveCompose(chat)
-  const signature = JSON.stringify(data)
-  if (signature === chat.signature) return
+  // what a Run prints changes often: only its result under its code block is drawn again for it
+  const { runs, ...rest } = data
+  chat.runs = Array.isArray(runs) ? runs : []
+  const signature = JSON.stringify(rest)
+  if (signature === chat.signature) {
+    const isFollowing = chat.isFollowing !== false
+    if (drawRuns(chat) && isFollowing) toNewest(chat)
+    return
+  }
   chat.signature = signature
   chat.items = Array.isArray(data.items) ? data.items : []
   const pending = Array.isArray(data.pending) ? data.pending : []
@@ -1138,6 +1146,7 @@ async function refresh(chat) {
   // a box only its hook knows of yet (a terminal writes it down once answered) goes after Claude's words, in the live part
   chat.hookBox = chat.items.find(C.isHookBox) ?? null
   const logged = C.shownItems(chat.items, context.showsNotes?.()).filter(item => !C.isHookBox(item))
+  chat.runSlots = new Map()
   chat.log.replaceChildren(...C.groupSteps(logged).map(item => drawItem(chat, item)), ...pending.map(message => drawPending(chat, message)))
   if (chat.items.length === 0 && pending.length === 0) chat.log.append(el('li', { class: 'msg msg-note' }, 'Nothing in this chat yet.'))
   chat.liveSignature = ''
@@ -1148,6 +1157,7 @@ async function refresh(chat) {
     again?.setSelectionRange(writingAt.caret, writingAt.caret)
   }
   for (const toolId of chat.openSteps) if (!chat.steps.get(toolId)?.isDone) loadStep(chat, toolId)
+  drawRuns(chat)
   if (wasFollowing) toNewest(chat)
 }
 
@@ -1164,7 +1174,7 @@ function drawItem(chat, item) {
     )
   }
   if (item.kind === 'image') return el('li', { class: 'msg msg-images', 'aria-label': 'Images Claude looked at' }, drawPictures(chat, item.pictures, true))
-  if (item.kind === 'claude') return el('li', { class: 'msg msg-claude' }, el('span', { class: 'claude-mark', 'aria-hidden': 'true' }, '✻'), linkCode(chat, markdown(item.text)))
+  if (item.kind === 'claude') return el('li', { class: 'msg msg-claude' }, el('span', { class: 'claude-mark', 'aria-hidden': 'true' }, '✻'), linkCode(chat, markdown(item.text, chat)))
   if (item.kind === 'steps') return drawSteps(chat, item.steps, item.pictures)
   if (item.kind === 'question') return drawQuestion(chat, item)
   if (item.setting) return el('li', { class: 'msg msg-note msg-setting' }, C.settingNote(item, context.modelVersions?.() ?? {}))
@@ -2312,11 +2322,12 @@ function codeMenu(chat, node, chip, places, editor) {
   window.addEventListener('scroll', moved, true)
 }
 
-function markdown(text) {
-  return el('div', { class: 'md' }, blocks(text).map(drawBlock))
+/** Claude's text; given its chat, a shell command in it gets a Run button (the reply being written gets none). */
+function markdown(text, chat = null) {
+  return el('div', { class: 'md' }, blocks(text).map(block => drawBlock(block, chat)))
 }
 
-function drawBlock(block) {
+function drawBlock(block, chat) {
   switch (block.type) {
     case 'heading':
       return el(block.level <= 2 ? 'h3' : 'h4', {}, spans(block.inline))
@@ -2325,9 +2336,9 @@ function drawBlock(block) {
     case 'table':
       return el('div', { class: 'md-table' }, el('table', {}, el('thead', {}, el('tr', {}, block.head.map(cell => el('th', {}, spans(cell))))), el('tbody', {}, block.rows.map(row => el('tr', {}, row.map(cell => el('td', {}, spans(cell))))))))
     case 'quote':
-      return el('blockquote', {}, block.blocks.map(drawBlock))
+      return el('blockquote', {}, block.blocks.map(inner => drawBlock(inner, chat)))
     case 'code':
-      return codeBlock(block)
+      return codeBlock(block, chat)
     case 'rule':
       return el('hr')
     default:
@@ -2335,8 +2346,13 @@ function drawBlock(block) {
   }
 }
 
-/** A code block with its language and a button that copies it whole, as an editor's chat has. */
-function codeBlock(block) {
+/**
+ * A code block with its language and a button that copies it whole, as an editor's chat has. A shell
+ * command also gets Run, as in the Claude app: it runs in the session's terminal on the board, how it
+ * went shows under the block (drawRuns), and Claude gets what it printed once it ends.
+ */
+function codeBlock(block, chat) {
+  const run = chat && C.isRunnable(block) ? runButton(chat, block.text) : null
   const copy = el('button', { type: 'button', class: 'code-copy', title: 'Copy to the clipboard' }, icon('M5.5 5.5h7v8h-7zM3.5 10.5v-8h7', 12), el('span', {}, 'Copy'))
   copy.addEventListener('click', async () => {
     const isCopied = await copyText(block.text)
@@ -2347,7 +2363,73 @@ function codeBlock(block) {
       copy.classList.remove('done')
     }, 1600)
   })
-  return el('div', { class: 'md-code' }, el('div', { class: 'md-code-bar' }, el('span', { class: 'md-code-lang' }, block.lang || 'text'), copy), el('pre', {}, el('code', {}, block.text)))
+  const buttons = el('span', { class: 'md-code-buttons' }, run?.button, copy)
+  return el('div', { class: 'md-code' }, el('div', { class: 'md-code-bar' }, el('span', { class: 'md-code-lang' }, block.lang || 'text'), buttons), el('pre', {}, el('code', {}, block.text)), run?.result)
+}
+
+// ---------- Run ----------
+
+/** A Run button and the place under its block where the run's result goes, kept for drawRuns. */
+function runButton(chat, command) {
+  const button = el('button', { type: 'button', class: 'code-copy code-run', title: 'Run in this session’s terminal on the board. Claude gets what it printed once it ends.' }, icon('M5 3.5v9l7-4.5z', 12), el('span', {}, 'Run'))
+  const result = el('div', { class: 'md-run', role: 'status', hidden: true })
+  const slot = { button, result, signature: '' }
+  button.addEventListener('click', () => startRun(chat, command))
+  chat.runSlots ??= new Map()
+  chat.runSlots.set(command, [...(chat.runSlots.get(command) ?? []), slot])
+  return slot
+}
+
+async function startRun(chat, command) {
+  chat.runAsked ??= new Map()
+  chat.runAsked.set(command, { isStarting: true })
+  drawRuns(chat)
+  const started = await context.onRun(chat.id, command)
+  chat.runAsked.set(command, started.problem ? { problem: started.problem } : {})
+  if (!started.problem) await refresh(chat)
+  drawRuns(chat)
+}
+
+/**
+ * Each Run's result under its code block: how it went, the last lines it printed, and whether
+ * Claude has seen it yet. A block whose command ran more than once shows its newest run. Whether
+ * anything was drawn again.
+ */
+function drawRuns(chat) {
+  let isChanged = false
+  for (const [command, slots] of chat.runSlots ?? []) {
+    const run = C.runOf(chat.runs, command)
+    const asked = chat.runAsked?.get(command) ?? {}
+    const signature = JSON.stringify([run ?? null, asked])
+    for (const slot of slots) {
+      if (slot.signature === signature) continue
+      slot.signature = signature
+      isChanged = true
+      drawRun(slot, run, asked)
+    }
+  }
+  return isChanged
+}
+
+function drawRun(slot, run, asked) {
+  const isRunning = Boolean(run) && ['waiting', 'running'].includes(C.runState(run))
+  slot.button.disabled = Boolean(asked.isStarting) || isRunning
+  slot.button.lastChild.textContent = run && !isRunning ? 'Run again' : 'Run'
+  if (!run && !asked.isStarting && !asked.problem) {
+    slot.result.hidden = true
+    return
+  }
+  const state = asked.isStarting ? 'running' : asked.problem ? 'failed' : C.runState(run)
+  const label = asked.isStarting ? 'Starting…' : asked.problem || C.runLabel(run)
+  const show = run?.terminalId ? el('button', { type: 'button', class: 'md-run-show', title: 'Show its terminal on the board' }, '>_ Terminal') : null
+  show?.addEventListener('click', () => window.dispatchEvent(new CustomEvent('ccc:show-session', { detail: { sessionId: run.terminalId } })))
+  const told = run && !asked.isStarting && !asked.problem ? el('span', { class: 'md-run-told' }, C.runHeard(run)) : null
+  const output = run?.output ? el('pre', { class: 'md-run-output' }, run.output) : null
+  slot.result.className = `md-run md-run-${state}`
+  slot.result.replaceChildren(...[el('div', { class: 'md-run-head' }, el('span', { class: 'md-run-dot', 'aria-hidden': 'true' }), el('span', { class: 'md-run-label' }, label), told, show), output].filter(Boolean))
+  slot.result.hidden = false
+  // the newest output in view, as a terminal shows it
+  if (output) requestAnimationFrame(() => (output.scrollTop = output.scrollHeight))
 }
 
 async function copyText(text) {

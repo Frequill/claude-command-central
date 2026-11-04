@@ -682,6 +682,51 @@ export function enterMode(isWorking, withCommand) {
   return isWorking && !withCommand ? 'queue' : 'now'
 }
 
+// ---------- Run ----------
+
+// the code blocks a Run button goes on: shell commands, as the Claude app offers Run on them
+const SHELL_LANGS = ['bash', 'sh', 'zsh', 'shell']
+
+/** Whether a code block is a shell command the person can run from the chat. */
+export function isRunnable(block) {
+  return block?.type === 'code' && SHELL_LANGS.includes(String(block.lang ?? '').toLowerCase()) && String(block.text ?? '').trim() !== ''
+}
+
+/** The newest run of a command in a session's runs, or undefined when it never ran. */
+export function runOf(runs, command) {
+  return (runs ?? []).filter(run => run?.command === command).at(-1)
+}
+
+/**
+ * How a run went, in a word for its pill: waiting (for the one before it in the session's terminal),
+ * running, done (exit 0), failed (another exit) or closed (its terminal went first).
+ */
+export function runState(run) {
+  if (!run?.endedAt) return run?.typedAt ? 'running' : 'waiting'
+  if (!Number.isInteger(run.exitCode)) return 'closed'
+  return run.exitCode === 0 ? 'done' : 'failed'
+}
+
+/** The words of a run's status line. */
+export function runLabel(run) {
+  const state = runState(run)
+  if (state === 'waiting') return 'Waiting for the terminal…'
+  if (state === 'running') return 'Running…'
+  if (state === 'closed') return run.typedAt ? 'Closed before it ended' : 'Its terminal closed before it ran'
+  return state === 'done' ? 'Done' : `Failed, exit ${run.exitCode}`
+}
+
+/**
+ * Where Claude is with a run: it gets how it went once it ends (sent in a message of its own), or
+ * hears of it with the next message when it did not end by itself.
+ */
+export function runHeard(run) {
+  if (run?.told) return 'Claude has seen this'
+  if (run?.sentAt) return 'Sent to Claude'
+  const state = runState(run)
+  return state === 'waiting' || state === 'running' ? 'Goes to Claude when it ends' : 'Claude sees this with your next message'
+}
+
 // ---------- emoji ----------
 
 // the emoji the picker offers, each with its shortcode (:name:) and the words a search finds it by
