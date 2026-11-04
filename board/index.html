@@ -409,11 +409,17 @@
           <button type="button" role="radio" class="th-period" data-mode="new" aria-checked="true">New session</button>
           <button type="button" role="radio" class="th-period" data-mode="existing" aria-checked="false">From an existing conversation</button>
           <button type="button" role="radio" class="th-period" data-mode="terminal" aria-checked="false">New terminal</button>
+          <button type="button" role="radio" class="th-period" data-mode="artifact" aria-checked="false">An artifact</button>
         </div>
         <div id="start-existing" class="start-existing" hidden>
           <input id="existing-search" class="existing-search" type="search" placeholder="Search by name or folder" aria-label="Search your conversations" />
           <p class="hint">Your conversations in Claude on this Mac, the newest first. Add one to CCC to follow it and write to it here.</p>
           <div id="existing-list" class="existing-list" role="list" aria-label="Your conversations"></div>
+        </div>
+        <div id="start-artifacts" class="start-existing" hidden>
+          <input id="artifact-search" class="existing-search" type="search" placeholder="Search by title or session" aria-label="Search your artifacts" />
+          <p class="hint">The artifacts Claude published in your conversations on this Mac, the one changed last first. Open one as a card of its own on the board, to use it there.</p>
+          <div id="artifact-list" class="existing-list" role="list" aria-label="Your artifacts"></div>
         </div>
         <fieldset class="start-new">
           <legend>Folder</legend>

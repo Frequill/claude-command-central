@@ -7,6 +7,7 @@
 
 import * as L from './board-logic.js'
 import * as C from './chat-logic.js'
+import { artifactPane } from './artifact.js'
 import { optionNumber } from './keys.js'
 import { rememberFocus, restoreFocus } from './refocus.js'
 import { designTab } from './design.js'
@@ -28,7 +29,8 @@ const chats = new Map()
  * (`isResumable(id)`, done by `onResume(id)`, which says what went wrong or ''), whether it
  * stopped because CCC's keeper crashed (`isLost(id)`: its card is greyed out, with Restart), the
  * terminal app it opens in again once it ended in a terminal (`terminalAppName()`, done by
- * `onResumeInTerminal(id)`, which says what went wrong or ''), and whether its panel of facts is folded in (`isSideHidden(id)`, `onSide(id, isHidden)`).
+ * `onResumeInTerminal(id)`, which says what went wrong or ''), whether its panel of facts is folded in (`isSideHidden(id)`, `onSide(id, isHidden)`), and
+ * `onWiden(id, isWide)`: its card as wide as the board while an artifact shows beside its chat.
  */
 export function setupChat(given) {
   context = given
@@ -98,6 +100,7 @@ export function dropChat(sessionId) {
   clearInterval(chat.timer)
   for (const image of chat.images) URL.revokeObjectURL(image.url)
   chat.design?.stop()
+  chat.artifact?.stop()
   chats.delete(sessionId)
 }
 
@@ -185,6 +188,13 @@ function update(chat) {
     chat.design?.show(session.design)
     markDesignSeen(chat.id, session.design.at)
   }
+  // an artifact it showed before the board was loaded again shows again, once the session's data says it has one
+  if (!chat.isArtifactShown && !chat.hasArtifactAsked && session?.artifacts && artifactsShown().includes(chat.id)) toggleArtifact(chat)
+  if (session?.artifacts) chat.hasArtifactAsked = true
+  if (chat.isArtifactShown && session?.artifacts) {
+    chat.artifact?.show(session.artifacts)
+    markArtifactSeen(chat.id, session.artifacts.at)
+  }
   drawHead(chat, session)
   drawLost(chat)
   drawBack(chat, session)
@@ -258,9 +268,11 @@ function buildCard(sessionId) {
   const backBar = el('div', { class: 'chat-lost chat-back', role: 'status', hidden: true })
   // the screens of a design Claude makes, in place of the chat while the person looks at them
   const designPane = el('div', { class: 'chat-design', hidden: true, 'aria-label': 'Design' })
-  const body = el('div', { class: 'chat-body' }, el('div', { class: 'chat-main' }, scroll, form), side, designPane)
+  // the pages Claude publishes as Artifacts, beside the chat while the person uses one
+  const artifactPlace = el('div', { class: 'chat-artifact', hidden: true, 'aria-label': 'Artifact' })
+  const body = el('div', { class: 'chat-body' }, el('div', { class: 'chat-main' }, scroll, form), side, designPane, artifactPlace)
   const root = el('article', { class: `glass tile expanded-tile${context.isSideHidden(sessionId) ? ' side-hidden' : ''}`, 'data-session': sessionId, 'data-ghost': 'light' }, head, lostBar, backBar, body, el('span', { class: 'grip grip-x', 'data-axis': 'x', 'aria-hidden': 'true' }), el('span', { class: 'grip grip-y', 'data-axis': 'y', 'aria-hidden': 'true' }), el('span', { class: 'grip', 'aria-hidden': 'true' }), el('span', { class: 'grip grip-bl', 'data-axis': 'corner-bl', 'aria-hidden': 'true' }), el('span', { class: 'grip grip-tr', 'data-axis': 'corner-tr', 'aria-hidden': 'true' }), el('span', { class: 'grip grip-tl', 'data-axis': 'corner-tl', 'aria-hidden': 'true' }))
-  const chat = { id: sessionId, root, head, lostBar, backBar, backSignature: '', designPane, design: null, isDesignShown: false, log, live, dock, scroll, thumbs, text, queue, send, stop, note, side, form, menu, emojiPicker: emojiPanel, suggestKey, suggestion: '', slash: { list: null, at: 0, shown: [], index: 0 }, mention: { shown: [], index: 0, asked: 0, timer: 0 }, menuFor: '', images: [], files: [], items: [], signature: '', timer: 0, isSending: false, isFollowing: true, canSend: false, problem: '', openSteps: new Set(), openGroups: new Set(), openPrompts: new Set(), steps: new Map(), drafts: new Map(), approvals: new Map() }
+  const chat = { id: sessionId, root, head, lostBar, backBar, backSignature: '', designPane, design: null, isDesignShown: false, artifactPlace, artifact: null, isArtifactShown: false, hasArtifactAsked: false, log, live, dock, scroll, thumbs, text, queue, send, stop, note, side, form, menu, emojiPicker: emojiPanel, suggestKey, suggestion: '', slash: { list: null, at: 0, shown: [], index: 0 }, mention: { shown: [], index: 0, asked: 0, timer: 0 }, menuFor: '', images: [], files: [], items: [], signature: '', timer: 0, isSending: false, isFollowing: true, canSend: false, problem: '', openSteps: new Set(), openGroups: new Set(), openPrompts: new Set(), steps: new Map(), drafts: new Map(), approvals: new Map() }
 
   // hovering the panel leaves the wheel to the page; a click in it lets the wheel scroll the panel,
   // until a click somewhere else or Esc
@@ -979,7 +991,9 @@ function drawHead(chat, session) {
   // once Claude no longer runs it: the word for how it stopped, by where it was started
   const back = background ? null : C.comeBack(session, state, Boolean(context.isResumable?.(id)))
   const isNewDesign = Boolean(design) && !chat.isDesignShown && design.at > designSeenAt(id)
-  const signature = JSON.stringify([title, state, source?.label, link?.href, session?.folder, session?.branch, context.colorOf(id), facts, caveman, background?.id, background?.hidden, session?.planned, context.isResumable?.(id), design?.at, chat.isDesignShown, isNewDesign])
+  const artifacts = session?.artifacts ?? null
+  const isNewArtifact = Boolean(artifacts) && !chat.isArtifactShown && artifacts.at > artifactSeenAt(id)
+  const signature = JSON.stringify([title, state, source?.label, link?.href, session?.folder, session?.branch, context.colorOf(id), facts, caveman, background?.id, background?.hidden, session?.planned, context.isResumable?.(id), design?.at, chat.isDesignShown, isNewDesign, artifacts?.at, artifacts?.count, chat.isArtifactShown, isNewArtifact])
   if (signature === chat.headSignature) return
   chat.headSignature = signature
   const close = el('button', { type: 'button', class: 'chat-close chat-remove', 'aria-label': `Close ${title}`, title: 'Close it, or close and delete the conversation' }, icon('M4 4l8 8M12 4l-8 8'))
@@ -1063,6 +1077,24 @@ function drawHead(chat, session) {
       )
     : null
   designButton?.addEventListener('click', () => toggleDesign(chat))
+  // Claude published an artifact in this session: the card can show it beside the chat, to use there
+  const artifactButton = artifacts
+    ? el(
+        'button',
+        {
+          type: 'button',
+          class: `design-toggle artifact-toggle${isNewArtifact ? ' is-new' : ''}`,
+          'aria-pressed': String(chat.isArtifactShown),
+          title: chat.isArtifactShown
+            ? 'Close the artifact: the card goes back to its own size'
+            : `Show ${artifacts.count === 1 ? artifacts.title : `its ${artifacts.count} artifacts (newest: ${artifacts.title})`} beside the chat. The card widens to the board's full width; the cards beside it move down`,
+        },
+        icon('M2.5 3h11v10h-11zM8.5 3v10M10.5 6h1M10.5 8.5h1'),
+        el('span', {}, artifacts.count === 1 ? 'Artifact' : `Artifacts · ${artifacts.count}`),
+        isNewArtifact ? el('span', { class: 'design-dot', 'aria-label': 'new or changed' }) : null,
+      )
+    : null
+  artifactButton?.addEventListener('click', () => toggleArtifact(chat))
   const parts = [
     el('span', { class: 'dot', style: `background:${context.colorOf(id)}`, 'aria-hidden': 'true' }),
     titleNode(chat, session, title),
@@ -1072,6 +1104,7 @@ function drawHead(chat, session) {
     link ? el('a', { class: 'open-link', href: link.href, title: link.about }, 'Open', icon('M9 2h5v5M14 2 7 9', 11)) : null,
     setup,
     designButton,
+    artifactButton,
     screen,
     rock,
     panel,
@@ -1087,6 +1120,7 @@ function drawHead(chat, session) {
 /** Swaps the card between its chat and the screens of the design Claude makes in the session. */
 function toggleDesign(chat) {
   const session = context.sessionOf(chat.id)
+  if (!chat.isDesignShown && chat.isArtifactShown) toggleArtifact(chat)
   chat.isDesignShown = !chat.isDesignShown && Boolean(session?.design)
   chat.root.classList.toggle('shows-design', chat.isDesignShown)
   chat.designPane.hidden = !chat.isDesignShown
@@ -1097,6 +1131,81 @@ function toggleDesign(chat) {
   }
   chat.headSignature = ''
   drawHead(chat, session)
+}
+
+// ---------- artifacts ----------
+
+/**
+ * Shows a session's artifacts beside its chat, or closes them: the card widens to the board's full
+ * width while they show (the cards beside it move down) and goes back to its own size after.
+ */
+function toggleArtifact(chat) {
+  const session = context.sessionOf(chat.id)
+  // one or the other: a design takes the card's whole room
+  if (!chat.isArtifactShown && chat.isDesignShown) toggleDesign(chat)
+  chat.isArtifactShown = !chat.isArtifactShown && Boolean(session?.artifacts)
+  chat.root.classList.toggle('shows-artifact', chat.isArtifactShown)
+  chat.artifactPlace.hidden = !chat.isArtifactShown
+  if (chat.isArtifactShown) {
+    chat.artifact ??= artifactPane(chat.artifactPlace, chat.id, { onClose: () => toggleArtifact(chat) })
+    chat.artifact.show(session.artifacts)
+    markArtifactSeen(chat.id, session.artifacts.at)
+  }
+  keepArtifactShown(chat.id, chat.isArtifactShown)
+  context.onWiden?.(chat.id, chat.isArtifactShown)
+  // too narrow for the two side by side (a narrow window has one card a row): the artifact goes under the chat
+  const placeArtifact = () => chat.root.classList.toggle('artifact-under', chat.root.clientWidth > 0 && chat.root.clientWidth < ARTIFACT_BESIDE_PX)
+  chat.artifactWidth ??= new ResizeObserver(placeArtifact)
+  if (chat.isArtifactShown) {
+    chat.artifactWidth.observe(chat.root)
+    requestAnimationFrame(placeArtifact)
+  } else {
+    chat.artifactWidth.disconnect()
+    chat.root.classList.remove('artifact-under')
+  }
+  chat.headSignature = ''
+  drawHead(chat, session)
+}
+
+// the least room for the chat and an artifact side by side in a card
+const ARTIFACT_BESIDE_PX = 820
+
+// the sessions whose artifacts show, kept across reloads, and when the person last looked at each
+const ARTIFACT_SHOWN_KEY = 'ccc.artifactShown'
+const ARTIFACT_SEEN_KEY = 'ccc.artifactSeen'
+
+function stored(key, empty) {
+  try {
+    return JSON.parse(localStorage.getItem(key) ?? 'null') ?? empty
+  } catch {
+    return empty
+  }
+}
+
+function keep(key, value) {
+  try {
+    localStorage.setItem(key, JSON.stringify(value))
+  } catch {
+    // a browser that keeps nothing: it is forgotten with a reload
+  }
+}
+
+function artifactsShown() {
+  const shown = stored(ARTIFACT_SHOWN_KEY, [])
+  return Array.isArray(shown) ? shown : []
+}
+
+function keepArtifactShown(sessionId, isShown) {
+  keep(ARTIFACT_SHOWN_KEY, [...artifactsShown().filter(id => id !== sessionId), ...(isShown ? [sessionId] : [])])
+}
+
+function artifactSeenAt(sessionId) {
+  const at = stored(ARTIFACT_SEEN_KEY, {})[sessionId]
+  return Number.isFinite(at) ? at : 0
+}
+
+function markArtifactSeen(sessionId, at) {
+  if (Number.isFinite(at) && artifactSeenAt(sessionId) < at) keep(ARTIFACT_SEEN_KEY, { ...stored(ARTIFACT_SEEN_KEY, {}), [sessionId]: at })
 }
 
 // when the person last looked at each session's design, kept across reloads: newer screens are marked

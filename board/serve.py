@@ -168,7 +168,7 @@ BOARD_FILES = {"/": "index.html", "/index.html": "index.html", "/board.css": "bo
                "/eva-logo.png": "eva-logo.png",
                "/terminal.js": "terminal.js", "/xterm.js": "xterm.js", "/xterm.css": "xterm.css", "/xterm-fit.js": "xterm-fit.js",
                "/grid.js": "grid.js", "/gridstack.js": "gridstack.js", "/gridstack.css": "gridstack.css",
-               "/design.js": "design.js"}
+               "/design.js": "design.js", "/artifact.js": "artifact.js"}
 
 
 def board_version(board_dir: Path = BOARD_DIR) -> str:
@@ -535,6 +535,7 @@ class Transcripts:
         self.cache = {}
         self.tasks = {}
         self.designs_seen = {}
+        self.artifacts_seen = {}
 
     def designs(self, session_id: str) -> dict:
         """The folders a session made designs in (Claude Design), each with its canvas's link when
@@ -558,6 +559,29 @@ class Transcripts:
                     found = {**found, folder: url or found.get(folder)}
                 offset = start + end
         self.designs_seen[session_id] = (offset, found)
+        return found
+
+    def artifacts(self, session_id: str) -> dict:
+        """The Artifacts Claude published in a session, by their claude.ai links, oldest first (see
+        artifacts_in): read once from the start, then only what was added since."""
+        path = self.find(session_id) if isinstance(session_id, str) and SAFE_ID.match(session_id) else None
+        if path is None:
+            return {}
+        try:
+            size = path.stat().st_size
+        except OSError:
+            return {}
+        offset, calls, found = self.artifacts_seen.get(session_id, (0, {}, {}))
+        if size < offset:
+            offset, calls, found = 0, {}, {}
+        if size > offset:
+            start = max(offset, size - WHOLE_FILE_LIMIT)
+            chunk = read_bytes(path, start, size - start)
+            end = chunk.rfind(b"\n") + 1
+            if end > 0:
+                calls, found = artifacts_in(chunk[:end].decode("utf-8", errors="replace"), calls, found)
+                offset = start + end
+        self.artifacts_seen[session_id] = (offset, calls, found)
         return found
 
     def describe(self, session_id: str) -> dict:
@@ -753,6 +777,159 @@ def design_file(transcripts, session_id: str, index: str, name: str):
     target = os.path.realpath(os.path.join(folder, unquote(name)))
     media = DESIGN_TYPES.get(os.path.splitext(target)[1].lower())
     if media is None or os.path.commonpath([folder, target]) != folder or not os.path.isfile(target):
+        return None
+    try:
+        if os.path.getsize(target) > DESIGN_FILE_MAX:
+            return None
+        return media, Path(target).read_bytes()
+    except OSError:
+        return None
+
+
+# ---------- artifacts ----------
+
+# what the Artifact tool says once it published a page: the page's own file and its claude.ai link
+PUBLISHED = re.compile(r"^Published (/.+?) at (https://claude\.ai/(?:code/)?artifact/[A-Za-z0-9_-]{6,64})")
+DELETED_ARTIFACT = re.compile(r"^Artifact deleted: (https://claude\.ai/(?:code/)?artifact/[A-Za-z0-9_-]{6,64})")
+# what an artifact's folder may hand the board's page: what a design's may, and sound, video and documents
+ARTIFACT_TYPES = {**DESIGN_TYPES, ".mp3": "audio/mpeg", ".wav": "audio/wav", ".ogg": "audio/ogg", ".m4a": "audio/mp4", ".mp4": "video/mp4", ".webm": "video/webm", ".pdf": "application/pdf", ".txt": "text/plain; charset=utf-8", ".csv": "text/csv; charset=utf-8", ".md": "text/markdown; charset=utf-8", ".ico": "image/x-icon"}
+TITLE_TAG = re.compile(rb"<title[^>]*>([^<]{1,300})</title>", re.I)
+# what an artifact's page may do, walled off: run, send forms, open links in a window of their own, ask
+ARTIFACT_SANDBOX = "allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox allow-modals"
+
+
+def artifacts_in(text: str, calls: dict, found: dict) -> tuple:
+    """(calls, found) brought up to date with the transcript's lines: each Artifact call Claude made
+    (`calls`, by its tool id, until its result comes) and each page it published (`found`, by its
+    claude.ai link): the page's file, the files beside it, the folder they were named from, the
+    description, and when it was published last. One Claude deleted is gone again."""
+    calls, found = dict(calls), dict(found)
+    for line in text.splitlines():
+        # only the lines of Artifact calls, and of their results: a transcript holds many other tools
+        if '"Artifact"' not in line and not (calls and "tool_result" in line and any(tool_id in line for tool_id in calls)):
+            continue
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        content = (record.get("message") or {}).get("content") if isinstance(record, dict) else None
+        for item in content if isinstance(content, list) else []:
+            if not isinstance(item, dict):
+                continue
+            if item.get("type") == "tool_use" and item.get("name") == "Artifact" and isinstance(item.get("input"), dict) and isinstance(item.get("id"), str):
+                calls[item["id"]] = {**item["input"], "cwd": record.get("cwd")}
+                continue
+            call = calls.pop(item.get("tool_use_id"), None) if item.get("type") == "tool_result" else None
+            if call is None:
+                continue
+            said = item.get("content")
+            said = said if isinstance(said, str) else " ".join(part.get("text", "") for part in said if isinstance(part, dict)) if isinstance(said, list) else ""
+            gone = DELETED_ARTIFACT.match(said)
+            if gone:
+                found.pop(gone.group(1), None)
+                continue
+            published = PUBLISHED.match(said)
+            if not published or call.get("asset"):
+                continue
+            url = published.group(2)
+            files = call.get("files") if isinstance(call.get("files"), dict) else {}
+            kept = found.pop(url, {})
+            found[url] = {
+                "url": url,
+                "page": published.group(1),
+                "files": {**kept.get("files", {}), **{name: source for name, source in files.items() if isinstance(name, str)}},
+                "root": call.get("root") if isinstance(call.get("root"), str) else kept.get("root"),
+                "cwd": call.get("cwd") if isinstance(call.get("cwd"), str) else kept.get("cwd"),
+                "description": call.get("description") if isinstance(call.get("description"), str) else kept.get("description", ""),
+                "at": time_of(record.get("timestamp")) or kept.get("at") or 0,
+            }
+    return calls, found
+
+
+def artifact_view(number: int, artifact: dict) -> dict:
+    """An artifact as the board lists it: its number, link and title (the page's own <title>, else
+    its description), when it last changed, and whether its page is still on this Mac."""
+    page = Path(artifact["page"])
+    try:
+        changed = int(page.stat().st_mtime * 1000)
+        title = TITLE_TAG.search(read_bytes(page, 0, 64 * 1024))
+    except OSError:
+        changed, title = 0, None
+    name = title.group(1).decode("utf-8", errors="replace").strip() if title else ""
+    return {"id": number, "url": artifact["url"], "title": (name or artifact["description"] or artifact["url"].rsplit("/", 1)[-1])[:200], "description": artifact["description"][:500], "at": max(artifact["at"], changed), "isHere": changed > 0}
+
+
+def session_artifacts(transcripts, session_id: str) -> list:
+    """The artifacts of a session, each with its number in the board's addresses (/artifact/<session>/<number>/)."""
+    return [artifact_view(number, artifact) for number, artifact in enumerate(transcripts.artifacts(session_id).values())]
+
+
+def artifact_summary(artifacts: list):
+    """What a card needs to know of a session's artifacts: how many, and the newest one's title and
+    when it changed. None with none."""
+    if not artifacts:
+        return None
+    newest = max(artifacts, key=lambda view: view["at"])
+    return {"count": len(artifacts), "title": newest["title"], "at": newest["at"]}
+
+
+ALL_ARTIFACTS_SHOWN = 300
+
+
+def all_artifacts(projects_dir: Path, transcripts, limit: int = ALL_ARTIFACTS_SHOWN) -> list:
+    """Every artifact Claude published in a conversation on this Mac, the one changed last first,
+    for "+" to open as a card of its own: each with its session, that session's name and folder."""
+    files = []
+    for folder, _dirs, names in os.walk(projects_dir):
+        if "subagents" in Path(folder).parts:
+            continue
+        files += [Path(folder) / name for name in names if name.endswith(".jsonl") and SAFE_ID.match(name[:-6])]
+    found = []
+    for path in files:
+        session_id = path.name[:-6]
+        views = session_artifacts(transcripts, session_id)
+        if not views:
+            continue
+        title = transcripts.describe(session_id).get("title") or first_prompt(path) or session_id
+        folder = folder_of(path) or ""
+        found += [{**view, "sessionId": session_id, "sessionTitle": title[:200], "folder": folder} for view in views]
+    return sorted(found, key=lambda view: view["at"], reverse=True)[:limit]
+
+
+def with_artifacts(sessions: list, transcripts) -> list:
+    """Each session that published artifacts, with what its card shows of them (artifact_summary)."""
+    marked = []
+    for session in sessions:
+        summary = artifact_summary(session_artifacts(transcripts, session.get("sessionId"))) if isinstance(session, dict) else None
+        marked.append({**session, "artifacts": summary} if summary else session)
+    return marked
+
+
+def artifact_file(transcripts, session_id: str, index: str, name: str):
+    """(content type, bytes) of a file of one of a session's artifacts, for the board's Artifact view,
+    or None: its page at its own address, and the files Claude published beside it at theirs. Only
+    the files the transcript names, and only kinds a page shows."""
+    if not isinstance(session_id, str) or not SAFE_ID.match(session_id) or not index.isdigit():
+        return None
+    artifacts = list(transcripts.artifacts(session_id).values())
+    if int(index) >= len(artifacts):
+        return None
+    artifact = artifacts[int(index)]
+    name = unquote(name)
+    if name in ("", "index.html", Path(artifact["page"]).name):
+        source = artifact["page"]
+    else:
+        given = artifact["files"].get(name)
+        source = given.get("from") if isinstance(given, dict) else given
+        if not isinstance(source, str):
+            return None
+        if not source.startswith("/"):
+            source = os.path.join(artifact.get("root") or artifact.get("cwd") or "/", source)
+            if not source.startswith("/"):
+                source = os.path.join(artifact.get("cwd") or "/", source)
+    target = os.path.realpath(source)
+    media = ARTIFACT_TYPES.get(os.path.splitext(target)[1].lower())
+    if media is None or not os.path.isfile(target):
         return None
     try:
         if os.path.getsize(target) > DESIGN_FILE_MAX:
@@ -3659,7 +3836,7 @@ class Handler(SimpleHTTPRequestHandler):
             RUNS.settle(TERMINALS, now_ms, cards)
             cards = with_run_labels(cards, RUNS.terminals())
             payload["sessions"] = with_names(payload["sessions"], NAMES.load())
-            payload["sessions"] = with_choices(with_designs(with_screen_boxes(payload["sessions"], cards, now_ms, SCREEN_BOXES), TRANSCRIPTS), CHOICES_DIR)
+            payload["sessions"] = with_choices(with_artifacts(with_designs(with_screen_boxes(payload["sessions"], cards, now_ms, SCREEN_BOXES), TRANSCRIPTS), TRANSCRIPTS), CHOICES_DIR)
             lost, seen = KEEPER_WATCH.look(TERMINALS.keeper_id, cards, now_ms)
             stopped = stopped_backgrounds(BACKGROUNDS, cards, SESSIONS_DIR, TRANSCRIPTS, now_ms, lost)
             lost_now = [one["sessionId"] for one in stopped if one["sessionId"] in lost]
@@ -3679,6 +3856,20 @@ class Handler(SimpleHTTPRequestHandler):
             if not SAFE_ID.match(session_id):
                 return self.send_error(400)
             return self.send_json({"designs": session_designs(TRANSCRIPTS, session_id)})
+        if route == "/api/artifacts/all":
+            return self.send_json({"artifacts": all_artifacts(PROJECTS_DIR, TRANSCRIPTS)})
+        if route == "/api/artifacts":
+            session_id = parse_qs(urlsplit(self.path).query).get("session", [""])[0]
+            if not SAFE_ID.match(session_id):
+                return self.send_error(400)
+            return self.send_json({"artifacts": session_artifacts(TRANSCRIPTS, session_id)})
+        if route.startswith("/artifact/"):
+            # an artifact's own page and files, walled off from the board as a design's are
+            parts = route.split("/", 4)
+            found = artifact_file(TRANSCRIPTS, parts[2], parts[3], parts[4]) if len(parts) == 5 else None
+            if found is None:
+                return self.send_error(404)
+            return self.send_design(*found, may_interact=True)
         if route.startswith("/design/"):
             # a design's own pages, run walled off from the board: the browser gives them an origin
             # of their own, so they reach neither the board's page nor its server's answers
@@ -3986,12 +4177,14 @@ class Handler(SimpleHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         super().end_headers()
 
-    def send_design(self, media_type: str, content: bytes):
+    def send_design(self, media_type: str, content: bytes, may_interact: bool = False):
+        """A page of Claude's, walled off from the board: an origin of its own. An artifact is one
+        to use, so it may also send forms, open links in a new window and ask in a dialog."""
         self.send_response(200)
         self.send_header("Content-Type", media_type)
         self.send_header("Content-Length", str(len(content)))
         self.send_header("X-Content-Type-Options", "nosniff")
-        self.send_header("Content-Security-Policy", "sandbox allow-scripts")
+        self.send_header("Content-Security-Policy", f"sandbox {ARTIFACT_SANDBOX if may_interact else 'allow-scripts'}")
         self.end_headers()
         self.wfile.write(content)
 

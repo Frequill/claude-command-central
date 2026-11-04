@@ -11,6 +11,7 @@ import { startScene } from './themes.js'
 import { makeGrid, rowsToFit } from './grid.js'
 import * as K from './keys.js'
 import { rememberFocus, restoreFocus } from './refocus.js'
+import { artifactCard } from './artifact.js'
 import { closeTerminal, dropTerminal, focusTerminal, isTerminal, runCommand, setupTerminals, startTerminal, stopKeeper, terminalCard, themeTerminals, toggleTerminal, updateTerminal } from './terminal.js'
 
 const POLL_MS = 1000
@@ -35,6 +36,8 @@ const STOP_ARMED_MS = 4000
 const LOG_MARK = { running: '…', ok: '✓', error: '✗' }
 const MAP = { rowH: 72, agentH: 62, sessionH: 50, groupGap: 20, edgeW: 120 }
 const SMALL_RING = { size: 52, radius: 20, width: 7 }
+// the artifacts opened from "+" as cards of their own
+const ARTIFACT_CARDS_KEY = 'ccc.artifactCards'
 
 const view = {
   tiles: new Map(),
@@ -66,6 +69,8 @@ const view = {
   decor: { update() {}, stop() {} },
   /** The terminals the board's server runs, and the terminal apps this Mac has. */
   terminals: [],
+  /** The artifacts opened from "+" as cards of their own, kept across reloads. */
+  artifactCards: loadArtifactCards(),
   terminalApps: [],
   /** The editors this Mac has, that a step's file can open in. */
   editorApps: [],
@@ -863,10 +868,15 @@ function setupStart() {
   document.querySelector('#start-mode').addEventListener('click', event => {
     const button = event.target.closest('[data-mode]')
     if (!button) return
-    view.start.mode = ['existing', 'terminal'].includes(button.dataset.mode) ? button.dataset.mode : 'new'
+    view.start.mode = ['existing', 'terminal', 'artifact'].includes(button.dataset.mode) ? button.dataset.mode : 'new'
     document.querySelector('#start-problem').textContent = ''
     drawStart()
     if (view.start.mode === 'existing') loadExisting()
+    if (view.start.mode === 'artifact') loadArtifacts()
+  })
+  document.querySelector('#artifact-search').addEventListener('input', event => {
+    view.start.artifactSearch = event.target.value
+    drawArtifacts()
   })
   document.querySelector('#existing-search').addEventListener('input', event => {
     view.start.search = event.target.value
@@ -1070,18 +1080,21 @@ function drawStart() {
       : [el('p', { class: 'hint' }, 'No folders yet. Choose one.')]),
   )
   restoreFocus(folders, kept)
-  const isExisting = start.mode === 'existing'
+  const isArtifact = start.mode === 'artifact'
+  // an artifact is picked from its list, as a conversation is: no folder, no place to start in
+  const isExisting = start.mode === 'existing' || isArtifact
   const isShell = start.mode === 'terminal'
   const appName = chosenApp().name
   for (const button of document.querySelectorAll('#start-mode [data-mode]')) button.setAttribute('aria-checked', String(button.dataset.mode === start.mode))
   for (const part of document.querySelectorAll('#start-dialog .start-new')) part.hidden = isExisting
-  document.querySelector('#start-existing').hidden = !isExisting
+  document.querySelector('#start-existing').hidden = start.mode !== 'existing'
+  document.querySelector('#start-artifacts').hidden = !isArtifact
   document.querySelector('#start-in').hidden = isExisting || isShell
   document.querySelector('#start-background-info').hidden = state.where !== 'background'
   // the first time it is the choice, with the start window open, it is explained
   if (state.where === 'background' && start.mode === 'new' && document.querySelector('#start-dialog').open && !readStored(BACKGROUND_EXPLAINED_KEY)) explainBackground()
   document.querySelector('#start-shell-note').hidden = !isShell
-  setText('#start-title', isShell ? 'NEW TERMINAL' : 'ADD A SESSION')
+  setText('#start-title', isShell ? 'NEW TERMINAL' : isArtifact ? 'OPEN AN ARTIFACT' : 'ADD A SESSION')
   setText('#start-app-name', appName)
   for (const button of document.querySelectorAll('#start-where [data-where]')) button.setAttribute('aria-checked', String(button.dataset.where === state.where))
   setText('#start-note', state.note)
@@ -1100,7 +1113,7 @@ function drawStart() {
   )
   // the first message goes with either: typed into the app's new session, or given to claude in the
   // terminal. In the background it is written in the session's own card, which comes at once
-  document.querySelector('#start-first').hidden = isShell || isBackground
+  document.querySelector('#start-first').hidden = isShell || isBackground || isArtifact
   drawStartFiles()
   const go = document.querySelector('#start-go')
   go.hidden = isExisting
@@ -1215,6 +1228,91 @@ async function addExisting(conversation, button) {
     problem.textContent = 'Could not add it. Is the board still running?'
     if (button) button.disabled = false
   }
+}
+
+// ---------- opening an artifact as a card of its own ----------
+
+function loadArtifactCards() {
+  try {
+    const cards = JSON.parse(localStorage.getItem(ARTIFACT_CARDS_KEY) ?? '[]')
+    return Array.isArray(cards) ? cards.filter(card => card && typeof card.id === 'string' && typeof card.sessionId === 'string' && Number.isInteger(card.index)) : []
+  } catch {
+    return []
+  }
+}
+
+function keepArtifactCards() {
+  try {
+    localStorage.setItem(ARTIFACT_CARDS_KEY, JSON.stringify(view.artifactCards))
+  } catch {
+    // a browser that keeps nothing: the cards last until the board reloads
+  }
+}
+
+/** Asks the board's server for every artifact Claude published in a conversation on this Mac. */
+async function loadArtifacts() {
+  view.start.artifacts = null
+  drawArtifacts()
+  try {
+    const response = await fetch('/api/artifacts/all', { cache: 'no-store' })
+    const data = response.ok ? await response.json() : {}
+    view.start.artifacts = Array.isArray(data.artifacts) ? data.artifacts : []
+  } catch {
+    view.start.artifacts = []
+    document.querySelector('#start-problem').textContent = 'Could not read your artifacts. Is the board still running?'
+  }
+  drawArtifacts()
+  document.querySelector('#artifact-search').focus()
+}
+
+function drawArtifacts() {
+  const list = document.querySelector('#artifact-list')
+  const all = view.start.artifacts
+  if (all === null || all === undefined) return list.replaceChildren(el('p', { class: 'hint' }, 'Looking for your artifacts…'))
+  const shown = L.matchArtifacts(all, view.start.artifactSearch)
+  if (shown.length === 0) return list.replaceChildren(el('p', { class: 'hint' }, all.length ? 'No artifact matches that.' : 'Claude has published no artifact in a conversation on this Mac yet.'))
+  const now = Date.now()
+  list.replaceChildren(
+    ...shown.map(artifact => {
+      const id = L.artifactCardId(artifact.url)
+      const isOpen = view.artifactCards.some(card => card.id === id)
+      const link = el('a', { class: 'secondary existing-open', href: artifact.url, target: '_blank', rel: 'noopener noreferrer', title: 'Open it on claude.ai' }, 'claude.ai ↗')
+      const open = artifact.isHere ? el('button', { type: 'button', class: 'primary existing-add', disabled: isOpen }, isOpen ? 'On the board' : 'Open in CCC') : null
+      open?.addEventListener('click', () => openArtifactCard(artifact))
+      const where = artifact.isHere ? null : 'its page is not on this Mac any more'
+      return el(
+        'div',
+        { class: 'existing-row', role: 'listitem' },
+        el(
+          'div',
+          { class: 'existing-main' },
+          el('span', { class: 'existing-title', title: artifact.description || artifact.title }, artifact.title),
+          el('span', { class: 'existing-meta', title: artifact.folder }, [artifact.sessionTitle, L.folderLabel(artifact.folder).name, L.timeAgo(artifact.at, now), where].filter(Boolean).join(' · ')),
+        ),
+        el('div', { class: 'existing-actions' }, link, open),
+      )
+    }),
+  )
+}
+
+/** Puts an artifact on the board as a card of its own, where its + was clicked, and goes to it. */
+async function openArtifactCard(artifact) {
+  const id = L.artifactCardId(artifact.url)
+  if (!view.artifactCards.some(card => card.id === id)) {
+    view.artifactCards = [...view.artifactCards, { id, sessionId: artifact.sessionId, index: artifact.id, url: artifact.url, title: artifact.title, sessionTitle: artifact.sessionTitle }]
+    keepArtifactCards()
+  }
+  view.start.didStart = true
+  document.querySelector('#start-dialog').close()
+  await poll()
+  window.dispatchEvent(new CustomEvent('ccc:show-session', { detail: { sessionId: id } }))
+}
+
+/** The × on an artifact's own card: it leaves the board; the artifact stays where it is, in its session and on claude.ai. */
+function closeArtifactCard(id) {
+  view.artifactCards = view.artifactCards.filter(card => card.id !== id)
+  keepArtifactCards()
+  poll()
 }
 
 /** The Mac's own folder window, opened by the board's server: the folder picked, or why there is none. */
@@ -2070,6 +2168,21 @@ function renderTiles(sessions, now, day, tags) {
     seen.add(card.id)
   })
   for (const id of L.arrivals(view.onBoard, shells.map(card => card.id))) arriving.add(id)
+  // the artifacts opened from "+", each a card of its own, after the terminals
+  const opened = view.artifactCards
+  for (const card of opened) {
+    let tile = view.tiles.get(card.id)
+    if (!tile) {
+      const made = artifactCard(card, { onClose: () => closeArtifactCard(card.id) })
+      tile = { node: made.root, signature: '', isArtifact: true, artifact: made }
+      view.tiles.set(card.id, tile)
+    }
+    // published again in a session on the board: its page loads again
+    tile.artifact.show(view.byId.get(card.sessionId)?.artifacts)
+    view.grid.hold(card.id, tile.node)
+    seen.add(card.id)
+  }
+  for (const id of L.arrivals(view.onBoard, opened.map(card => card.id))) arriving.add(id)
   // the current card leaving the board (closed, deleted, ended elsewhere): where it was, so the card
   // nearest to it is the current one next, not the first on the board
   let leftFrom = null
@@ -2081,13 +2194,14 @@ function renderTiles(sessions, now, day, tags) {
     view.grid.drop(id)
     if (tile.isChat) dropChat(id)
     if (tile.isTerminal) dropTerminal(id)
+    if (tile.isArtifact) tile.artifact.stop()
     view.tiles.delete(id)
     view.newestLog.delete(id)
   }
   if (leftFrom) handOff(leftFrom)
   if (isAnyGone) backInBounds()
-  document.querySelector('#sessions-empty').hidden = sessions.length + shells.length > 0
-  view.order = [...arranged.map(session => session.sessionId), ...shells.map(card => card.id)]
+  document.querySelector('#sessions-empty').hidden = sessions.length + shells.length + opened.length > 0
+  view.order = [...arranged.map(session => session.sessionId), ...shells.map(card => card.id), ...opened.map(card => card.id)]
   drawRunning()
   drawLost()
   view.onBoard = seen
@@ -3104,6 +3218,8 @@ setupChat({
   terminalOf: id => L.backgroundTerminal(view.terminals, id),
   onShowTerminal: showTerminal,
   onRun: runFromChat,
+  // an artifact beside its chat: the card as wide as the board while it shows
+  onWiden: (id, isWide) => view.grid?.widen(id, isWide),
   // the board's data again at once, as after a change made from a card
   refreshBoard: () => poll(),
   isResumable: id => (view.stopped ?? []).some(one => one.sessionId === id),

@@ -8,7 +8,7 @@ import * as C from './chat-logic.js'
 import * as K from './keys.js'
 import { chooseCrater, planFlight } from './dragon.js'
 import * as P from './placement.js'
-import { cellsOf, closedStrip, gapAt, isRoomForCard, nextSpot, passedAt, resizedTo, rowsToFit, stripAt } from './grid.js'
+import { cellsOf, closedStrip, gapAt, isRoomForCard, movedBack, movedBy, nextSpot, passedAt, resizedTo, rowsToFit, stripAt } from './grid.js'
 
 const NOW = 1_000_000_000
 
@@ -1789,6 +1789,33 @@ test('a background session that stopped is resumed by sending to it', () => {
   assert.match(C.composeState(ended).note, /ended in its terminal/)
   // running, it takes the message as any session does
   assert.equal(C.composeState({ takesMessages: true }, true).resumeHere, undefined)
+})
+
+test('a session\'s artifacts are listed newest first', () => {
+  assert.deepEqual(C.newestFirst([{ id: 0, at: 5 }, { id: 1, at: 9 }, { id: 2 }]).map(one => one.id), [1, 0, 2])
+  assert.deepEqual(C.newestFirst(undefined), [])
+})
+
+test('a card widened for its artifact moves the cards in its way, and they come back where they were', () => {
+  const before = new Map([['chat', { x: 0, y: 0 }], ['beside', { x: 6, y: 0 }], ['below', { x: 0, y: 32 }]])
+  const after = [{ id: 'chat', x: 0, y: 0 }, { id: 'beside', x: 6, y: 32 }, { id: 'below', x: 0, y: 32 }]
+  const moved = movedBy(before, after, 'chat')
+  assert.deepEqual(moved, { beside: { from: { x: 6, y: 0 }, to: { x: 6, y: 32 } } })
+  // narrowed again: the card still where the widening put it goes back; one moved by hand since stays
+  assert.deepEqual(movedBack(moved, [{ id: 'beside', x: 6, y: 32 }]).map(({ node, place }) => [node.id, place]), [['beside', { x: 6, y: 0 }]])
+  assert.deepEqual(movedBack(moved, [{ id: 'beside', x: 0, y: 64 }]), [])
+})
+
+test('the artifacts "+" lists are searched by title, session and folder, and each opens as one card', () => {
+  const all = [
+    { title: 'Cart total checker', sessionTitle: 'Fix the discount', folder: '/code/shop' },
+    { title: 'Install steps', sessionTitle: 'Write the README', folder: '/code/docs' },
+  ]
+  assert.deepEqual(L.matchArtifacts(all, 'cart').map(one => one.title), ['Cart total checker'])
+  assert.deepEqual(L.matchArtifacts(all, 'docs readme').map(one => one.title), ['Install steps'])
+  assert.equal(L.matchArtifacts(all, '').length, 2)
+  assert.equal(L.artifactCardId('https://claude.ai/artifact/VsXLKmqA29v9XwBeWJ8MZ9'), 'art-VsXLKmqA29v9XwBeWJ8MZ9')
+  assert.equal(L.artifactCardId('https://claude.ai/code/artifact/a1b2-c3'), 'art-a1b2-c3')
 })
 
 test('Run goes on shell code blocks with a command in them', () => {
