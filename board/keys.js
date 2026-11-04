@@ -341,3 +341,19 @@ export function backUpTo(top, shown, lowest) {
 export function isShellKey(event) {
   return Boolean(event?.ctrlKey) && !event.metaKey && !event.altKey
 }
+
+/**
+ * Where the page scrolls to when the keys land on a card, so it shows whole: all in px from the
+ * window's top. `band` is the room between the bars ({ top, bottom }), `card` the card's { top, bottom },
+ * `scrollY` where the page is and `most` how far it scrolls, `gap` the room kept between a card and a
+ * bar. A card that shows whole already stays where it is, so cards that fit on the screen together
+ * are gone between without the page moving. One that fits goes the least way into view; one taller
+ * than the room lands with its top just under the bars.
+ */
+export function landingScroll({ band, card, scrollY, most, gap = 0 }) {
+  const within = top => Math.max(0, Math.min(most, Math.round(top)))
+  if (card.top >= band.top && card.bottom <= band.bottom) return scrollY
+  const fits = card.bottom - card.top <= band.bottom - band.top - 2 * gap
+  if (!fits || card.top < band.top) return within(scrollY + card.top - band.top - gap)
+  return within(scrollY + card.bottom - band.bottom + gap)
+}

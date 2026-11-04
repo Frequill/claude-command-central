@@ -8,7 +8,7 @@ import * as C from './chat-logic.js'
 import * as K from './keys.js'
 import { chooseCrater, planFlight } from './dragon.js'
 import * as P from './placement.js'
-import { cellsOf, closedStrip, gapAt, isRoomForCard, nextSpot, passedAt, resizedTo, stripAt } from './grid.js'
+import { cellsOf, closedStrip, gapAt, isRoomForCard, nextSpot, passedAt, resizedTo, rowsToFit, stripAt } from './grid.js'
 
 const NOW = 1_000_000_000
 
@@ -926,7 +926,10 @@ test('the window says when it can write and when the message has to wait', () =>
   assert.deepEqual(C.composeState({ turn: { isRunning: false } }), { canSend: false, note: 'This session runs an older CCC. Restart it to write to it from here.' })
   assert.deepEqual(C.composeState({ takesMessages: true, turn: { isRunning: false } }), { canSend: true, note: '' })
   assert.match(C.composeState({ takesMessages: true, turn: { isRunning: true } }).note, /Enter or Send queues it until Claude is done; ⌘Enter stops Claude/)
-  assert.match(C.composeState({ takesMessages: true, endedAt: 5, turn: {} }).note, /has ended/)
+  // one that ended in its terminal is picked up in CCC's background by sending to it
+  const ended = C.composeState({ takesMessages: true, endedAt: 5, turn: {} })
+  assert.match(ended.note, /ended in its terminal. Sending resumes it here/)
+  assert.equal(ended.resumeHere, true)
   // a stopped session of the Claude app or VS Code is woken by opening it there
   const asleep = C.composeState({ takesMessages: true, endedAt: 5, turn: {}, appSessionId: 'local_abc-1' })
   assert.deepEqual([asleep.canSend, asleep.wakeIn], [true, 'the Claude app'])
@@ -1772,7 +1775,8 @@ test('a background session that stopped is resumed by sending to it', () => {
   assert.equal(state.canSend, true)
   assert.equal(state.resumeHere, true)
   assert.match(state.note, /Sending resumes it there/)
-  assert.equal(C.composeState(ended).resumeHere, undefined)
+  // not one of CCC's: it ended in its terminal, and is resumed here all the same
+  assert.match(C.composeState(ended).note, /ended in its terminal/)
   // running, it takes the message as any session does
   assert.equal(C.composeState({ takesMessages: true }, true).resumeHere, undefined)
 })
@@ -2041,4 +2045,81 @@ test('Ctrl+C stops Claude as the Stop button does, and a shell keeps its Ctrl ke
   assert.equal(K.isShellKey({ ctrlKey: true, shiftKey: true, code: 'Tab' }), true)
   assert.equal(K.isShellKey({ ctrlKey: true, metaKey: true, code: 'KeyC' }), false)
   assert.equal(K.isShellKey({ metaKey: true, code: 'KeyC' }), false)
+})
+
+test('a card says how its session comes back, by where it was started', () => {
+  const terminal = { takesMessages: true, endedAt: 5, entrypoint: 'cli' }
+  // running, or not started yet: nothing to bring back
+  assert.equal(C.comeBack(terminal, 'done'), null)
+  assert.equal(C.comeBack(terminal, 'working'), null)
+  assert.equal(C.comeBack({ ...terminal, planned: true }, 'ended'), null)
+  assert.equal(C.comeBack(undefined, 'ended'), null)
+  const ended = C.comeBack(terminal, 'ended')
+  assert.deepEqual([ended.kind, ended.label, ended.actions], ['terminal', 'ENDED', ['resume', 'terminal']])
+  assert.match(ended.text, /ended in its terminal/)
+  // not answering for a while: its terminal may have closed without a word
+  const stale = C.comeBack({ ...terminal, endedAt: undefined }, 'stale')
+  assert.deepEqual([stale.label, stale.actions], ['STALE', ['resume', 'terminal']])
+  assert.match(stale.text, /may have closed/)
+  // the Claude app and VS Code wake their own sessions
+  const app = C.comeBack({ ...terminal, appSessionId: 'local_abc-1' }, 'ended')
+  assert.deepEqual([app.kind, app.label, app.actions], ['app', 'ASLEEP', ['wake']])
+  assert.match(app.text, /Only the Claude app can wake it/)
+  assert.equal(C.comeBack({ ...terminal, entrypoint: 'claude-vscode', sessionId: '6f1f2c1e-1111-4222-8333-944455556666' }, 'ended').kind, 'vscode')
+  // one CCC ran in its background resumes there
+  const background = C.comeBack(terminal, 'ended', true)
+  assert.deepEqual([background.kind, background.label, background.actions], ['background', 'STOPPED', ['resume']])
+})
+
+test('a conversation of the history says whether Claude runs it now', () => {
+  assert.equal(L.conversationState({ where: 'terminal', isRunning: true }), 'running now')
+  assert.equal(L.conversationState({ where: 'terminal', isRunning: false }), 'ended')
+  assert.equal(L.conversationState({ where: 'app', isRunning: false }), 'asleep')
+  assert.equal(L.conversationState({ where: 'vscode', isRunning: false }), 'asleep')
+  // from an older server, which does not say
+  assert.equal(L.conversationState({ where: 'terminal' }), '')
+})
+
+test('an address written in a reply is a link, without the sentence around it', () => {
+  const link = address => ({ t: 'link', text: address, href: address })
+  assert.deepEqual(inline('Created and verified: https://aurora.jira.com/browse/ASG-1927'), [{ t: 'text', text: 'Created and verified: ' }, link('https://aurora.jira.com/browse/ASG-1927')])
+  // a full stop, comma or bracket that ends the sentence stays words; brackets of the address stay in it
+  assert.deepEqual(inline('(at https://x.com/y), done'), [{ t: 'text', text: '(at ' }, link('https://x.com/y'), { t: 'text', text: '), done' }])
+  assert.deepEqual(inline('See https://x.com/a_(b). Then'), [{ t: 'text', text: 'See ' }, link('https://x.com/a_(b)'), { t: 'text', text: '. Then' }])
+  assert.deepEqual(inline('Go <https://x.com/q?a=1&b=2> now'), [{ t: 'text', text: 'Go ' }, link('https://x.com/q?a=1&b=2'), { t: 'text', text: ' now' }])
+  // an address in code stays code, and one in a written link is that link
+  assert.deepEqual(inline('`https://in.code`'), [{ t: 'code', text: 'https://in.code' }])
+  assert.deepEqual(inline('[ASG](https://jira/x)'), [{ t: 'link', text: 'ASG', href: 'https://jira/x' }])
+  // only http and https
+  assert.deepEqual(inline('ftp://x.com'), [{ t: 'text', text: 'ftp://x.com' }])
+})
+
+test('a new card is as tall as lets two rows of cards fit on the screen', () => {
+  // 752 px between the bars, 14 kept at each end: two cards of 18 rows (360 px each, less margins)
+  assert.equal(rowsToFit(752, 14), 18)
+  assert.ok(14 + 2 * 18 * 20 - 2 * 6 <= 752 - 14)
+  assert.deepEqual(nextSpot([{ x: 0, y: 0, w: 6, h: 18 }], 18), { x: 6, y: 0, w: 6, h: 18 })
+  // never smaller than a card can be, nor taller than a card starts at on a big screen
+  assert.equal(rowsToFit(300, 14), 16)
+  assert.equal(rowsToFit(4000, 14), 32)
+  // unknown room (a window not drawn yet): the size a card starts at
+  assert.equal(rowsToFit(0), 32)
+  assert.equal(rowsToFit(NaN), 32)
+})
+
+test('the keys scroll only as far as a card needs to show whole', () => {
+  const band = { top: 73, bottom: 825 }
+  const at = (top, height, scrollY = 1000) => K.landingScroll({ band, card: { top, bottom: top + height }, scrollY, most: 5000, gap: 14 })
+  // whole on the screen already: the page stays put, so two rows of cards are gone between without moving
+  assert.equal(at(87, 348), 1000)
+  assert.equal(at(447, 348), 1000)
+  // partly below: the least way up, until its bottom is just above the status bar
+  assert.equal(at(600, 348), 1000 + 600 + 348 - 825 + 14)
+  // partly above: its top just under the bars
+  assert.equal(at(40, 348), 1000 + 40 - 73 - 14)
+  // taller than the room: from its top, wherever it is
+  assert.equal(at(300, 900), 1000 + 300 - 73 - 14)
+  assert.equal(at(-200, 900), 1000 - 200 - 73 - 14)
+  // never past the ends of the page
+  assert.equal(at(40, 348, 0), 0)
 })

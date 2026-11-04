@@ -99,20 +99,43 @@ function cells(line) {
 
 /**
  * The spans of a line: `{ t: 'text' | 'strong' | 'em' | 'code' | 'link', text, href? }`. A link
- * keeps its address only when it is http or https.
+ * keeps its address only when it is http or https. An address written as it is (https://…, or
+ * <https://…>) is a link too, without the full stop or bracket that ends the sentence around it.
  */
 export function inline(text) {
   const spans = []
-  const pattern = /(`+)([\s\S]+?)\1|\*\*([\s\S]+?)\*\*|__([\s\S]+?)__|\[([^\]\n]+)\]\(([^)\s]+)\)|(?<![\w*])\*(?!\s)([^*\n]+?)\*(?![\w*])/g
+  const pattern = /(`+)([\s\S]+?)\1|\*\*([\s\S]+?)\*\*|__([\s\S]+?)__|\[([^\]\n]+)\]\(([^)\s]+)\)|(?<![\w*])\*(?!\s)([^*\n]+?)\*(?![\w*])|<(https?:\/\/[^\s<>]+)>|(?<![\w/])(https?:\/\/[^\s<>"'`]+)/gi
   let last = 0
   for (const match of String(text ?? '').matchAll(pattern)) {
     if (match.index > last) spans.push({ t: 'text', text: text.slice(last, match.index) })
     if (match[1]) spans.push({ t: 'code', text: match[2].trim() })
     else if (match[3] !== undefined || match[4] !== undefined) spans.push({ t: 'strong', text: match[3] ?? match[4] })
     else if (match[5] !== undefined) spans.push(/^https?:\/\//i.test(match[6]) ? { t: 'link', text: match[5], href: match[6] } : { t: 'text', text: match[5] })
-    else spans.push({ t: 'em', text: match[7] })
+    else if (match[8] !== undefined) spans.push({ t: 'link', text: match[8], href: match[8] })
+    else if (match[9] !== undefined) {
+      const address = bareAddress(match[9])
+      spans.push({ t: 'link', text: address, href: address })
+      // what was cut off the end goes on as words
+      last = match.index + address.length
+      continue
+    } else spans.push({ t: 'em', text: match[7] })
     last = match.index + match[0].length
   }
   if (last < String(text ?? '').length) spans.push({ t: 'text', text: text.slice(last) })
   return spans
+}
+
+/**
+ * An address written in the words, without what ends the sentence around it: a full stop, comma or
+ * the like, and a closing bracket that has no opening one in the address.
+ */
+function bareAddress(found) {
+  let address = found
+  for (;;) {
+    const end = address.at(-1)
+    if ('.,;:!?*_\''.includes(end)) address = address.slice(0, -1)
+    else if (end === ')' && (address.match(/\(/g)?.length ?? 0) < (address.match(/\)/g)?.length ?? 0)) address = address.slice(0, -1)
+    else if (end === ']' && !address.includes('[')) address = address.slice(0, -1)
+    else return address
+  }
 }

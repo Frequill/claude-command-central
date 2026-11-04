@@ -1986,6 +1986,10 @@ class AddedConversationTest(unittest.TestCase):
         self.assertEqual((one["title"], one["folder"], one["where"], one["appSessionId"], one["onBoard"]), ("Fix the login bug please", str(self.folder), "app", "local_x", True))
         [two] = serve.existing_conversations(self.projects, self.transcripts, {}, set())
         self.assertEqual((two["where"], two["onBoard"]), ("terminal", False))
+        # whether Claude runs it now, as the server's own check says
+        self.assertEqual(two["isRunning"], False)
+        [three] = serve.existing_conversations(self.projects, self.transcripts, {}, set(), runs=lambda session_id: session_id == "abc-1")
+        self.assertEqual(three["isRunning"], True)
 
     def test_a_conversation_resumes_in_its_own_folder(self):
         body = json.dumps({"sessionId": "abc-1", "resume": True}).encode()
@@ -2474,6 +2478,47 @@ class BackgroundTest(unittest.TestCase):
         # one that runs in the keeper already is not started twice
         terms.cards = [{"id": "t1", "sessionId": "s1", "endedAt": None}]
         self.assertEqual(resume("go"), (None, "It runs in the background already."))
+
+    def test_a_session_that_ended_in_its_terminal_is_handed_to_the_background_to_resume(self):
+        kept = serve.Backgrounds(self.home / "background.json")
+        projects = self.home / "projects" / "p"
+        projects.mkdir(parents=True)
+        line = lambda entry: json.dumps({"type": "user", "cwd": str(self.home), "entrypoint": entry, "permissionMode": "plan", "message": {"content": "hi"}}) + "\n"
+        (projects / "s1.jsonl").write_text(line("cli"))
+        (projects / "s2.jsonl").write_text(line("claude-vscode"))
+        transcripts = serve.Transcripts(self.home / "projects")
+        sessions = self.home / "sessions"
+        sessions.mkdir()
+        terms = FakeTerms()
+        take = lambda session_id, app_ids={}, now=100_000: serve.take_over(kept, terms, transcripts, app_ids, sessions, session_id, now)
+        # not in the history, or held by the Claude app or VS Code: not handed over
+        self.assertEqual(take("nobody"), (False, "That conversation is not in Claude's history on this Mac."))
+        self.assertEqual(take("s1", {"s1": "local_x"}), (False, "It lives in the Claude app: open it there to wake it."))
+        self.assertEqual(take("s2"), (False, "It lives in VS Code: open it there to wake it."))
+        # still running in its terminal (its snapshot written lately): two Claudes would clash
+        (sessions / "s1.json").write_text(json.dumps({"updatedAt": 90_000}))
+        self.assertEqual(take("s1"), (False, "It still runs in its terminal. Write to it there, or end it there first."))
+        self.assertIsNone(kept.get("s1"))
+        # ended: handed over, in the mode it ran in, and then resumed as a background session
+        (sessions / "s1.json").write_text(json.dumps({"updatedAt": 90_000, "endedAt": 95_000}))
+        self.assertEqual(take("s1"), (True, ""))
+        self.assertEqual(kept.get("s1"), {"folder": str(self.home), "mode": "plan", "at": 100_000})
+        # one that is CCC's already is left as it is
+        self.assertEqual(take("s1"), (False, ""))
+        # running in CCC's background counts as running too
+        kept.forget("s1")
+        terms.cards = [{"id": "t1", "kind": "claude", "sessionId": "s1"}]
+        self.assertEqual(take("s1")[0], False)
+
+    def test_a_conversation_is_resumed_in_a_terminal_only_when_it_runs_nowhere(self):
+        sessions = self.home / "sessions"
+        sessions.mkdir()
+        terms = FakeTerms()
+        self.assertFalse(serve.runs_somewhere(terms, sessions, "s1", 100_000))
+        (sessions / "s1.json").write_text(json.dumps({"updatedAt": 90_000}))
+        self.assertTrue(serve.runs_somewhere(terms, sessions, "s1", 100_000))
+        # not written for over a minute: it stopped without a word
+        self.assertFalse(serve.runs_somewhere(terms, sessions, "s1", 90_000 + serve.RUNS_NOW_MS + 1))
 
     def test_a_background_session_gets_its_card_first_and_starts_with_the_message_written_there(self):
         kept = serve.Backgrounds(self.home / "background.json")

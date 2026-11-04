@@ -169,13 +169,50 @@ export function composeState(session, isResumable = false) {
   }
   if (session.endedAt !== undefined) {
     const where = isWakeable(session)
-    const note = where
-      ? `The session is asleep. Sending opens it in ${where}, which wakes it, and your message goes in.`
-      : 'The session has ended. Your message goes in when it runs again.'
-    return { canSend: true, note, wakeIn: where || undefined }
+    if (where) return { canSend: true, note: `The session is asleep. Sending opens it in ${where}, which wakes it, and your message goes in.`, wakeIn: where }
+    // ended in its terminal: CCC picks it up in its own background, with the message
+    return { canSend: true, note: 'The session ended in its terminal. Sending resumes it here, in CCC\u2019s background, and your message goes in.', resumeHere: true }
   }
   if (session.turn?.isRunning) return { canSend: true, note: 'Claude is working. Enter or Send queues it until Claude is done; ⌘Enter stops Claude and sends it now.' }
   return { canSend: true, note: '' }
+}
+
+/**
+ * How a card's session comes back once Claude no longer runs it: null while it runs (or has not
+ * started yet). What can bring it back depends on where it was started:
+ * - 'app' / 'vscode': it is asleep there, and only that app can wake it (`actions` ['wake']);
+ * - 'background': CCC ran it in its background, and it resumes there (['resume']);
+ * - 'terminal': it ended in its terminal. CCC can resume it in its own background, or open it in a
+ *   terminal app again (['resume', 'terminal']).
+ * `state` is the card's (sessionState): 'stale' is a session that has not answered for a while, whose
+ * terminal may have closed without a word. `isResumable`: it ran in CCC's background and stopped.
+ * `label` is the word on the card's state pill, `text` the line on its bar.
+ */
+export function comeBack(session, state, isResumable = false) {
+  if (!session || session.planned || (state !== 'ended' && state !== 'stale')) return null
+  const isEnded = state === 'ended'
+  const where = isWakeable(session)
+  if (where) {
+    return {
+      kind: session.entrypoint === 'claude-vscode' ? 'vscode' : 'app',
+      label: isEnded ? 'ASLEEP' : 'STALE',
+      text: isEnded
+        ? `Asleep in ${where}. Only ${where} can wake it: open it there, or write here and it opens.`
+        : `It has not answered for a while. If ${where} closed it, open it there to wake it.`,
+      actions: ['wake'],
+    }
+  }
+  if (isResumable) {
+    return { kind: 'background', label: 'STOPPED', text: 'It ran in CCC\u2019s background and stopped. Resume it there, or write here and it resumes with your message.', actions: ['resume'] }
+  }
+  return {
+    kind: 'terminal',
+    label: isEnded ? 'ENDED' : 'STALE',
+    text: isEnded
+      ? 'It ended in its terminal. Resume it here, in CCC\u2019s background, or in a terminal again.'
+      : 'It has not answered for a while: its terminal may have closed. If so, resume it here or in a terminal.',
+    actions: ['resume', 'terminal'],
+  }
 }
 
 /**

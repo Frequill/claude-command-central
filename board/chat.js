@@ -25,8 +25,9 @@ const chats = new Map()
  * terminal it runs in when CCC started it in the background (`terminalOf(id)`, shown or hidden with
  * `onShowTerminal(terminalId, isHidden)`), `refreshBoard()` to read the board's data again, whether it stopped there and can be resumed
  * (`isResumable(id)`, done by `onResume(id)`, which says what went wrong or ''), whether it
- * stopped because CCC's keeper crashed (`isLost(id)`: its card is greyed out, with Restart), and
- * whether its panel of facts is folded in (`isSideHidden(id)`, `onSide(id, isHidden)`).
+ * stopped because CCC's keeper crashed (`isLost(id)`: its card is greyed out, with Restart), the
+ * terminal app it opens in again once it ended in a terminal (`terminalAppName()`, done by
+ * `onResumeInTerminal(id)`, which says what went wrong or ''), and whether its panel of facts is folded in (`isSideHidden(id)`, `onSide(id, isHidden)`).
  */
 export function setupChat(given) {
   context = given
@@ -175,6 +176,7 @@ function update(chat) {
   }
   drawHead(chat, session)
   drawLost(chat)
+  drawBack(chat, session)
   drawLive(chat, session)
   drawCompose(chat, session)
   drawStats(chat)
@@ -241,11 +243,13 @@ function buildCard(sessionId) {
   // shown while the session is stopped because CCC's keeper crashed
   const restart = el('button', { type: 'button', class: 'primary', title: 'Starts it again in the background, where it left off' }, 'Restart')
   const lostBar = el('div', { class: 'chat-lost', role: 'status', hidden: true }, el('span', { class: 'chat-lost-text' }, 'CCC\u2019s keeper crashed, and this session stopped with it. Its conversation is saved.'), restart)
+  // shown once Claude no longer runs the session: what can bring it back, by where it was started
+  const backBar = el('div', { class: 'chat-lost chat-back', role: 'status', hidden: true })
   // the screens of a design Claude makes, in place of the chat while the person looks at them
   const designPane = el('div', { class: 'chat-design', hidden: true, 'aria-label': 'Design' })
   const body = el('div', { class: 'chat-body' }, el('div', { class: 'chat-main' }, scroll, form), side, designPane)
-  const root = el('article', { class: `glass tile expanded-tile${context.isSideHidden(sessionId) ? ' side-hidden' : ''}`, 'data-session': sessionId, 'data-ghost': 'light' }, head, lostBar, body, el('span', { class: 'grip grip-x', 'data-axis': 'x', 'aria-hidden': 'true' }), el('span', { class: 'grip grip-y', 'data-axis': 'y', 'aria-hidden': 'true' }), el('span', { class: 'grip', 'aria-hidden': 'true' }), el('span', { class: 'grip grip-bl', 'data-axis': 'corner-bl', 'aria-hidden': 'true' }), el('span', { class: 'grip grip-tr', 'data-axis': 'corner-tr', 'aria-hidden': 'true' }), el('span', { class: 'grip grip-tl', 'data-axis': 'corner-tl', 'aria-hidden': 'true' }))
-  const chat = { id: sessionId, root, head, lostBar, designPane, design: null, isDesignShown: false, log, live, dock, scroll, thumbs, text, queue, send, stop, note, side, form, menu, emojiPicker: emojiPanel, suggestKey, suggestion: '', slash: { list: null, at: 0, shown: [], index: 0 }, mention: { shown: [], index: 0, asked: 0, timer: 0 }, menuFor: '', images: [], files: [], items: [], signature: '', timer: 0, isSending: false, isFollowing: true, canSend: false, problem: '', openSteps: new Set(), openGroups: new Set(), openPrompts: new Set(), steps: new Map(), drafts: new Map(), approvals: new Map() }
+  const root = el('article', { class: `glass tile expanded-tile${context.isSideHidden(sessionId) ? ' side-hidden' : ''}`, 'data-session': sessionId, 'data-ghost': 'light' }, head, lostBar, backBar, body, el('span', { class: 'grip grip-x', 'data-axis': 'x', 'aria-hidden': 'true' }), el('span', { class: 'grip grip-y', 'data-axis': 'y', 'aria-hidden': 'true' }), el('span', { class: 'grip', 'aria-hidden': 'true' }), el('span', { class: 'grip grip-bl', 'data-axis': 'corner-bl', 'aria-hidden': 'true' }), el('span', { class: 'grip grip-tr', 'data-axis': 'corner-tr', 'aria-hidden': 'true' }), el('span', { class: 'grip grip-tl', 'data-axis': 'corner-tl', 'aria-hidden': 'true' }))
+  const chat = { id: sessionId, root, head, lostBar, backBar, backSignature: '', designPane, design: null, isDesignShown: false, log, live, dock, scroll, thumbs, text, queue, send, stop, note, side, form, menu, emojiPicker: emojiPanel, suggestKey, suggestion: '', slash: { list: null, at: 0, shown: [], index: 0 }, mention: { shown: [], index: 0, asked: 0, timer: 0 }, menuFor: '', images: [], files: [], items: [], signature: '', timer: 0, isSending: false, isFollowing: true, canSend: false, problem: '', openSteps: new Set(), openGroups: new Set(), openPrompts: new Set(), steps: new Map(), drafts: new Map(), approvals: new Map() }
 
   // hovering the panel leaves the wheel to the page; a click in it lets the wheel scroll the panel,
   // until a click somewhere else or Esc
@@ -961,6 +965,8 @@ function drawHead(chat, session) {
   const facts = C.sessionSetup(session, background)
   const caveman = context.cavemanOf?.(id) ?? { level: 'off', isOwn: false }
   const design = session?.design ?? null
+  // once Claude no longer runs it: the word for how it stopped, by where it was started
+  const back = background ? null : C.comeBack(session, state, Boolean(context.isResumable?.(id)))
   const isNewDesign = Boolean(design) && !chat.isDesignShown && design.at > designSeenAt(id)
   const signature = JSON.stringify([title, state, source?.label, link?.href, session?.folder, session?.branch, context.colorOf(id), facts, caveman, background?.id, background?.hidden, session?.planned, context.isResumable?.(id), design?.at, chat.isDesignShown, isNewDesign])
   if (signature === chat.headSignature) return
@@ -1051,7 +1057,7 @@ function drawHead(chat, session) {
     titleNode(chat, session, title),
     source ? el('span', { class: `source source-${source.kind}` }, source.label) : null,
     el('span', { class: 'chat-where' }, [session?.folder, session?.branch].filter(Boolean).join(' · ')),
-    el('span', { class: `pill ${state === 'working' ? 'pill-work live' : state === 'needs-you' ? 'pill-wait' : 'pill-done'}` }, L.STATE_LABEL[state] ?? state),
+    el('span', { class: `pill ${state === 'working' ? 'pill-work live' : state === 'needs-you' ? 'pill-wait' : 'pill-done'}`, ...(back ? { title: back.text } : {}) }, back?.label ?? L.STATE_LABEL[state] ?? state),
     link ? el('a', { class: 'open-link', href: link.href, title: link.about }, 'Open', icon('M9 2h5v5M14 2 7 9', 11)) : null,
     setup,
     designButton,
@@ -1990,6 +1996,51 @@ function drawLost(chat) {
   const isLost = Boolean(context.isLost?.(chat.id))
   chat.root.classList.toggle('is-lost', isLost)
   chat.lostBar.hidden = !isLost
+}
+
+/**
+ * The bar under the header once Claude no longer runs the session: why, and the buttons that bring
+ * it back from where it was started (C.comeBack). Writing in the box brings it back too.
+ */
+function drawBack(chat, session) {
+  const isLost = Boolean(context.isLost?.(chat.id))
+  const isBackground = Boolean(context.terminalOf?.(chat.id))
+  const back = isLost || isBackground ? null : C.comeBack(session, L.sessionState(session ?? {}, Date.now()), Boolean(context.isResumable?.(chat.id)))
+  const appName = context.terminalAppName?.() ?? 'Terminal'
+  const signature = JSON.stringify([back, appName, L.openLink(session)?.href])
+  if (signature === chat.backSignature) return
+  chat.backSignature = signature
+  chat.backBar.hidden = !back
+  if (!back) return chat.backBar.replaceChildren()
+  const kept = rememberFocus(chat.backBar)
+  const buttons = back.actions.map(action => {
+    if (action === 'wake') {
+      const link = L.openLink(session)
+      return link ? el('a', { class: 'primary chat-back-main', href: link.href, title: link.about }, back.kind === 'vscode' ? 'Open in VS Code' : 'Open in app') : null
+    }
+    if (action === 'terminal') {
+      const button = el('button', { type: 'button', class: 'secondary', title: `Opens ${appName} in its folder and picks this conversation up again there` }, `Resume in ${appName}`)
+      button.addEventListener('click', async () => {
+        button.disabled = true
+        const problem = await context.onResumeInTerminal(chat.id)
+        button.disabled = false
+        say(chat, problem || `Opening it in ${appName}: your messages from here go in once it runs.`)
+      })
+      return button
+    }
+    const button = el('button', { type: 'button', class: 'primary chat-back-main', title: back.kind === 'terminal' ? 'Picks it up again in CCC\u2019s background, with what you write below, or where it left off' : 'Starts it again in the background, with what you write below, or where it left off' }, back.kind === 'terminal' ? 'Resume here' : 'Resume')
+    button.addEventListener('click', async () => {
+      // what is written in the box goes in as it resumes, as sending it would do
+      if (chat.text.value.trim()) return sendMessage(chat, 'queue')
+      button.disabled = true
+      const problem = await context.onResume(chat.id)
+      button.disabled = false
+      say(chat, problem || 'Resuming it here, in CCC\u2019s background, where it left off.')
+    })
+    return button
+  })
+  chat.backBar.replaceChildren(el('span', { class: 'chat-lost-text' }, back.text), ...buttons.filter(Boolean))
+  restoreFocus(chat.backBar, kept)
 }
 
 function say(chat, problem) {

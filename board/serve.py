@@ -489,9 +489,10 @@ def first_prompt(path: Path) -> str:
 EXISTING_SHOWN = 60
 
 
-def existing_conversations(projects_dir: Path, transcripts, app_ids: dict, on_board: set, limit: int = EXISTING_SHOWN) -> list:
+def existing_conversations(projects_dir: Path, transcripts, app_ids: dict, on_board: set, limit: int = EXISTING_SHOWN, runs=lambda session_id: False) -> list:
     """The conversations in Claude's history on this Mac, the most recent first, for "+" to add
-    to the board: each with its name, its folder, when it was last written in and where it lives."""
+    to the board: each with its name, its folder, when it was last written in, where it lives and
+    whether Claude runs it now (`runs`)."""
     files = []
     for folder, _dirs, names in os.walk(projects_dir):
         if "subagents" in Path(folder).parts:
@@ -515,7 +516,7 @@ def existing_conversations(projects_dir: Path, transcripts, app_ids: dict, on_bo
         folder = folder_of(path) or ""
         app_id = app_ids.get(session_id)
         where = "app" if app_id else ("vscode" if facts.get("entrypoint") == "claude-vscode" else "terminal")
-        found.append({"sessionId": session_id, "title": title, "folder": folder, "modifiedAt": int(mtime * 1000), "where": where, **({"appSessionId": app_id} if app_id else {}), "onBoard": session_id in on_board})
+        found.append({"sessionId": session_id, "title": title, "folder": folder, "modifiedAt": int(mtime * 1000), "where": where, **({"appSessionId": app_id} if app_id else {}), "onBoard": session_id in on_board, "isRunning": bool(runs(session_id))})
         if len(found) >= limit:
             break
     return found
@@ -2525,6 +2526,35 @@ def resume_background(terms, backgrounds, inbox, transcripts, session_id: str, t
     return {"sessionId": session_id, "terminalId": terminal_id, "shown": not is_hidden, **({"begun": True} if is_new else {})}, ""
 
 
+def runs_somewhere(terms, sessions_dir: Path, session_id: str, now_ms: int) -> bool:
+    """Whether Claude runs this session anywhere now: in CCC's background, or where it was started
+    (its snapshot is written every few seconds while it runs)."""
+    return is_running_background(terms, session_id) or runs_now(sessions_dir / f"{session_id}.json", now_ms)
+
+
+def take_over(backgrounds, terms, transcripts, app_ids: dict, sessions_dir: Path, session_id: str, now_ms: int) -> tuple:
+    """Hands a session that ended in its terminal to CCC's background, so resume_background can pick
+    it up there: (True if it was handed over just now, '') or (False, why it cannot be). One CCC started
+    in the background already is left as it is. It must have ended: two Claudes in one conversation
+    would write over each other. One the Claude app or VS Code holds is woken there instead."""
+    path = transcripts.find(session_id)
+    if path is None:
+        return False, "That conversation is not in Claude's history on this Mac."
+    if backgrounds.get(session_id):
+        return False, ""
+    if session_id in app_ids:
+        return False, "It lives in the Claude app: open it there to wake it."
+    facts = transcripts.describe(session_id)
+    if facts.get("entrypoint") == "claude-vscode":
+        return False, "It lives in VS Code: open it there to wake it."
+    if runs_somewhere(terms, sessions_dir, session_id, now_ms):
+        return False, "It still runs in its terminal. Write to it there, or end it there first."
+    # it goes on in the mode it was in, when the background can start in that one
+    mode = facts.get("permissionMode") if facts.get("permissionMode") in ("acceptEdits", "plan", "auto") else ""
+    backgrounds.keep(session_id, folder_of(path) or "", mode, now_ms)
+    return True, ""
+
+
 def start_attachments(body: bytes, inbox, now_ms: int):
     """The images and files sent ahead for a new session's first message, kept where Claude can open
     them: ({images, files} as paths, '') or (None, what is wrong). They were sent under a name of
@@ -3308,7 +3338,8 @@ class Handler(SimpleHTTPRequestHandler):
         if route == "/api/existing":
             shown = board_payload(SESSIONS_DIR, REMOVALS, TRANSCRIPTS, APP_SESSIONS, pins=PINS)["sessions"]
             on_board = {session.get("sessionId") for session in shown}
-            conversations = existing_conversations(PROJECTS_DIR, TRANSCRIPTS, APP_SESSIONS.ids(), on_board)
+            now_ms = int(time.time() * 1000)
+            conversations = existing_conversations(PROJECTS_DIR, TRANSCRIPTS, APP_SESSIONS.ids(), on_board, runs=lambda session_id: runs_somewhere(TERMINALS, SESSIONS_DIR, session_id, now_ms))
             return self.send_json({"conversations": without_deleted(conversations, DELETED.load())})
         if route == "/api/tokens":
             return self.send_json(TOKENS.summary(time.time()))
@@ -3401,6 +3432,8 @@ class Handler(SimpleHTTPRequestHandler):
             request = read_resume_request(body, TRANSCRIPTS)
             if request is None:
                 return self.send_json({"ok": False, "problem": "That conversation's folder is not on this Mac any more."})
+            if runs_somewhere(TERMINALS, SESSIONS_DIR, request[1], int(time.time() * 1000)):
+                return self.send_json({"ok": False, "problem": "It still runs somewhere. Write to it there, or end it there first."})
             app = terminals.chosen_app((json_object(body) or {}).get("app"), terminals.installed_apps())
             try:
                 done = subprocess.run(resume_command(*request, app), capture_output=True, text=True, timeout=30)
@@ -3496,7 +3529,15 @@ class Handler(SimpleHTTPRequestHandler):
                 BACKGROUNDS.forget(session_id)
                 return self.send_json({"ok": True})
             text = data.get("text") if isinstance(data.get("text"), str) else ""
+            # one that ended in its terminal is handed to the background first, and picked up there
+            handed = False
+            if data.get("takeOver") is True:
+                handed, problem = take_over(BACKGROUNDS, TERMINALS, TRANSCRIPTS, APP_SESSIONS.ids(), SESSIONS_DIR, session_id, int(time.time() * 1000))
+                if problem:
+                    return self.send_json({"ok": False, "problem": problem})
             started, problem = resume_background(TERMINALS, BACKGROUNDS, INBOX, TRANSCRIPTS, session_id, text[:START_PROMPT_MAX])
+            if handed and not started:
+                BACKGROUNDS.forget(session_id)
             if started:
                 # it comes back onto the board, as one added from the history does
                 REMOVALS.forget([session_id])

@@ -8,7 +8,7 @@ import { jelly, loadLayout, makeResizable, makeSortable, saveLayout, watchWindow
 import { setupNotes } from './notes.js'
 import { loadSettings, setupSettings } from './settings.js'
 import { startScene } from './themes.js'
-import { makeGrid } from './grid.js'
+import { makeGrid, rowsToFit } from './grid.js'
 import * as K from './keys.js'
 import { rememberFocus, restoreFocus } from './refocus.js'
 import { closeTerminal, dropTerminal, focusTerminal, isTerminal, setupTerminals, startTerminal, stopKeeper, terminalCard, themeTerminals, toggleTerminal, updateTerminal } from './terminal.js'
@@ -253,6 +253,11 @@ function setupLayout() {
     },
     wobbles: () => view.wobble,
     animates: () => view.settings.animations,
+    // a new card is as tall as lets two rows of cards fit on this screen
+    startRows: () => {
+      const band = visibleBand()
+      return rowsToFit(band.bottom - band.top, SHOW_GAP)
+    },
     // the + in an empty space: the start window, and what it starts lands in that space
     onAddAt: gap => {
       view.grid.placeNext(gap)
@@ -763,9 +768,27 @@ function landIn(node) {
     // a question or approval waits: the cursor goes onto it, so a number key answers it
     waitingBoxButton(node)?.focus({ preventScroll: true })
   }
-  // the card from its top, at once: where the radar glides to, with no glide, so the keys never land halfway down a card
+  // the card in full view, at once, with no glide: the page stays put when it shows whole already, so
+  // cards on the screen together are gone between without it moving. One taller than the screen lands
+  // from its top, so the keys never land halfway down a card
   cancelAnimationFrame(view.glide ?? 0)
-  window.scrollTo({ top: cardTop(node), behavior: 'instant' })
+  const box = node.getBoundingClientRect()
+  const most = document.scrollingElement.scrollHeight - window.innerHeight
+  const top = K.landingScroll({ band: visibleBand(), card: { top: box.top, bottom: box.bottom }, scrollY: window.scrollY, most, gap: SHOW_GAP })
+  if (top !== window.scrollY) window.scrollTo({ top, behavior: 'instant' })
+}
+
+/**
+ * The room on the screen the board shows in, in px from the window's top: below the bars along the
+ * top (the taskbar, the live feed) and above the status bar along the bottom, whichever a theme has.
+ */
+function visibleBand() {
+  const height = window.innerHeight
+  const bars = [...document.querySelectorAll('.taskbar, #decor-top, #decor-bottom > *')].map(node => node.getBoundingClientRect()).filter(box => box.height > 0 && box.bottom > 0 && box.top < height)
+  return {
+    top: Math.max(0, ...bars.filter(box => box.top < height / 2).map(box => box.bottom)),
+    bottom: Math.min(height, ...bars.filter(box => box.top >= height / 2).map(box => box.top)),
+  }
 }
 
 /**
@@ -849,7 +872,7 @@ function setupStart() {
   // Enter in the search takes the top match (added to CCC, or gone to when it is on the board already)
   const search = document.querySelector('#existing-search')
   const list = document.querySelector('#existing-list')
-  const rowButton = row => row?.querySelector('.existing-add:not([disabled])') ?? row?.querySelector('.existing-open')
+  const rowButton = row => row?.querySelector('.existing-add') ?? row?.querySelector('.existing-open')
   search.addEventListener('keydown', event => {
     if (event.altKey || event.metaKey || event.ctrlKey || event.isComposing) return
     const first = list.querySelector('.existing-row')
@@ -858,12 +881,7 @@ function setupStart() {
       rowButton(first)?.focus()
     } else if (event.key === 'Enter' && first) {
       event.preventDefault()
-      const add = first.querySelector('.existing-add')
-      if (add && !add.disabled) return add.click()
-      // on the board already: there it goes
-      const id = first.dataset.conversation
-      dialog.close()
-      if (id) window.dispatchEvent(new CustomEvent('ccc:show-session', { detail: { sessionId: id } }))
+      first.querySelector('.existing-add')?.click()
     }
   })
   list.addEventListener('keydown', event => {
@@ -1115,8 +1133,9 @@ function drawExisting() {
   const now = Date.now()
   list.replaceChildren(
     ...shown.map(conversation => {
-      const add = el('button', { type: 'button', class: 'primary existing-add', disabled: conversation.onBoard }, conversation.onBoard ? 'On the board' : 'Add to CCC')
-      add.addEventListener('click', () => addExisting(conversation, add))
+      // on the board already, the button goes to its card: pressing it always brings the conversation into view
+      const add = el('button', { type: 'button', class: 'primary existing-add', title: conversation.onBoard ? 'It is on the board: go to its card' : 'Put it on the board' }, conversation.onBoard ? 'Show it' : 'Add to CCC')
+      add.addEventListener('click', () => (conversation.onBoard ? showOnBoard(conversation.sessionId) : addExisting(conversation, add)))
       const open = openExisting(conversation)
       return el(
         'div',
@@ -1125,15 +1144,15 @@ function drawExisting() {
           'div',
           { class: 'existing-main' },
           el('span', { class: 'existing-title', title: conversation.title }, conversation.title),
-          el('span', { class: 'existing-meta', title: conversation.folder }, [L.folderLabel(conversation.folder).name, L.timeAgo(conversation.modifiedAt, now), WHERE_LABEL[conversation.where]].filter(Boolean).join(' · ')),
+          el('span', { class: 'existing-meta', title: conversation.folder }, [L.folderLabel(conversation.folder).name, L.timeAgo(conversation.modifiedAt, now), WHERE_LABEL[conversation.where], L.conversationState(conversation)].filter(Boolean).join(' · ')),
         ),
-        el('div', { class: 'existing-actions' }, open, add),
+        el('div', { class: 'existing-actions' }, ...[open, add].filter(Boolean)),
       )
     }),
   )
 }
 
-/** The second way in for a conversation: open it where it lives (the app, VS Code), or pick it up again in a Terminal. */
+/** The second way in for a conversation: open it where it lives (the app, VS Code), or pick it up again in a Terminal (none while it runs there). */
 function openExisting(conversation) {
   const link = L.openLink({ sessionId: conversation.sessionId, appSessionId: conversation.appSessionId, entrypoint: conversation.where === 'vscode' ? 'claude-vscode' : '' })
   if (link) {
@@ -1141,23 +1160,35 @@ function openExisting(conversation) {
     anchor.addEventListener('click', () => addExisting(conversation, null))
     return anchor
   }
+  // running in its terminal now: picking it up in a second one would clash with it
+  if (conversation.isRunning) return null
   const appName = chosenApp().name
   const resume = el('button', { type: 'button', class: 'secondary existing-open', title: `Opens ${appName} in its folder, picks this conversation up again there, and adds it to CCC` }, `Resume in ${appName}`)
   resume.addEventListener('click', async () => {
     resume.disabled = true
-    const problem = document.querySelector('#start-problem')
-    try {
-      const response = await fetch('/api/start', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-CCC-Action': 'start' }, body: JSON.stringify({ sessionId: conversation.sessionId, resume: true, app: view.settings.terminalApp }) })
-      const data = response.ok ? await response.json() : { problem: 'Could not open the Terminal. Is the board still running?' }
-      if (!data.ok) problem.textContent = data.problem || 'Could not open the Terminal.'
-      else await addExisting(conversation, null)
-    } catch {
-      problem.textContent = 'Could not open the Terminal. Is the board still running?'
-    } finally {
-      resume.disabled = false
-    }
+    const problem = await resumeInTerminal(conversation.sessionId)
+    document.querySelector('#start-problem').textContent = problem
+    resume.disabled = false
+    if (!problem) await addExisting(conversation, null)
   })
   return resume
+}
+
+/** Opens the terminal app in the conversation's folder and picks it up again there: '' when it opened, else what went wrong. */
+async function resumeInTerminal(sessionId) {
+  try {
+    const response = await fetch('/api/start', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-CCC-Action': 'start' }, body: JSON.stringify({ sessionId, resume: true, app: view.settings.terminalApp }) })
+    const data = response.ok ? await response.json() : { problem: 'Could not open the Terminal. Is the board still running?' }
+    return data.ok ? '' : data.problem || 'Could not open the Terminal.'
+  } catch {
+    return 'Could not open the Terminal. Is the board still running?'
+  }
+}
+
+/** Closes the window and brings the chat of a conversation on the board already into view. */
+function showOnBoard(sessionId) {
+  document.querySelector('#start-dialog').close()
+  window.dispatchEvent(new CustomEvent('ccc:show-session', { detail: { sessionId } }))
 }
 
 /** Puts the conversation on the board, closes the window and brings its chat into view. */
@@ -1389,10 +1420,13 @@ function drawStopped(stopped) {
   )
 }
 
-/** Resumes a stopped background session: '' when it is on its way, else what went wrong. */
-async function resumeBackground(sessionId, text) {
+/**
+ * Resumes a stopped background session: '' when it is on its way, else what went wrong. `takeOver`:
+ * one that ended in its terminal may be picked up in CCC's background too.
+ */
+async function resumeBackground(sessionId, text, takeOver = false) {
   try {
-    const response = await fetch('/api/background/resume', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-CCC-Action': 'background-resume' }, body: JSON.stringify({ sessionId, text }) })
+    const response = await fetch('/api/background/resume', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-CCC-Action': 'background-resume' }, body: JSON.stringify({ sessionId, text, ...(takeOver ? { takeOver: true } : {}) }) })
     const data = response.ok ? await response.json() : { problem: 'Could not resume it. Is the board still running?' }
     if (!data.ok) return data.problem || 'Could not resume it.'
     if (data.shown && typeof data.terminalId === 'string') view.awaited = data.terminalId
@@ -3057,8 +3091,11 @@ setupChat({
   isResumable: id => (view.stopped ?? []).some(one => one.sessionId === id),
   // it stopped with CCC's keeper (a crash, or a force quit): its card is greyed out, with Restart
   isLost: id => L.lostSessions(view.keeper, view.stopped).some(one => one.sessionId === id),
-  // the message was just sent, so it waits in the inbox and goes in first
-  onResume: id => resumeBackground(id, ''),
+  // the message was just sent, so it waits in the inbox and goes in first. One that ended in its
+  // terminal is handed to CCC's background as it resumes
+  onResume: id => resumeBackground(id, '', true),
+  terminalAppName: () => chosenApp().name,
+  onResumeInTerminal: id => resumeInTerminal(id),
   // the facts panel starts folded away, as every session now opens into its chat; opened, it stays open
   isSideHidden: id => !view.layout.chats?.[id]?.showSide,
   onSide: (id, isHidden) => {

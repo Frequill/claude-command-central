@@ -59,6 +59,14 @@ Sessions already running pick CCC up when their current turn ends; new ones have
 
 The **+** in the header starts a session **in the background** by default: its card comes onto the board at once, and the first message you write there, with any images, videos or files, starts it. CCC runs `claude` itself, in the folder and mode you pick, and nothing opens. It works like any other session on the board, and you chat with it, answer its questions and approve its steps there. Its `>_` button shows the terminal it runs in; the × on that terminal hides it again, and Claude keeps working. The ⓘ next to the choice says what it means. Its settings (the model chip on its card) switch its **mode** too: manual, accept edits, plan or auto. CCC presses Shift+Tab in its terminal until Claude's own mode line shows the one you picked, and the card always shows the mode that line says.
 
+**When a session has ended**, its card says so and shows how to bring it back. What works depends on where the session was started: CCC can only write to a Claude that runs.
+
+- **Ended in a terminal** (the pill says ENDED): **Resume here** picks it up again in CCC's background, from then on like a session started on the board. **Resume in iTerm** (or your terminal app) opens it in a terminal again. Writing in the card resumes it here too, with your message.
+- **Asleep in the Claude app or VS Code** (ASLEEP): only that app can wake it. **Open in app** opens it there. Writing in the card opens it too.
+- **Stopped in CCC's background** (STOPPED): **Resume** starts it there again.
+
+CCC never resumes a session that still runs somewhere, as two Claudes in one conversation would clash. In + → From an existing conversation, each conversation says whether it is running now, ended or asleep, and one on the board already has **Show it**, which goes to its card.
+
 A card's × offers two things. **Close**: a session in the background stops (one Claude runs in the Claude app or a terminal goes on there), and the conversation stays in Claude's history, to pick up again from + → From an existing conversation or `claude --resume`. **Close and delete**: the conversation is gone from Claude (its history, `claude --resume` and + → From an existing conversation), and everything kept for it moves to your Trash, in one folder, so it can be put back. A session in the background is stopped first; one Claude still runs in the Claude app or a terminal has to be closed there first. The Claude app keeps its own list of sessions, which only the app can change: delete it there too.
 
 In a folder Claude was never told to trust, Claude asks first. Its terminal then comes onto the board, so you can answer.
@@ -80,7 +88,7 @@ Everything on the board can work without a mouse. Turn it on in **Settings → K
 | ⌘T / ⌥⌘T | New session / new terminal. In the start window **Enter starts** and Space picks the one highlighted, so ⌘T then Enter starts as the window shows it |
 | (none) | **Quick new session**: one in the background at once, with no window, in the folder and mode the start window would take. Give it a key in Settings → Keys |
 | ⌘W | Close the current card (its Close dialog, as its X) |
-| ⌥⌘← → ↑ ↓ | The card in that direction, into its write box or terminal; from inside a text field too. The board jumps to the card's top at once, and its chat to its newest messages |
+| ⌥⌘← → ↑ ↓ | The card in that direction, into its write box or terminal; from inside a text field too. The board moves only when the card is not wholly on the screen, and then at once, the least way (a card taller than the screen from its top); its chat goes to its newest messages. A new card is as tall as lets two rows of cards fit on your screen, so four cards, two by two, are gone between without scrolling |
 | ⌃Tab / ⌃⇧Tab | Next / previous card, row by row |
 | ⌘1 … ⌘9 | Card 1 to 8, and ⌘9 the last |
 | ⌥⌘N | The next card that needs you, with the cursor on its question or approval (the current card's own first) |

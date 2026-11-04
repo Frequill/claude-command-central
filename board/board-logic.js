@@ -484,6 +484,17 @@ const SOURCES = {
   cli: { kind: 'terminal', label: 'Terminal', about: 'Started in a terminal' },
 }
 
+/**
+ * Whether Claude runs a conversation of the history now, in a word for its row: one that ended in a
+ * terminal is picked up again from its card on the board, one asleep in an app wakes there.
+ * Nothing when the server did not say.
+ */
+export function conversationState(conversation) {
+  if (typeof conversation?.isRunning !== 'boolean') return ''
+  if (conversation.isRunning) return 'running now'
+  return conversation.where === 'app' || conversation.where === 'vscode' ? 'asleep' : 'ended'
+}
+
 /** Where a session runs: the Claude app, VS Code or a terminal; nothing for a place the board does not know. */
 export function sourceOf(session) {
   return SOURCES[session?.entrypoint] ?? null

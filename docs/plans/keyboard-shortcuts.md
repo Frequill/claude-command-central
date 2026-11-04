@@ -491,3 +491,10 @@ it, and many themes use that same accent for their cards' own frames.
 so Ctrl+C is free in a write box). With the cursor in a terminal card, every Ctrl key (no Cmd or
 Option) goes to the shell, so Ctrl+C keeps stopping what runs there (`isShellKey`, keys.js; the
 check in the shortcut listener, board.js), as in iTerm.
+- **Four cards without scrolling (Nov 2026).** ⌥⌘ and an arrow used to scroll every card to its top,
+  so going between two rows moved the page each time, and a new card (32 rows, 640 px) was too tall
+  for two rows to fit on most screens. Now a new card is as tall as lets two rows fit between the
+  bars at the top and the status bar (`rowsToFit` in grid.js, measured from the window when the card
+  is made; Reset layout uses it too), and the keys scroll only when the card is not wholly on the
+  screen, the least way (`landingScroll` in keys.js). A card taller than the screen still lands from
+  its top. Cards made before keep their size until resized or Reset layout.

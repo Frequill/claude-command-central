@@ -10897,6 +10897,43 @@ body.side-off .sidebar {
   cursor: pointer;
 }
 
+/* the bar of a session Claude no longer runs: what brings it back, in the theme's own colour */
+.chat-back {
+  border-left-color: var(--accent);
+  flex-wrap: wrap;
+}
+
+.chat-back .chat-lost-text {
+  min-width: 12em;
+}
+
+/* kept less specific than the themes' own .primary and .secondary, so their buttons win */
+.chat-back .chat-back-main {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  min-height: 32px;
+  padding: 4px 16px;
+  border-radius: 999px;
+  color: var(--pill-ink);
+  background: var(--pill-work);
+  box-shadow: var(--pill-shadow);
+  font: 700 13px var(--sans);
+  text-decoration: none;
+}
+
+/* the second way back (a terminal app): a plain outline beside the main button */
+.chat-back .secondary {
+  color: var(--ink);
+  background: transparent;
+  box-shadow: inset 0 0 0 1px var(--panel-border);
+}
+
+.chat-back button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
 .expanded-tile.is-lost .chat-head,
 .expanded-tile.is-lost .chat-body {
   opacity: 0.45;
