@@ -8,15 +8,17 @@ const DECOR = { aero, inferno, neon, cyberpunk, space, eva, xp, win98, spectrum,
 
 /**
  * Mounts the theme's extras, and the status bar along the bottom in the theme's look when the
- * person has it on (`statusBar`); `update(data)` refreshes them, `stop()` takes them away.
+ * person has it on (`statusBar`), its emblem a button for `onEmblem` (it closes the gaps between
+ * the cards) and, clicked twice in a row, `onEmblemTwice` (it resets the layout); `update(data)`
+ * refreshes them, `stop()` takes them away.
  */
-export function startDecor(themeId, { statusBar = true } = {}) {
+export function startDecor(themeId, { statusBar = true, onEmblem = () => {}, onEmblemTwice = () => {} } = {}) {
   for (const id of ['#decor-top', '#decor-side', '#decor-bottom']) document.querySelector(id).replaceChildren()
   setText(document.querySelector('#tray-date'), '')
   const make = DECOR[themeId]
   const own = make ? make() : { update() {}, stop() {} }
   const ticker = mountTicker()
-  const bar = statusBar ? mountStatusBar(themeId) : { update() {}, stop() {} }
+  const bar = statusBar ? mountStatusBar(themeId, onEmblem, onEmblemTwice) : { update() {}, stop() {} }
   return {
     update(data) {
       own.update(data)
@@ -124,10 +126,11 @@ function inferno() {
 // off in the settings: a vial for
 // each limit that fills as it is used, today's spend, the agents at work, and
 // the theme's own emblem in the middle, which grows uneasy as the five-hour
-// limit runs out. The looks differ in colours and emblem only.
+// limit runs out. A click on the emblem closes the gaps between the cards, and
+// two in a row reset the layout. The looks differ in colours and emblem only.
 // ==========================================================================
 
-function mountStatusBar(look) {
+function mountStatusBar(look, onEmblem, onEmblemTwice) {
   const cells = {}
   const cell = (key, label) => {
     cells[key] = { value: el('span', { class: 'hud-value' }, '–'), note: el('span', { class: 'hud-note' }) }
@@ -144,12 +147,33 @@ function mountStatusBar(look) {
     )
   }
   const emblem = (EMBLEMS[look] ?? EMBLEMS.inferno)()
+  const face = el(
+    'button',
+    {
+      type: 'button',
+      class: 'hud-face',
+      title: 'Close the gaps: the cards pack together again, top first, each keeping its size. Click twice to reset the layout: every card back, two to a row',
+      'aria-label': 'Close the gaps between the cards; clicked twice, reset the layout',
+    },
+    emblem.node,
+  )
+  face.addEventListener('click', event => {
+    // the first click has closed the gaps already when a second comes: that one puts every card back
+    const action = L.emblemAction(event.detail)
+    if (!action) return
+    if (action === 'resetLayout') onEmblemTwice()
+    else onEmblem()
+    // a little nod, so the click is seen even with no gaps to close
+    face.classList.remove('pressed')
+    void face.offsetWidth
+    face.classList.add('pressed')
+  })
   const bar = el(
     'div',
     { class: `doom-bar status-bar status-${look}`, role: 'status', 'aria-label': 'Status bar' },
     limitCell('five', '5H'),
     limitCell('week', 'WEEK'),
-    el('div', { class: 'hud-face' }, emblem.node),
+    face,
     cell('spent', 'SPENT'),
     cell('agents', 'AGENTS'),
   )

@@ -1,7 +1,7 @@
 import * as L from './board-logic.js'
 import { startDecor } from './decor.js'
 import { welcome } from './arrivals.js'
-import { chatCard, dropChat, focusChat, redrawChats, renameChat, sendText, sentChoices, setupChat, showNewest, updateChat, uploadFiles } from './chat.js'
+import { chatCard, dropChat, focusChat, foldSides, redrawChats, renameChat, sendText, sentChoices, setupChat, showNewest, updateChat, uploadFiles } from './chat.js'
 import { cavemanOf, fileProblem, fileSize, isImage, modelVersions } from './chat-logic.js'
 import { carryAway } from './dragon.js'
 import { jelly, loadLayout, makeResizable, makeSortable, saveLayout, watchWindowMoves } from './layout.js'
@@ -169,7 +169,7 @@ function applySettings(settings) {
   view.stopScene()
   view.stopScene = startScene(document.querySelector('#scene-canvas'), settings.theme, { animated: settings.animations, freezeAway: settings.freeze })
   view.decor.stop()
-  view.decor = startDecor(settings.theme, { statusBar: settings.statusBar })
+  view.decor = startDecor(settings.theme, { statusBar: settings.statusBar, onEmblem: () => view.grid?.closeGaps(), onEmblemTwice: resetLayout })
   view.grid?.animate(settings.animations)
   followFocus()
   themeTerminals(settings.theme)
@@ -332,7 +332,11 @@ function resetLayout() {
   view.grid?.reset(view.order)
   view.layout = L.normalizeLayout(null)
   saveLayout(view.layout)
-  redrawTiles()
+  // the cards stay and glide to their places, as when the gaps close; only what each shows inside
+  // goes back to how a card starts
+  foldSides()
+  for (const tile of view.tiles.values()) if (!tile.isChat) tile.signature = ''
+  view.map = ''
   for (const panel of document.querySelectorAll('.panel')) sizePanel(panel, undefined)
   setSidebarWidth(undefined)
   orderPanels()
@@ -3189,7 +3193,7 @@ measureBar()
 new ResizeObserver(measureBar).observe(document.querySelector('.taskbar'))
 window.addEventListener('resize', measureBar)
 applySettings(view.settings)
-setupSettings(view.settings, { onChange: applySettings, onResetLayout: resetLayout, onCloseGaps: () => view.grid?.closeGaps() })
+setupSettings(view.settings, { onChange: applySettings, onResetLayout: resetLayout })
 setupLayout()
 setupNotes()
 setupCaveman()

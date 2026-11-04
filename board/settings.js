@@ -270,7 +270,7 @@ function setupKeys(dialog, { getSettings, keep }) {
   return { show }
 }
 
-export function setupSettings(initial, { onChange, onResetLayout, onCloseGaps }) {
+export function setupSettings(initial, { onChange, onResetLayout }) {
   let settings = initial
   const dialog = document.querySelector('#settings')
   const animations = document.querySelector('#opt-animations')
@@ -343,7 +343,6 @@ export function setupSettings(initial, { onChange, onResetLayout, onCloseGaps })
   shortcuts.addEventListener('change', () => update({ shortcuts: shortcuts.checked }))
   setupTabs()
   document.querySelector('#layout-reset').addEventListener('click', onResetLayout)
-  document.querySelector('#layout-close-gaps').addEventListener('click', onCloseGaps)
   document.querySelector('#settings-open').addEventListener('click', () => dialog.showModal())
   dialog.addEventListener('click', event => {
     if (event.target === dialog) dialog.close()

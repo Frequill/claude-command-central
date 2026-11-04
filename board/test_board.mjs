@@ -119,6 +119,16 @@ test('the summary counts live sessions and agents', () => {
   assert.equal(summary.agentsRunning, 1)
 })
 
+test('the emblem closes the gaps on a click, and two clicks in a row reset the layout', () => {
+  assert.equal(L.emblemAction(1), 'closeGaps')
+  assert.equal(L.emblemAction(2), 'resetLayout')
+  // Enter or Space counts no clicks
+  assert.equal(L.emblemAction(0), 'closeGaps')
+  assert.equal(L.emblemAction(undefined), 'closeGaps')
+  // a third click in a row does nothing more
+  assert.equal(L.emblemAction(3), null)
+})
+
 const AT = Date.parse('2026-10-19T12:55:00.000Z')
 const limits = (...list) => ({ stats: { limits: list } })
 
