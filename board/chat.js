@@ -41,6 +41,16 @@ export function redrawChats() {
   }
 }
 
+/** Every chat's panel of facts folded away, as a card starts: Reset layout keeps the cards themselves. */
+export function foldSides() {
+  for (const chat of chats.values()) {
+    if (chat.root.classList.contains('side-hidden')) continue
+    chat.root.classList.add('side-hidden')
+    chat.headSignature = ''
+    drawHead(chat, context.sessionOf(chat.id))
+  }
+}
+
 // ---------- small DOM helpers ----------
 
 function el(tag, attrs = {}, ...children) {
