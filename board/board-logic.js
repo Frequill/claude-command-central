@@ -594,6 +594,16 @@ export function summarize(sessions, now) {
 }
 
 /**
+ * What a click on the status bar's emblem does, by how many clicks in a row it is: the first
+ * closes the gaps between the cards, a second right after it resets the layout, as Reset layout in
+ * the settings does. Enter or Space on it counts no clicks, and is the first.
+ */
+export function emblemAction(clicks) {
+  if (!(clicks > 1)) return 'closeGaps'
+  return clicks === 2 ? 'resetLayout' : null
+}
+
+/**
  * A session's runs in the order the map draws them: each run the session started, and right
  * under a workflow the agents it runs. A workflow shows as working while any of its agents
  * works, and as done once all of them are; an agent whose workflow is unknown stands alone.
