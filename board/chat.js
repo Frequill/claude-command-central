@@ -7,6 +7,8 @@
 
 import * as L from './board-logic.js'
 import * as C from './chat-logic.js'
+import { optionNumber } from './keys.js'
+import { rememberFocus, restoreFocus } from './refocus.js'
 import { designTab } from './design.js'
 import { blocks } from './markdown.js'
 
@@ -23,8 +25,9 @@ const chats = new Map()
  * terminal it runs in when CCC started it in the background (`terminalOf(id)`, shown or hidden with
  * `onShowTerminal(terminalId, isHidden)`), `refreshBoard()` to read the board's data again, whether it stopped there and can be resumed
  * (`isResumable(id)`, done by `onResume(id)`, which says what went wrong or ''), whether it
- * stopped because CCC's keeper crashed (`isLost(id)`: its card is greyed out, with Restart), and
- * whether its panel of facts is folded in (`isSideHidden(id)`, `onSide(id, isHidden)`).
+ * stopped because CCC's keeper crashed (`isLost(id)`: its card is greyed out, with Restart), the
+ * terminal app it opens in again once it ended in a terminal (`terminalAppName()`, done by
+ * `onResumeInTerminal(id)`, which says what went wrong or ''), and whether its panel of facts is folded in (`isSideHidden(id)`, `onSide(id, isHidden)`).
  */
 export function setupChat(given) {
   context = given
@@ -92,6 +95,73 @@ export function focusChat(sessionId) {
   chats.get(sessionId)?.text.focus({ preventScroll: true })
 }
 
+/** The card's name in its header: a double-click (or the Rename shortcut) gives it a new one. */
+function titleNode(chat, session, title) {
+  const node = el('span', { class: 'chat-title', title: `${title}: double-click to rename it` }, title)
+  node.addEventListener('dblclick', () => renameChat(chat.id))
+  return node
+}
+
+/**
+ * Renames a card: its name in the header becomes a field to type in. Enter (or leaving the field)
+ * keeps the new name, Esc keeps the old one, and an empty name goes back to the one the session has
+ * (its summary). A session that runs CCC's mod is told too (/rename), so Claude's own lists show it.
+ */
+export function renameChat(sessionId) {
+  const chat = chats.get(sessionId)
+  const current = chat?.head.querySelector('.chat-title')
+  if (!chat || !current || chat.isRenaming) return
+  const session = context.sessionOf(chat.id)
+  chat.isRenaming = true
+  const field = el('input', { class: 'chat-title-field', type: 'text', maxlength: '120', 'aria-label': 'New name for this card', spellcheck: 'false' })
+  field.value = String(session?.title ?? current.textContent ?? '').trim()
+  current.replaceWith(field)
+  field.focus()
+  field.select()
+  let isDone = false
+  const finish = async keep => {
+    if (isDone) return
+    isDone = true
+    const name = field.value.trim()
+    const changed = keep && name !== String(session?.title ?? '').trim()
+    if (changed) {
+      try {
+        await fetch('/api/rename', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-CCC-Action': 'rename' },
+          body: JSON.stringify({ sessionId: chat.id, name, tellClaude: Boolean(session?.takesMessages) }),
+        })
+      } catch {
+        say(chat, 'Could not rename it. Is the board still running?')
+      }
+    }
+    chat.isRenaming = false
+    chat.headSignature = ''
+    if (changed) await context.refreshBoard?.()
+    drawHead(chat, context.sessionOf(chat.id))
+    chat.text.focus({ preventScroll: true })
+  }
+  field.addEventListener('keydown', event => {
+    event.stopPropagation()
+    if (event.key === 'Enter') {
+      event.preventDefault()
+      finish(true)
+    } else if (event.key === 'Escape') {
+      event.preventDefault()
+      finish(false)
+    }
+  })
+  field.addEventListener('blur', () => finish(true))
+}
+
+/** Scrolls a card's chat to its newest messages, and it follows Claude from there, as at the bottom. */
+export function showNewest(sessionId) {
+  const chat = chats.get(sessionId)
+  if (!chat) return
+  chat.isFollowing = true
+  toNewest(chat)
+}
+
 /** Called on every board update: each expanded card's header, live part, box and facts follow it. */
 export function updateChat() {
   for (const chat of chats.values()) update(chat)
@@ -106,6 +176,7 @@ function update(chat) {
   }
   drawHead(chat, session)
   drawLost(chat)
+  drawBack(chat, session)
   drawLive(chat, session)
   drawCompose(chat, session)
   drawStats(chat)
@@ -172,11 +243,13 @@ function buildCard(sessionId) {
   // shown while the session is stopped because CCC's keeper crashed
   const restart = el('button', { type: 'button', class: 'primary', title: 'Starts it again in the background, where it left off' }, 'Restart')
   const lostBar = el('div', { class: 'chat-lost', role: 'status', hidden: true }, el('span', { class: 'chat-lost-text' }, 'CCC\u2019s keeper crashed, and this session stopped with it. Its conversation is saved.'), restart)
+  // shown once Claude no longer runs the session: what can bring it back, by where it was started
+  const backBar = el('div', { class: 'chat-lost chat-back', role: 'status', hidden: true })
   // the screens of a design Claude makes, in place of the chat while the person looks at them
   const designPane = el('div', { class: 'chat-design', hidden: true, 'aria-label': 'Design' })
   const body = el('div', { class: 'chat-body' }, el('div', { class: 'chat-main' }, scroll, form), side, designPane)
-  const root = el('article', { class: `glass tile expanded-tile${context.isSideHidden(sessionId) ? ' side-hidden' : ''}`, 'data-session': sessionId, 'data-ghost': 'light' }, head, lostBar, body, el('span', { class: 'grip grip-x', 'data-axis': 'x', 'aria-hidden': 'true' }), el('span', { class: 'grip grip-y', 'data-axis': 'y', 'aria-hidden': 'true' }), el('span', { class: 'grip', 'aria-hidden': 'true' }), el('span', { class: 'grip grip-bl', 'data-axis': 'corner-bl', 'aria-hidden': 'true' }), el('span', { class: 'grip grip-tr', 'data-axis': 'corner-tr', 'aria-hidden': 'true' }), el('span', { class: 'grip grip-tl', 'data-axis': 'corner-tl', 'aria-hidden': 'true' }))
-  const chat = { id: sessionId, root, head, lostBar, designPane, design: null, isDesignShown: false, log, live, dock, scroll, thumbs, text, queue, send, stop, note, side, form, menu, emojiPicker: emojiPanel, suggestKey, suggestion: '', slash: { list: null, at: 0, shown: [], index: 0 }, mention: { shown: [], index: 0, asked: 0, timer: 0 }, menuFor: '', images: [], files: [], items: [], signature: '', timer: 0, isSending: false, isFollowing: true, canSend: false, problem: '', openSteps: new Set(), openGroups: new Set(), openPrompts: new Set(), steps: new Map(), drafts: new Map(), approvals: new Map() }
+  const root = el('article', { class: `glass tile expanded-tile${context.isSideHidden(sessionId) ? ' side-hidden' : ''}`, 'data-session': sessionId, 'data-ghost': 'light' }, head, lostBar, backBar, body, el('span', { class: 'grip grip-x', 'data-axis': 'x', 'aria-hidden': 'true' }), el('span', { class: 'grip grip-y', 'data-axis': 'y', 'aria-hidden': 'true' }), el('span', { class: 'grip', 'aria-hidden': 'true' }), el('span', { class: 'grip grip-bl', 'data-axis': 'corner-bl', 'aria-hidden': 'true' }), el('span', { class: 'grip grip-tr', 'data-axis': 'corner-tr', 'aria-hidden': 'true' }), el('span', { class: 'grip grip-tl', 'data-axis': 'corner-tl', 'aria-hidden': 'true' }))
+  const chat = { id: sessionId, root, head, lostBar, backBar, backSignature: '', designPane, design: null, isDesignShown: false, log, live, dock, scroll, thumbs, text, queue, send, stop, note, side, form, menu, emojiPicker: emojiPanel, suggestKey, suggestion: '', slash: { list: null, at: 0, shown: [], index: 0 }, mention: { shown: [], index: 0, asked: 0, timer: 0 }, menuFor: '', images: [], files: [], items: [], signature: '', timer: 0, isSending: false, isFollowing: true, canSend: false, problem: '', openSteps: new Set(), openGroups: new Set(), openPrompts: new Set(), steps: new Map(), drafts: new Map(), approvals: new Map() }
 
   // hovering the panel leaves the wheel to the page; a click in it lets the wheel scroll the panel,
   // until a click somewhere else or Esc
@@ -209,6 +282,8 @@ function buildCard(sessionId) {
   text.addEventListener('blur', () => setTimeout(() => hideSlashMenu(chat), 150))
   text.addEventListener('keydown', event => {
     if (chat.menuFor === 'mention' ? mentionKey(chat, event) : slashKey(chat, event)) return
+    // with nothing written yet, a number answers the box that waits (as Claude's own boxes take one)
+    if (!text.value && answerByNumber(chat, event)) return
     if (takeSuggestion(chat, event)) return
     if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
       event.preventDefault()
@@ -413,8 +488,9 @@ function toggleSetup(chat) {
 
 /**
  * The panel under the header where the person sets the session's model and effort, as the app's
- * pickers do: each pick runs /model or /effort in the session, at once when it is idle, else once
- * Claude is done. The permission mode is shown, and where to change it: no plugin can switch it.
+ * pickers do. A pick is kept for this session alone: its mod sends the session's next request with
+ * it, so no other card changes and nothing is saved as the default for new sessions. The permission
+ * mode is shown, and where to change it: no plugin can switch it.
  */
 async function drawSetup(chat, session) {
   const background = context.terminalOf?.(chat.id) ?? null
@@ -432,28 +508,38 @@ async function drawSetup(chat, session) {
         ...options.map(option => {
           const isOn = C.sameChoice(option, current)
           const button = el('button', { type: 'button', class: `setup-choice${isOn ? ' on' : ''}`, 'aria-pressed': String(isOn) }, option)
-          button.addEventListener('click', () => run(option, button))
+          button.addEventListener('click', () => {
+            chat.setupFocus = button
+            run(option, button)
+          })
           return button
         }),
       ),
     )
-  const send = async (words, button) => {
+  // a pick is kept for this session alone, and its mod sends the very next request with it
+  const pick = async (choice, button) => {
+    // the button pressed is where the cursor goes back to, once the menu is drawn again
+    chat.setupFocus = button
     button.disabled = true
-    const isSent = await sendCommand(chat, words)
-    const waits = isSent && isWorkingNow(context.sessionOf(chat.id))
-    say(chat, isSent ? (waits ? `${words} goes in once Claude is done with this turn.` : `${words} sent.`) : 'Could not send it. Is the board still running?')
+    const problem = await choose(chat, choice)
+    const versions = context.modelVersions?.() ?? {}
+    const named = 'model' in choice ? (choice.model === 'default' ? 'Back to the session’s own model' : `Model ${C.modelLabel(choice.model, versions)}`) : `Effort ${choice.effort}`
+    say(chat, problem || `${named}, for this session only. It counts from Claude’s next request.`)
+    chat.isSetupOpen && drawSetup(chat, context.sessionOf(chat.id))
     setTimeout(() => {
       button.disabled = false
-    }, 1500)
+    }, 600)
   }
   const link = L.openLink(session)
-  // in CCC's background, CCC holds its terminal: it switches the mode there as Shift+Tab does
-  const modeRow = background ? backgroundModeRow(chat, facts.mode) : null
+  // in CCC's background, CCC holds its terminal: it switches the mode there as Shift+Tab does. One
+  // that has not started yet (or stopped) starts in the mode picked
+  const isWaitingToRun = !background && (Boolean(session?.planned) || Boolean(context.isResumable?.(chat.id)))
+  const modeRow = background || isWaitingToRun ? backgroundModeRow(chat, facts.mode || 'auto', isWaitingToRun) : null
   const panel = el(
     'div',
     { class: 'chat-setup glass', role: 'dialog', 'aria-label': 'Session settings' },
-    choices('Model', C.modelChoices(models), facts.modelId, (model, button) => send(`/model ${model}`, button)),
-    choices('Effort', C.EFFORTS, facts.effort, (effort, button) => send(`/effort ${effort}`, button)),
+    modelRow(chat, C.modelMenu(models, facts.picked, context.modelVersions?.() ?? {}), pick),
+    choices('Effort', C.EFFORTS, facts.effort, (effort, button) => pick({ effort }, button)),
     cavemanRow(chat, choices),
     modeRow ??
     el(
@@ -469,24 +555,43 @@ async function drawSetup(chat, session) {
       ),
     ),
   )
+  // Esc closes the menu and goes back to the write box, as in an app's menus
+  panel.addEventListener('keydown', event => {
+    if (event.key !== 'Escape') return
+    event.preventDefault()
+    event.stopPropagation()
+    toggleSetup(chat)
+    chat.text.focus({ preventScroll: true })
+  })
+  // drawn again after a pick: the cursor stays on the same button in the new menu, so the arrow keys go
+  // on. A pick switches its button off while it works, which drops the focus onto the page: then the
+  // button the cursor was on last is the one
+  const active = document.activeElement
+  const was = chat.setup?.contains(active) ? active : active === document.body ? chat.setupFocus : null
+  const kept = rememberFocus(chat.setup, was)
+  panel.addEventListener('focusin', event => {
+    chat.setupFocus = event.target
+  })
   chat.setup?.remove()
   chat.setup = panel
   chat.head.after(panel)
+  restoreFocus(panel, kept)
 }
 
 /** The mode of a session in CCC's background, to pick: CCC presses Shift+Tab in its terminal until Claude shows it. */
-function backgroundModeRow(chat, current) {
+function backgroundModeRow(chat, current, isWaitingToRun = false) {
   const buttons = C.MODE_CHOICES.map(({ id, label }) => {
     const isOn = id === current
     const button = el('button', { type: 'button', class: `setup-choice${isOn ? ' on' : ''}`, 'aria-pressed': String(isOn) }, label)
     button.addEventListener('click', async () => {
       if (id === current) return
+      chat.setupFocus = button
       for (const one of buttons) one.disabled = true
-      say(chat, `Switching to ${label}\u2026`)
+      say(chat, isWaitingToRun ? `Claude starts in ${label} mode\u2026` : `Switching to ${label}\u2026`)
       try {
         const response = await fetch('/api/background/mode', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-CCC-Action': 'background-mode' }, body: JSON.stringify({ sessionId: chat.id, mode: id }) })
         const answer = response.ok ? await response.json() : { problem: 'Could not switch it. Is the board still running?' }
-        say(chat, answer.ok ? `Now in ${label} mode.` : answer.problem || 'Could not switch it.')
+        say(chat, answer.ok ? (isWaitingToRun ? `Claude starts in ${label} mode.` : `Now in ${label} mode.`) : answer.problem || 'Could not switch it.')
       } catch {
         say(chat, 'Could not switch it. Is the board still running?')
       }
@@ -564,29 +669,62 @@ async function hurry(sessionId, messageId) {
   }
 }
 
-/** Sends a slash command to the session, queued as a message is: it runs as if typed there. */
-async function sendCommand(chat, words) {
-  try {
-    const response = await fetch('/api/send', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-CCC-Action': 'send' },
-      body: JSON.stringify({ sessionId: chat.id, text: words, mode: 'queue', images: [] }),
-    })
-    const answer = response.ok ? await response.json().catch(() => ({ ok: true })) : { ok: false }
-    if (answer.ok === false) return false
-    chat.signature = ''
-    refresh(chat)
-    return true
-  } catch {
-    return false
-  }
-}
-
 // ---------- the "/" menu ----------
 
 // how long the session's command list is kept before it is asked for again
 const COMMANDS_FRESH_MS = 30_000
 const SLASH_SHOWN = 12
+
+/**
+ * The model row of the session menu, as Claude's own picker has it: each model by its name ("Opus 5.5"),
+ * what the aliases stand for under the pointer, and "1M context" as a switch of its own. A pick is kept
+ * for this session alone (choose), never sent as /model, which would save it as the default for all.
+ */
+function modelRow(chat, menu, pick) {
+  const wantsLong = () => chat.wantsLongContext ?? menu.long?.isOn ?? false
+  const buttons = menu.choices.map(choice => {
+    const button = el('button', { type: 'button', class: `setup-choice setup-model${choice.isOn ? ' on' : ''}`, 'aria-pressed': String(choice.isOn), title: choice.about || null }, choice.label)
+    button.addEventListener('click', () => pick({ model: wantsLong() && choice.long ? choice.long : choice.option }, button))
+    return button
+  })
+  const long = menu.long
+    ? el('button', { type: 'button', class: `setup-choice setup-long${menu.long.isOn ? ' on' : ''}`, 'aria-pressed': String(menu.long.isOn), title: 'A million tokens of context, for the models that have it' }, '1M context')
+    : null
+  long?.addEventListener('click', () => {
+    // switched with a model that has a 1M version picked, it changes that model at once; else the next pick takes it
+    if (menu.long.canSwitch) return pick({ model: menu.long.option }, long)
+    chat.wantsLongContext = !wantsLong()
+    long.classList.toggle('on', chat.wantsLongContext)
+    long.setAttribute('aria-pressed', String(chat.wantsLongContext))
+  })
+  return el(
+    'div',
+    { class: 'setup-row' },
+    el('span', { class: 'setup-label' }, 'Model'),
+    el('div', { class: 'setup-choices', role: 'group', 'aria-label': 'Model' }, ...buttons, long),
+  )
+}
+
+/** Keeps a model or effort picked for this session alone; '' when kept, else what is wrong. */
+async function choose(chat, choice) {
+  try {
+    const response = await fetch('/api/choose', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-CCC-Action': 'choose' },
+      body: JSON.stringify({ sessionId: chat.id, ...choice }),
+    })
+    const answer = response.ok ? await response.json() : { ok: false, problem: 'Could not keep it. Is the board still running?' }
+    if (!answer.ok) return answer.problem || 'Could not keep it.'
+    // the card shows the pick at once, before the board's next look
+    const session = context.sessionOf(chat.id)
+    if (session) session.choice = answer.choice ?? {}
+    chat.headSignature = ''
+    drawHead(chat, session)
+    return ''
+  } catch {
+    return 'Could not keep it. Is the board still running?'
+  }
+}
 
 /** The session's slash commands and the models /model takes, asked of the board's server now and then. */
 async function sessionCommands(chat) {
@@ -816,6 +954,8 @@ function placeButtons(text) {
 }
 
 function drawHead(chat, session) {
+  // while the person types a new name in it, the header stays as it is
+  if (chat.isRenaming) return
   const id = chat.id
   const title = context.titleOf(id) ?? session?.folder ?? 'Session'
   const state = session ? L.sessionState(session, Date.now()) : 'ended'
@@ -825,8 +965,10 @@ function drawHead(chat, session) {
   const facts = C.sessionSetup(session, background)
   const caveman = context.cavemanOf?.(id) ?? { level: 'off', isOwn: false }
   const design = session?.design ?? null
+  // once Claude no longer runs it: the word for how it stopped, by where it was started
+  const back = background ? null : C.comeBack(session, state, Boolean(context.isResumable?.(id)))
   const isNewDesign = Boolean(design) && !chat.isDesignShown && design.at > designSeenAt(id)
-  const signature = JSON.stringify([title, state, source?.label, link?.href, session?.folder, session?.branch, context.colorOf(id), facts, caveman, background?.id, background?.hidden, design?.at, chat.isDesignShown, isNewDesign])
+  const signature = JSON.stringify([title, state, source?.label, link?.href, session?.folder, session?.branch, context.colorOf(id), facts, caveman, background?.id, background?.hidden, session?.planned, context.isResumable?.(id), design?.at, chat.isDesignShown, isNewDesign])
   if (signature === chat.headSignature) return
   chat.headSignature = signature
   const close = el('button', { type: 'button', class: 'chat-close chat-remove', 'aria-label': `Close ${title}`, title: 'Close it, or close and delete the conversation' }, icon('M4 4l8 8M12 4l-8 8'))
@@ -842,7 +984,7 @@ function drawHead(chat, session) {
     'button',
     { type: 'button', class: 'setup-toggle', 'aria-haspopup': 'dialog', 'aria-expanded': String(Boolean(chat.isSetupOpen)), title: 'Model, effort and mode of this session' },
     icon('M2 4.5h7M12 4.5h2M2 11.5h2M7 11.5h7M10.5 3v3M5.5 10v3'),
-    el('span', {}, [L.modelName(facts.modelId), facts.effort, facts.mode].filter(Boolean).join(' · ') || 'Session settings'),
+    el('span', {}, [C.modelLabel(facts.modelId, context.modelVersions?.() ?? {}), facts.effort, facts.mode].filter(Boolean).join(' · ') || 'Session settings'),
   )
   setup.addEventListener('click', () => toggleSetup(chat))
   const isCaveman = caveman.level !== 'off'
@@ -860,8 +1002,10 @@ function drawHead(chat, session) {
     icon(CAVEMAN_ICON),
   )
   rock.addEventListener('click', () => switchCaveman(chat, C.cavemanToggled(caveman.level, lastCavemanLevel()), rock))
-  // Claude in the background: its own screen, on the board or off it again
+  // Claude in the background: its own screen, on the board or off it again. Before Claude runs in it
+  // (a new session's first message not sent yet, or one stopped) the button is there, with nothing to open
   const isShown = background && !background.hidden
+  const isWaitingToRun = !background && (Boolean(session?.planned) || Boolean(context.isResumable?.(id)))
   const screen = background
     ? el(
         'button',
@@ -875,8 +1019,20 @@ function drawHead(chat, session) {
         // a prompt and its cursor, drawn in lines like the header's other buttons
         icon('M3 4.5 6.5 8 3 11.5M8.5 11.5H13'),
       )
-    : null
-  screen?.addEventListener('click', () => {
+    : isWaitingToRun
+      ? el(
+          'button',
+          {
+            type: 'button',
+            class: 'chat-close terminal-toggle',
+            disabled: true,
+            'aria-label': 'Its terminal opens once Claude runs',
+            title: session?.planned ? 'Its terminal opens once Claude runs: send your first message' : 'Its terminal opens once Claude runs again: send a message to resume it',
+          },
+          icon('M3 4.5 6.5 8 3 11.5M8.5 11.5H13'),
+        )
+      : null
+  if (background) screen?.addEventListener('click', () => {
     screen.disabled = true
     context.onShowTerminal(background.id, Boolean(isShown))
   })
@@ -898,10 +1054,10 @@ function drawHead(chat, session) {
   designButton?.addEventListener('click', () => toggleDesign(chat))
   const parts = [
     el('span', { class: 'dot', style: `background:${context.colorOf(id)}`, 'aria-hidden': 'true' }),
-    el('span', { class: 'chat-title' }, title),
+    titleNode(chat, session, title),
     source ? el('span', { class: `source source-${source.kind}` }, source.label) : null,
     el('span', { class: 'chat-where' }, [session?.folder, session?.branch].filter(Boolean).join(' · ')),
-    el('span', { class: `pill ${state === 'working' ? 'pill-work live' : state === 'needs-you' ? 'pill-wait' : 'pill-done'}` }, L.STATE_LABEL[state] ?? state),
+    el('span', { class: `pill ${state === 'working' ? 'pill-work live' : state === 'needs-you' ? 'pill-wait' : 'pill-done'}`, ...(back ? { title: back.text } : {}) }, back?.label ?? L.STATE_LABEL[state] ?? state),
     link ? el('a', { class: 'open-link', href: link.href, title: link.about }, 'Open', icon('M9 2h5v5M14 2 7 9', 11)) : null,
     setup,
     designButton,
@@ -977,17 +1133,20 @@ async function refresh(chat) {
   const pending = Array.isArray(data.pending) ? data.pending : []
   const wasFollowing = chat.isFollowing !== false
   // words being written in a question box keep their place and focus across the redraw
-  const writing = document.activeElement?.matches?.('.q-other') && chat.log.contains(document.activeElement) ? document.activeElement : null
+  const writing = document.activeElement?.matches?.('.q-other') && chat.root.contains(document.activeElement) ? document.activeElement : null
   const writingAt = writing ? { box: writing.closest('[data-box]')?.dataset.box, index: writing.dataset.index, caret: writing.selectionStart } : null
-  chat.log.replaceChildren(...C.groupSteps(C.shownItems(chat.items, context.showsNotes?.())).map(item => drawItem(chat, item)), ...pending.map(message => drawPending(chat, message)))
-  if (writingAt?.box) {
-    const again = chat.log.querySelector(`[data-box="${CSS.escape(writingAt.box)}"] .q-other[data-index="${writingAt.index}"]`)
-    again?.focus()
-    again?.setSelectionRange(writingAt.caret, writingAt.caret)
-  }
+  // a box only its hook knows of yet (a terminal writes it down once answered) goes after Claude's words, in the live part
+  chat.hookBox = chat.items.find(C.isHookBox) ?? null
+  const logged = C.shownItems(chat.items, context.showsNotes?.()).filter(item => !C.isHookBox(item))
+  chat.log.replaceChildren(...C.groupSteps(logged).map(item => drawItem(chat, item)), ...pending.map(message => drawPending(chat, message)))
   if (chat.items.length === 0 && pending.length === 0) chat.log.append(el('li', { class: 'msg msg-note' }, 'Nothing in this chat yet.'))
   chat.liveSignature = ''
   drawLive(chat, context.sessionOf(chat.id))
+  if (writingAt?.box) {
+    const again = chat.root.querySelector(`[data-box="${CSS.escape(writingAt.box)}"] .q-other[data-index="${writingAt.index}"]`)
+    again?.focus()
+    again?.setSelectionRange(writingAt.caret, writingAt.caret)
+  }
   for (const toolId of chat.openSteps) if (!chat.steps.get(toolId)?.isDone) loadStep(chat, toolId)
   if (wasFollowing) toNewest(chat)
 }
@@ -1005,9 +1164,10 @@ function drawItem(chat, item) {
     )
   }
   if (item.kind === 'image') return el('li', { class: 'msg msg-images', 'aria-label': 'Images Claude looked at' }, drawPictures(chat, item.pictures, true))
-  if (item.kind === 'claude') return el('li', { class: 'msg msg-claude' }, el('span', { class: 'claude-mark', 'aria-hidden': 'true' }, '✻'), markdown(item.text))
+  if (item.kind === 'claude') return el('li', { class: 'msg msg-claude' }, el('span', { class: 'claude-mark', 'aria-hidden': 'true' }, '✻'), linkCode(chat, markdown(item.text)))
   if (item.kind === 'steps') return drawSteps(chat, item.steps, item.pictures)
   if (item.kind === 'question') return drawQuestion(chat, item)
+  if (item.setting) return el('li', { class: 'msg msg-note msg-setting' }, C.settingNote(item, context.modelVersions?.() ?? {}))
   return el('li', { class: 'msg msg-note' }, item.text)
 }
 
@@ -1034,19 +1194,19 @@ function promptText(chat, text) {
   return el('div', { class: 'prompt' }, body, more)
 }
 
-/** How long a sent answer may wait for Claude to take it before the window says to answer in the app. */
+/** How long a sent answer may wait for Claude to take it before the window says to answer where the session runs. */
 const SENT_PATIENCE_MS = 20_000
 
 /**
  * A question box Claude put to the person, as the app shows it: each question with its options,
- * and once answered what was picked. While it waits, a session in the Claude app or VS Code can
- * be answered right here (the box in the app is then taken down); any other is answered where it runs.
+ * and once answered what was picked. While it waits it can be answered right here, wherever the
+ * session runs (the box there is then taken down), as long as CCC's question hook waits with it.
  */
 function drawQuestion(chat, item) {
   const state = item.answers ? 'answered' : item.isDeclined ? 'declined' : 'open'
   const session = context.sessionOf(chat.id)
   const link = state === 'open' ? L.openLink(session) : null
-  const canAnswer = state === 'open' && Boolean(item.toolId) && C.ANSWERS_FROM_CCC.has(session?.entrypoint)
+  const canAnswer = state === 'open' && C.canAnswerQuestion(item, session)
   const badge = { open: 'Question for you', answered: 'You answered', declined: 'Not answered' }[state]
   const node = el('li', { class: `msg msg-question q-${state}`, 'data-box': item.toolId ?? '' })
   if (!canAnswer) {
@@ -1080,13 +1240,14 @@ function drawQuestion(chat, item) {
     send.disabled = !C.isDraftReady(item.questions, draft)
   }
   send.addEventListener('click', () => sendAnswer(chat, item, draft, redraw))
+  node.addEventListener('keydown', event => pickByNumber(chat, item, event))
   node.append(
     el(
       'div',
       { class: 'q-card' },
       el('div', { class: 'q-badge' }, badge),
       item.questions.map((question, i) => drawAnswerable(question, draft.parts[i], i, isLocked, change, typed)),
-      el('div', { class: 'q-foot' }, el('span', { class: `q-status${draft.problem ? ' problem' : ''}`, role: 'status' }, answerStatus(draft)), el('span', { class: 'q-actions' }, openLink(link, 'Open in the app'), send)),
+      el('div', { class: 'q-foot' }, el('span', { class: `q-status${draft.problem ? ' problem' : ''}`, role: 'status' }, answerStatus(draft, C.answerPlace(session))), el('span', { class: 'q-actions' }, openLink(link, 'Open in the app'), send)),
     ),
   )
   return node
@@ -1095,12 +1256,17 @@ function drawQuestion(chat, item) {
 /** One question to answer here: its options to click, and Other for words of the person's own. */
 function drawAnswerable(question, part, index, isLocked, change, typed) {
   const role = question.multiSelect ? 'checkbox' : 'radio'
+  // with the keyboard shortcuts on, each option shows the number key that picks it
+  const isNumbered = Boolean(context.shortcutsOn?.())
+  let number = 0
   const option = (label, description, isChosen, onClick) => {
+    number += 1
     const button = el(
       'button',
       { type: 'button', role, class: `q-option${isChosen ? ' chosen' : ''}`, 'aria-checked': String(isChosen), disabled: isLocked },
       el('span', { class: 'q-mark', 'aria-hidden': 'true' }),
       el('span', { class: 'q-option-text' }, el('span', { class: 'q-label' }, label), description ? el('span', { class: 'q-desc' }, description) : null),
+      isNumbered && number <= 9 ? el('span', { class: 'q-number', 'aria-hidden': 'true' }, String(number)) : null,
     )
     button.addEventListener('click', onClick)
     return button
@@ -1128,13 +1294,13 @@ function drawAnswerable(question, part, index, isLocked, change, typed) {
   )
 }
 
-function answerStatus(draft) {
+function answerStatus(draft, place) {
   if (draft.problem) return draft.problem
   if (draft.state === 'sending') return 'Sending your answer…'
   if (draft.state === 'sent') {
-    return Date.now() - draft.sentAt < SENT_PATIENCE_MS ? 'Sent. Claude takes it in a moment.' : 'Claude has not taken it. Answer it in the Claude app instead.'
+    return Date.now() - draft.sentAt < SENT_PATIENCE_MS ? 'Sent. Claude takes it in a moment.' : `Claude has not taken it. Answer it in ${place} instead.`
   }
-  return 'Pick an answer here, or answer in the app.'
+  return `Pick an answer here, or answer in ${place}.`
 }
 
 function openLink(link, label = 'Open') {
@@ -1169,9 +1335,40 @@ async function sendAnswer(chat, item, draft, redraw) {
     draft.problem = 'Could not send it. Is the board still running?'
   }
   if (chats.has(chat.id)) {
-    const current = chat.log.querySelector(`[data-box="${CSS.escape(item.toolId)}"]`)
+    const current = chat.root.querySelector(`[data-box="${CSS.escape(item.toolId)}"]`)
     if (current) current.replaceWith(drawQuestion(chat, item))
   }
+}
+
+/**
+ * A number key in a question box, with the keyboard shortcuts on: picks that option of the question
+ * the cursor is in (the first one when it is on the box). One question with one choice is sent at
+ * once, as in Claude's own box; else the cursor goes on to the next question, or to Send answer.
+ * "Other" opens its field to write in. In a field to write in, numbers are typed as always.
+ */
+function pickByNumber(chat, item, event) {
+  if (!context.shortcutsOn?.() || event.target.closest?.('textarea, input')) return
+  const n = optionNumber(event)
+  if (!n) return
+  const box = event.currentTarget
+  const ones = [...box.querySelectorAll('.q-one')]
+  const one = event.target.closest?.('.q-one') ?? ones[0]
+  const at = ones.indexOf(one)
+  const button = [...(one?.querySelectorAll('.q-option') ?? [])][n - 1]
+  if (!button || button.disabled) return
+  event.preventDefault()
+  event.stopPropagation()
+  const question = item.questions[at]
+  const isOther = n === question.options.length + 1
+  // the pick draws the box again: the cursor goes on in the new one
+  button.click()
+  if (isOther) return
+  const fresh = chat.root.querySelector(`[data-box="${CSS.escape(item.toolId)}"]`)
+  if (!fresh) return
+  if (item.questions.length === 1 && !question.multiSelect) return fresh.querySelector('.q-send:not(:disabled)')?.click()
+  const freshOnes = fresh.querySelectorAll('.q-one')
+  const next = question.multiSelect ? freshOnes[at]?.querySelectorAll('.q-option')[n - 1] : (freshOnes[at + 1]?.querySelector('.q-option') ?? fresh.querySelector('.q-send'))
+  next?.focus()
 }
 
 function drawOneQuestion(question, answer) {
@@ -1372,11 +1569,19 @@ async function loadStep(chat, toolId) {
 }
 
 function drawPending(chat, message) {
+  // a model or effort picked while Claude works waits as the setting it is, not as words
+  const setting = C.settingCommand(message.text)
+  if (setting) {
+    const words = setting.setting === 'model' ? `Model changes to ${C.modelLabel(setting.value, context.modelVersions?.() ?? {})}` : `Effort changes to ${setting.value}`
+    return el('li', { class: 'msg msg-note msg-setting pending' }, words, message.mode === 'queue' ? queuedNote(chat, 'when Claude is done', message.id) : el('span', { class: 'pending-note' }, 'now…'))
+  }
   return el(
     'li',
     { class: 'msg msg-you pending' },
     el('div', { class: 'msg-bubble' }, message.text ? promptText(chat, message.text) : null, message.images ? el('span', { class: 'msg-bubble-images' }, message.images === 1 ? '1 image' : `${message.images} images`) : null, message.files ? el('span', { class: 'msg-bubble-images' }, message.files === 1 ? '1 file' : `${message.files} files`) : null),
-    message.mode === 'queue' ? queuedNote(chat, 'queued, goes in when Claude is done', message.id) : el('span', { class: 'pending-note' }, 'going in now…'),
+    message.mode === 'queue'
+      ? queuedNote(chat, C.isHeldForAnswer(context.sessionOf(chat.id), message) ? 'waits for your answer to Claude’s question, which goes in first' : 'queued, goes in when Claude is done', message.id)
+      : el('span', { class: 'pending-note' }, 'going in now…'),
   )
 }
 
@@ -1408,20 +1613,21 @@ function drawLive(chat, session) {
   const approval = isRunning ? C.approvalView(waiting) : null
   // the steps card shows while Claude works on the turn that keeps it, and goes once it ends, as in the app
   const plan = isRunning && Array.isArray(session?.plan) ? session.plan : []
-  const signature = JSON.stringify([isRunning, rest, activity?.label, activity?.text, session?.reply?.isWriting, next, session?.turn?.endedAt, sentChoices.get(chat.id), approval, chat.approvals.get(approval?.box), plan])
+  const signature = JSON.stringify([isRunning, rest, activity?.label, activity?.text, session?.reply?.isWriting, next, session?.turn?.endedAt, sentChoices.get(chat.id), approval, chat.approvals.get(approval?.box), plan, chat.hookBox])
   if (signature === chat.liveSignature) return
   chat.liveSignature = signature
   chat.dock.replaceChildren(...(approval ? [drawApproval(chat, session, approval)] : []))
   // a steps card the person closed stays away until the steps change: a step done, a new one, a new list
   const steps = plan.length && !C.isPlanClosed(closedPlans(), chat.id, plan) ? drawPlan(chat, plan) : null
+  const box = chat.hookBox ? drawQuestion(chat, chat.hookBox) : null
   if (!isRunning) {
-    chat.live.replaceChildren(...[steps, next ? drawNextStep(chat, session, next) : null].filter(Boolean))
+    chat.live.replaceChildren(...[box, steps, next ? drawNextStep(chat, session, next) : null].filter(Boolean))
     if (next && chat.isFollowing !== false) toNewest(chat)
     return
   }
   const status = el('div', { class: 'live-status' }, el('span', { class: 'running-dots', 'aria-hidden': 'true' }, el('i'), el('i'), el('i')), ' ', activity?.label ?? 'Working', activity?.text ? el('span', { class: 'live-detail' }, ` · ${activity.text}`) : null)
-  const writing = rest ? el('div', { class: 'msg msg-claude' }, el('span', { class: 'claude-mark', 'aria-hidden': 'true' }, '✻'), markdown(rest), session?.reply?.isWriting ? el('span', { class: 'reply-caret', 'aria-hidden': 'true' }) : null) : null
-  chat.live.replaceChildren(...[writing, steps, status].filter(Boolean))
+  const writing = rest ? el('div', { class: 'msg msg-claude' }, el('span', { class: 'claude-mark', 'aria-hidden': 'true' }, '✻'), linkCode(chat, markdown(rest)), session?.reply?.isWriting ? el('span', { class: 'reply-caret', 'aria-hidden': 'true' }) : null) : null
+  chat.live.replaceChildren(...[writing, box, steps, status].filter(Boolean))
   if (chat.isFollowing !== false) toNewest(chat)
 }
 
@@ -1462,8 +1668,11 @@ function drawApproval(chat, session, view) {
   const link = L.openLink(session)
   const draft = chat.approvals.get(view.box)
   const isLocked = draft?.state === 'sending' || draft?.state === 'sent'
+  // with the keyboard shortcuts on, 1 allows once and 2 denies, as Claude's own box numbers them
+  const isNumbered = Boolean(context.shortcutsOn?.())
   const choice = (decision, label) => {
-    const button = el('button', { type: 'button', class: `a-choice a-${decision}${draft?.choice === decision ? ' chosen' : ''}`, disabled: isLocked }, label)
+    const key = decision === 'allow' ? '1' : '2'
+    const button = el('button', { type: 'button', class: `a-choice a-${decision}${draft?.choice === decision ? ' chosen' : ''}`, disabled: isLocked }, label, isNumbered ? el('span', { class: 'q-number', 'aria-hidden': 'true' }, key) : null)
     button.addEventListener('click', () => sendApproval(chat, view.box, decision))
     return button
   }
@@ -1473,9 +1682,9 @@ function drawApproval(chat, session, view) {
   show?.addEventListener('click', () => context.onShowTerminal(background.id, false))
   const where = background ? 'Answer it in its terminal' : session?.entrypoint === 'cli' ? 'Answer it in the terminal' : 'Answer it in the Claude app'
   const foot = view.canAnswer
-    ? el('div', { class: 'q-foot' }, el('span', { class: `q-status${draft?.problem ? ' problem' : ''}`, role: 'status' }, C.approvalStatus(draft)), el('span', { class: 'q-actions' }, openLink(link, 'Open in the app'), choice('deny', 'Deny'), choice('allow', 'Allow once')))
+    ? el('div', { class: 'q-foot' }, el('span', { class: `q-status${draft?.problem ? ' problem' : ''}`, role: 'status' }, C.approvalStatus(draft, C.answerPlace(session))), el('span', { class: 'q-actions' }, openLink(link, 'Open in the app'), choice('deny', 'Deny'), choice('allow', 'Allow once')))
     : el('div', { class: 'q-foot' }, el('span', {}, where), show ?? openLink(link))
-  return el(
+  const box = el(
     'div',
     { class: 'msg msg-question msg-approval q-open', 'data-approval': view.box },
     el(
@@ -1489,6 +1698,18 @@ function drawApproval(chat, session, view) {
       foot,
     ),
   )
+  // 1 allows once and 2 denies, with the cursor on the box and the keyboard shortcuts on
+  if (view.canAnswer) {
+    box.addEventListener('keydown', event => {
+      if (!context.shortcutsOn?.() || event.target.closest?.('textarea, input') || isLocked) return
+      const n = optionNumber(event)
+      if (n !== 1 && n !== 2) return
+      event.preventDefault()
+      event.stopPropagation()
+      sendApproval(chat, view.box, n === 1 ? 'allow' : 'deny')
+    })
+  }
+  return box
 }
 
 /**
@@ -1519,7 +1740,7 @@ function drawBranchQuestion(chat, session, view) {
   go.addEventListener('click', () => sendApproval(chat, view.box, 'allow', picked))
   const where = session?.entrypoint === 'cli' ? 'Answer it in the terminal' : 'Answer it in the Claude app'
   const foot = view.canAnswer
-    ? el('div', { class: 'q-foot' }, el('span', { class: `q-status${draft?.problem ? ' problem' : ''}`, role: 'status' }, C.approvalStatus(draft)), el('span', { class: 'q-actions' }, openLink(link, 'Open in the app'), go))
+    ? el('div', { class: 'q-foot' }, el('span', { class: `q-status${draft?.problem ? ' problem' : ''}`, role: 'status' }, C.approvalStatus(draft, C.answerPlace(session))), el('span', { class: 'q-actions' }, openLink(link, 'Open in the app'), go))
     : el('div', { class: 'q-foot' }, el('span', {}, where), openLink(link))
   return el(
     'div',
@@ -1570,8 +1791,11 @@ function drawNextStep(chat, session, next) {
   const endedAt = session.turn.endedAt
   const given = sentChoices.get(chat.id)
   const sent = given?.endedAt === endedAt ? given : null
+  // with the keyboard shortcuts on, each answer shows its number, and the last one is your own words
+  const isNumbered = Boolean(context.shortcutsOn?.())
+  const number = i => (isNumbered && i < 9 ? el('span', { class: 'q-number', 'aria-hidden': 'true' }, String(i + 1)) : null)
   const buttons = next.choices.map((choice, i) => {
-    const button = el('button', { type: 'button', class: `next-choice${i === 0 ? ' first' : ''}${sent?.label === choice.label ? ' sent' : ''}`, title: choice.message, disabled: Boolean(sent) }, choice.label)
+    const button = el('button', { type: 'button', class: `next-choice${i === 0 ? ' first' : ''}${sent?.label === choice.label ? ' sent' : ''}`, title: choice.message, disabled: Boolean(sent) }, choice.label, number(i))
     button.addEventListener('click', async () => {
       sentChoices.set(chat.id, { endedAt, label: choice.label })
       drawLive(chat, context.sessionOf(chat.id))
@@ -1581,15 +1805,62 @@ function drawNextStep(chat, session, next) {
     })
     return button
   })
+  const own = isNumbered && !sent ? el('button', { type: 'button', class: 'next-choice next-own', title: 'Write your own answer in the box below' }, 'Write your own', number(buttons.length)) : null
+  own?.addEventListener('click', () => chat.text.focus())
   const note = given?.problem || (sent ? 'Sent. Claude takes it in a moment.' : '')
-  return el(
+  const box = el(
     'div',
     { class: 'next-step in-chat' },
     el('span', { class: 'next-badge' }, 'Your move'),
     next.question ? el('span', { class: 'next-question' }, next.question) : null,
-    el('div', { class: 'next-choices' }, buttons),
+    el('div', { class: 'next-choices', role: 'group', 'aria-label': 'Answers' }, buttons, own),
     note ? el('span', { class: `next-note${given?.problem ? ' problem' : ''}`, role: 'status' }, note) : null,
   )
+  // a number key with the cursor on the box picks that answer
+  box.addEventListener('keydown', event => {
+    if (!context.shortcutsOn?.()) return
+    const n = optionNumber(event)
+    const picked = n ? box.querySelectorAll('.next-choice')[n - 1] : null
+    if (!picked || picked.disabled) return
+    event.preventDefault()
+    event.stopPropagation()
+    picked.click()
+  })
+  return box
+}
+
+/**
+ * A number key in the empty write box, with the keyboard shortcuts on: answers the box that waits in
+ * this chat, as Claude's own boxes take one. An approval (1 allows once, 2 denies), else a question
+ * (that option), else the next-step box (that answer; its last number, "write your own", leaves the
+ * cursor here). True when a box took the key; with no box waiting the number is typed as always.
+ */
+function answerByNumber(chat, event) {
+  if (!context.shortcutsOn?.()) return false
+  const n = optionNumber(event)
+  if (!n) return false
+  const approval = chat.dock.querySelector('.msg-approval.q-open')
+  if (approval?.querySelector('.a-choice:not([disabled])')) {
+    const button = approval.querySelector(n === 1 ? '.a-allow' : n === 2 ? '.a-deny' : null)
+    if (!button || button.disabled) return false
+    event.preventDefault()
+    button.click()
+    return true
+  }
+  const question = [...chat.root.querySelectorAll('.msg-question.q-open:not(.msg-approval)')].at(-1)
+  if (question?.querySelector('button.q-option:not([disabled])')) {
+    event.preventDefault()
+    question.dispatchEvent(new KeyboardEvent('keydown', { code: event.code, key: event.key, bubbles: true, cancelable: true }))
+    return true
+  }
+  const next = chat.live.querySelector('.next-step')
+  const choices = next ? [...next.querySelectorAll('.next-choice')] : []
+  const picked = choices[n - 1]
+  if (!picked || picked.disabled) return false
+  event.preventDefault()
+  // "write your own": the cursor is here already
+  if (!picked.classList.contains('next-own')) picked.click()
+  return true
 }
 
 function keepSideAboveCompose(chat) {
@@ -1727,6 +1998,51 @@ function drawLost(chat) {
   chat.lostBar.hidden = !isLost
 }
 
+/**
+ * The bar under the header once Claude no longer runs the session: why, and the buttons that bring
+ * it back from where it was started (C.comeBack). Writing in the box brings it back too.
+ */
+function drawBack(chat, session) {
+  const isLost = Boolean(context.isLost?.(chat.id))
+  const isBackground = Boolean(context.terminalOf?.(chat.id))
+  const back = isLost || isBackground ? null : C.comeBack(session, L.sessionState(session ?? {}, Date.now()), Boolean(context.isResumable?.(chat.id)))
+  const appName = context.terminalAppName?.() ?? 'Terminal'
+  const signature = JSON.stringify([back, appName, L.openLink(session)?.href])
+  if (signature === chat.backSignature) return
+  chat.backSignature = signature
+  chat.backBar.hidden = !back
+  if (!back) return chat.backBar.replaceChildren()
+  const kept = rememberFocus(chat.backBar)
+  const buttons = back.actions.map(action => {
+    if (action === 'wake') {
+      const link = L.openLink(session)
+      return link ? el('a', { class: 'primary chat-back-main', href: link.href, title: link.about }, back.kind === 'vscode' ? 'Open in VS Code' : 'Open in app') : null
+    }
+    if (action === 'terminal') {
+      const button = el('button', { type: 'button', class: 'secondary', title: `Opens ${appName} in its folder and picks this conversation up again there` }, `Resume in ${appName}`)
+      button.addEventListener('click', async () => {
+        button.disabled = true
+        const problem = await context.onResumeInTerminal(chat.id)
+        button.disabled = false
+        say(chat, problem || `Opening it in ${appName}: your messages from here go in once it runs.`)
+      })
+      return button
+    }
+    const button = el('button', { type: 'button', class: 'primary chat-back-main', title: back.kind === 'terminal' ? 'Picks it up again in CCC\u2019s background, with what you write below, or where it left off' : 'Starts it again in the background, with what you write below, or where it left off' }, back.kind === 'terminal' ? 'Resume here' : 'Resume')
+    button.addEventListener('click', async () => {
+      // what is written in the box goes in as it resumes, as sending it would do
+      if (chat.text.value.trim()) return sendMessage(chat, 'queue')
+      button.disabled = true
+      const problem = await context.onResume(chat.id)
+      button.disabled = false
+      say(chat, problem || 'Resuming it here, in CCC\u2019s background, where it left off.')
+    })
+    return button
+  })
+  chat.backBar.replaceChildren(el('span', { class: 'chat-lost-text' }, back.text), ...buttons.filter(Boolean))
+  restoreFocus(chat.backBar, kept)
+}
+
 function say(chat, problem) {
   chat.problem = problem
   chat.note.textContent = problem
@@ -1749,7 +2065,7 @@ function openCard(chat) {
   const approval = C.approvalView(L.waitingFor(session))
   if (approval?.canAnswer) return { kind: 'approval', box: approval.box }
   const question = [...chat.items].reverse().find(item => item.kind === 'question')
-  if (question && !question.answers && !question.isDeclined && question.toolId && C.ANSWERS_FROM_CCC.has(session.entrypoint)) return { kind: 'question', toolId: question.toolId }
+  if (question && !question.answers && !question.isDeclined && C.canAnswerQuestion(question, session)) return { kind: 'question', toolId: question.toolId }
   return null
 }
 
@@ -1830,6 +2146,171 @@ async function sendMessage(chat, mode) {
 }
 
 // ---------- Claude's text ----------
+
+// how long a chip that pointed nowhere is believed: Claude may make that file or method in a moment
+const CODE_MISS_MS = 30_000
+
+/**
+ * Makes the code chips of one of Claude's replies links, while the setting to open files in an
+ * editor is on: a file opens in it, and a class, method or constant opens where it is made. The
+ * server says where each chip points; one that points nowhere stays as it was. Returns `root`.
+ */
+function linkCode(chat, root) {
+  if (!chat || !context.editorOf?.()) return root
+  chat.codePlaces ??= new Map()
+  chat.codeWaiting ??= new Map()
+  const now = Date.now()
+  for (const node of root.querySelectorAll('code')) {
+    if (node.closest('pre')) continue
+    const chip = node.textContent
+    const known = chat.codePlaces.get(chip)
+    if (known?.places) codeLink(chat, node, chip, known.places)
+    // asked about already: linked when the answer comes
+    else if (known?.asking) known.asking.add(node)
+    else if (!known || now - known.at > CODE_MISS_MS) {
+      if (!chat.codeWaiting.has(chip)) chat.codeWaiting.set(chip, new Set())
+      chat.codeWaiting.get(chip).add(node)
+    }
+  }
+  askSoon(chat)
+  return root
+}
+
+// the server looks at this many chips at a time
+const CHIPS_AT_ONCE = 200
+
+function askSoon(chat) {
+  if (chat.codeWaiting.size && !chat.codeTimer && !chat.isAskingCode) chat.codeTimer = setTimeout(() => askCodePlaces(chat), 120)
+}
+
+// the chips drawn since the last ask, asked about at once; one ask at a time, the rest wait for it
+async function askCodePlaces(chat) {
+  chat.codeTimer = 0
+  const waiting = new Map([...chat.codeWaiting].slice(0, CHIPS_AT_ONCE))
+  for (const [chip, nodes] of waiting) {
+    chat.codeWaiting.delete(chip)
+    chat.codePlaces.set(chip, { asking: nodes })
+  }
+  chat.isAskingCode = true
+  try {
+    await placeChips(chat, waiting)
+  } finally {
+    chat.isAskingCode = false
+    askSoon(chat)
+  }
+}
+
+async function placeChips(chat, waiting) {
+  let places = null
+  try {
+    const response = await fetch('/api/code-links', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-CCC-Action': 'code-links' },
+      body: JSON.stringify({ sessionId: chat.id, chips: [...waiting.keys()] }),
+    })
+    places = response.ok ? (await response.json()).places : null
+  } catch {
+    places = null
+  }
+  // the board is not running: asked again the next time they are drawn
+  if (!places || typeof places !== 'object') {
+    for (const chip of waiting.keys()) chat.codePlaces.delete(chip)
+    return
+  }
+  const at = Date.now()
+  for (const [chip, nodes] of waiting) {
+    const found = Array.isArray(places[chip]) && places[chip].length ? places[chip] : null
+    chat.codePlaces.set(chip, { places: found, at })
+    if (found) for (const node of nodes) if (node.isConnected) codeLink(chat, node, chip, found)
+  }
+}
+
+function codeLink(chat, node, chip, places) {
+  if (node.classList.contains('code-link')) return
+  const editor = context.editorOf?.()
+  if (!editor) return
+  const only = places.length === 1 ? places[0] : null
+  node.classList.add('code-link')
+  node.setAttribute('role', 'button')
+  node.setAttribute('tabindex', '0')
+  node.title = only ? `Open ${only.path}, line ${only.line}, in ${editor.name}` : `Made in ${places.length} places: choose one to open in ${editor.name}`
+  const go = event => {
+    event.preventDefault()
+    event.stopPropagation()
+    if (only) openCode(chat, chip, 0)
+    else codeMenu(chat, node, chip, places, editor)
+  }
+  node.addEventListener('click', go)
+  node.addEventListener('keydown', event => {
+    if (event.key === 'Enter' || event.key === ' ') go(event)
+  })
+}
+
+async function openCode(chat, chip, at) {
+  const editor = context.editorOf?.()
+  try {
+    const response = await fetch('/api/open-code', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-CCC-Action': 'open-code' },
+      body: JSON.stringify({ sessionId: chat.id, chip, at, editor: editor?.id }),
+    })
+    const answer = response.ok ? await response.json() : { problem: 'Could not open it. Is the board still running?' }
+    if (!answer.ok) {
+      // pointing nowhere now: looked up again the next time it is drawn
+      chat.codePlaces?.delete(chip)
+      say(chat, answer.problem || 'Could not open it.')
+    }
+  } catch {
+    say(chat, 'Could not open it. Is the board still running?')
+  }
+}
+
+// the places a chip is made in, under it, to choose one; a click elsewhere, Escape or scrolling the chip away closes it
+function codeMenu(chat, node, chip, places, editor) {
+  document.querySelector('.code-menu')?.remove()
+  const items = places.map((place, at) => {
+    const { name, parent } = L.folderLabel(place.path)
+    const item = el('button', { type: 'button', class: 'code-menu-item', title: `Open ${place.path}, line ${place.line}` }, el('span', { class: 'code-menu-name' }, `${name}:${place.line}`), el('span', { class: 'code-menu-folder' }, parent))
+    item.addEventListener('click', () => {
+      close()
+      openCode(chat, chip, at)
+    })
+    return item
+  })
+  const menu = el('div', { class: 'code-menu', role: 'menu' }, el('div', { class: 'code-menu-head' }, `Open in ${editor.name}`), items)
+  const box = node.getBoundingClientRect()
+  document.body.append(menu)
+  const width = menu.offsetWidth
+  const height = menu.offsetHeight
+  menu.style.left = `${Math.max(8, Math.min(box.left, window.innerWidth - width - 8))}px`
+  menu.style.top = `${box.bottom + 4 + height > window.innerHeight - 8 ? Math.max(8, box.top - 4 - height) : box.bottom + 4}px`
+  items[0]?.focus()
+  const away = event => {
+    if (!menu.contains(event.target)) close()
+  }
+  const key = event => {
+    if (event.key === 'Escape') close()
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      event.preventDefault()
+      const at = items.indexOf(document.activeElement)
+      items[(at + (event.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length]?.focus()
+    }
+  }
+  // only a scroll that moves the chip closes it: other cards' chats scroll as Claude writes in them
+  const moved = event => {
+    if (event.target === document || event.target.contains?.(node)) close()
+  }
+  function close() {
+    menu.remove()
+    document.removeEventListener('pointerdown', away, true)
+    document.removeEventListener('keydown', key, true)
+    window.removeEventListener('scroll', moved, true)
+    node.focus?.({ preventScroll: true })
+  }
+  document.addEventListener('pointerdown', away, true)
+  document.addEventListener('keydown', key, true)
+  window.addEventListener('scroll', moved, true)
+}
 
 function markdown(text) {
   return el('div', { class: 'md' }, blocks(text).map(drawBlock))

@@ -6176,9 +6176,16 @@ body.theme-inferno .live-reply {
 
 .side-toggle[aria-pressed='true'],
 .caveman-toggle[aria-pressed='true'],
-.terminal-toggle[aria-pressed='true'] {
+.terminal-toggle[aria-pressed='true'],
+.chat-head .setup-toggle[aria-expanded='true'] {
   border-color: var(--accent);
   color: var(--accent);
+}
+
+/* a background session's terminal before Claude runs in it: shown, but nothing to open yet */
+.terminal-toggle:disabled {
+  opacity: 0.4;
+  cursor: default;
 }
 
 /* hovered, the panel leaves the wheel to the page; clicked, it scrolls what it holds (chat.js) */
@@ -6529,13 +6536,14 @@ body.theme-inferno .live-reply {
 
 .setup-row {
   display: grid;
-  grid-template-columns: 64px 1fr;
+  grid-template-columns: 72px 1fr;
   align-items: start;
   gap: 12px;
 }
 
+/* the label sits on the middle of the first row of buttons beside it */
 .setup-label {
-  padding-top: 5px;
+  padding-top: 6px;
   color: var(--ink-3);
   font-size: 12px;
   font-weight: 700;
@@ -6567,6 +6575,15 @@ body.theme-inferno .live-reply {
   background: var(--accent);
   border-color: var(--accent);
   color: var(--panel-solid);
+}
+
+/* "1M context": a switch beside the models, not one of them */
+.setup-long {
+  border-style: dashed;
+}
+
+.setup-long.on {
+  border-style: solid;
 }
 
 .setup-mode {
@@ -7503,6 +7520,76 @@ body.theme-inferno .live-reply {
   font: 12.5px var(--mono);
 }
 
+/* a code chip that opens in the person's editor: underlined like a link under the pointer */
+.md code.code-link {
+  cursor: pointer;
+}
+
+.md code.code-link:hover,
+.md code.code-link:focus-visible {
+  color: var(--accent);
+  border-color: var(--accent);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  outline: none;
+}
+
+/* the places a chip is made in, to choose one */
+.code-menu {
+  position: fixed;
+  z-index: 1000;
+  min-width: 220px;
+  max-width: min(520px, calc(100vw - 16px));
+  max-height: 280px;
+  overflow-y: auto;
+  padding: 6px;
+  border-radius: 10px;
+  border: 1px solid var(--panel-border);
+  background: var(--panel-solid);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+}
+
+.code-menu-head {
+  padding: 4px 8px 6px;
+  font-size: 11px;
+  opacity: 0.65;
+}
+
+.code-menu-item {
+  display: flex;
+  width: 100%;
+  align-items: baseline;
+  gap: 10px;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 7px;
+  background: none;
+  color: inherit;
+  text-align: left;
+  font: inherit;
+  cursor: pointer;
+}
+
+.code-menu-item:hover,
+.code-menu-item:focus-visible {
+  background: var(--chip-bg);
+  box-shadow: inset 0 0 0 1px var(--chip-border);
+  outline: none;
+}
+
+.code-menu-name {
+  font: 12.5px var(--mono);
+  white-space: nowrap;
+}
+
+.code-menu-folder {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11.5px;
+  opacity: 0.6;
+}
+
 .md pre {
   padding: 10px 12px;
   border-radius: 8px;
@@ -7604,6 +7691,11 @@ body.theme-inferno .live-reply {
   display: flex;
   flex-direction: column;
   gap: 8px;
+}
+
+/* a question box drawn in the live part, after Claude's words, as one in the chat */
+.chat-live > li {
+  list-style: none;
 }
 
 .live-status {
@@ -8744,6 +8836,7 @@ body.theme-spectrum .tile:hover {
 body.theme-spectrum .msg-you .msg-bubble,
 body.theme-spectrum .chat-plan,
 body.theme-spectrum .slash-menu,
+body.theme-spectrum .code-menu,
 body.theme-spectrum .emoji-picker,
 body.theme-spectrum .radar-tip {
   border-radius: 0;
@@ -9902,7 +9995,8 @@ body.theme-cyberpunk .chat-close:hover {
 /* a toggle that is on (caveman mode, the side panel) is filled, so it reads apart from one that is off */
 body.theme-cyberpunk .caveman-toggle[aria-pressed='true'],
 body.theme-cyberpunk .side-toggle[aria-pressed='true'],
-body.theme-cyberpunk .terminal-toggle[aria-pressed='true'] {
+body.theme-cyberpunk .terminal-toggle[aria-pressed='true'],
+body.theme-cyberpunk .chat-head .setup-toggle[aria-expanded='true'] {
   border-color: #f75049;
   background: #f75049;
   color: #05060a;
@@ -10843,6 +10937,43 @@ body.side-off .sidebar {
   cursor: pointer;
 }
 
+/* the bar of a session Claude no longer runs: what brings it back, in the theme's own colour */
+.chat-back {
+  border-left-color: var(--accent);
+  flex-wrap: wrap;
+}
+
+.chat-back .chat-lost-text {
+  min-width: 12em;
+}
+
+/* kept less specific than the themes' own .primary and .secondary, so their buttons win */
+.chat-back .chat-back-main {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  min-height: 32px;
+  padding: 4px 16px;
+  border-radius: 999px;
+  color: var(--pill-ink);
+  background: var(--pill-work);
+  box-shadow: var(--pill-shadow);
+  font: 700 13px var(--sans);
+  text-decoration: none;
+}
+
+/* the second way back (a terminal app): a plain outline beside the main button */
+.chat-back .secondary {
+  color: var(--ink);
+  background: transparent;
+  box-shadow: inset 0 0 0 1px var(--panel-border);
+}
+
+.chat-back button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
 .expanded-tile.is-lost .chat-head,
 .expanded-tile.is-lost .chat-body {
   opacity: 0.45;
@@ -11055,4 +11186,318 @@ body.side-off .sidebar {
 .design-empty {
   margin: auto;
   color: var(--ink-3);
+}
+
+/* the session menu: every button one height, so the rows line up; a row's note sits under its buttons */
+.chat-setup .setup-choice {
+  min-height: 28px;
+  display: inline-flex;
+  align-items: center;
+  white-space: nowrap;
+}
+
+.chat-setup .setup-note {
+  flex-basis: 100%;
+  margin-top: 2px;
+}
+
+.chat-setup .setup-mode {
+  padding-top: 5px;
+}
+
+/*
+ * The card the keyboard works in, once the keyboard is used: a ring round it, in the gap between the
+ * cards, drawn on its place on the grid so no title bar or frame of the card can cover it. Its colour
+ * (--ring) is picked per theme to stand out from that theme's cards and background, not its accent,
+ * which many themes use for their cards' own frames.
+ */
+body.keys-used .grid-stack-item:has(> .expanded-tile.is-current)::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  border: 3px solid var(--ring, var(--accent));
+  border-radius: calc(var(--panel-radius, 12px) + 4px);
+  box-shadow: 0 0 14px color-mix(in srgb, var(--ring, var(--accent)) 55%, transparent);
+  pointer-events: none;
+}
+
+body.theme-clean {
+  --ring: #2563eb;
+}
+
+body.theme-clean-dark {
+  --ring: #6ea8fe;
+}
+
+body.theme-macos {
+  --ring: #0a84ff;
+}
+
+body.theme-aero {
+  --ring: #ffc93c;
+}
+
+body.theme-xp {
+  --ring: #ff9a00;
+}
+
+body.theme-win98 {
+  --ring: #ffe600;
+}
+
+body.theme-spectrum {
+  --ring: #ff00ff;
+}
+
+body.theme-inferno {
+  --ring: #ffe45c;
+}
+
+/* Neon's cards wear cyan frames already: its ring is neon yellow */
+body.theme-neon {
+  --ring: #f4ff3a;
+}
+
+body.theme-cyberpunk {
+  --ring: #5ef6ff;
+}
+
+body.theme-space {
+  --ring: #ffd166;
+}
+
+body.theme-eva {
+  --ring: #7cff4f;
+}
+
+/* square themes, square ring; Windows 98 with a black edge round it, as its own focus marks have */
+body.theme-win98.keys-used .grid-stack-item:has(> .expanded-tile.is-current)::after,
+body.theme-spectrum.keys-used .grid-stack-item:has(> .expanded-tile.is-current)::after,
+body.theme-cyberpunk.keys-used .grid-stack-item:has(> .expanded-tile.is-current)::after {
+  border-radius: 0;
+}
+
+body.theme-win98.keys-used .grid-stack-item:has(> .expanded-tile.is-current)::after {
+  box-shadow: 0 0 0 1px #000, inset 0 0 0 1px #000;
+}
+
+/* a button the keyboard is on: always marked, whatever a theme does with outlines */
+body.keys-used :is(button, [role='radio'], [role='option'], a[href]):focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+body.theme-cyberpunk.keys-used :is(button, [role='radio'], [role='option'], a[href]):focus-visible {
+  outline-color: #5ef6ff;
+}
+
+/* the Keys tab: a row for each command, its shortcut in a chip, Change and Remove beside it */
+.keys-list {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.keys-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.key-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto auto auto;
+  align-items: center;
+  gap: 8px;
+}
+
+.key-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.key-changed {
+  color: var(--ink-3);
+  font-size: 11px;
+}
+
+.key-chip {
+  min-width: 64px;
+  justify-content: center;
+  font: 600 12.5px var(--mono);
+}
+
+.key-chip.none {
+  opacity: 0.55;
+  font-family: inherit;
+}
+
+.key-chip.picking {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.key-change {
+  padding: 3px 10px;
+}
+
+/* the command palette: near the top, a field and the list under it, as in an editor's */
+.palette {
+  width: min(600px, 94vw);
+  margin-top: 12vh;
+}
+
+.palette-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px;
+}
+
+.palette-input {
+  font-size: 15px;
+}
+
+.palette-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 50vh;
+  overflow-y: auto;
+}
+
+.palette-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 10px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.palette-row.active,
+.palette-row:hover {
+  background: var(--chip-bg);
+  box-shadow: inset 0 0 0 1px var(--chip-border);
+}
+
+.palette-kind {
+  min-width: 34px;
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+
+.palette-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.palette-detail {
+  color: var(--ink-3);
+  font: 12px var(--mono);
+  white-space: nowrap;
+}
+
+.palette-none,
+.palette-hint {
+  margin: 0;
+  color: var(--ink-3);
+  font-size: 12px;
+}
+
+/* the Keys tab's top: the switch for every shortcut, and Reset to defaults beside it */
+.keys-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 6px;
+}
+
+/* off: the shortcuts can still be looked at and changed, but the board takes none of them */
+.keys-list.off {
+  opacity: 0.55;
+}
+
+.key-back {
+  font-size: 13px;
+}
+
+.key-back.unchanged {
+  visibility: hidden;
+}
+
+/* a short note at the bottom of the board, from a shortcut that could not do its job */
+.board-toast {
+  position: fixed;
+  left: 50%;
+  bottom: 90px;
+  z-index: 2000;
+  max-width: min(520px, 90vw);
+  padding: 9px 14px;
+  border-radius: 10px;
+  border: 1px solid var(--panel-border);
+  background: var(--panel-solid);
+  color: var(--ink);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+  font-size: 13px;
+  opacity: 0;
+  pointer-events: none;
+  transform: translate(-50%, 8px);
+  transition: opacity 0.2s, transform 0.2s;
+}
+
+.board-toast.shown {
+  opacity: 1;
+  transform: translate(-50%, 0);
+}
+
+/* the start window's note on its keys, at the left of its buttons */
+.start-keys {
+  margin: 0 auto 0 0;
+  align-self: center;
+}
+
+/* the number key that picks an option, at its right, with the keyboard shortcuts on */
+.q-number {
+  margin-left: auto;
+  padding: 0 6px;
+  border: 1px solid var(--chip-border);
+  border-radius: 5px;
+  font: 600 11px var(--mono);
+  color: var(--ink-3);
+}
+
+.a-choice .q-number {
+  margin-left: 8px;
+}
+
+/* a card's name, being typed anew in its header */
+.chat-title-field {
+  min-width: 0;
+  flex: 1 1 auto;
+  max-width: 420px;
+  padding: 2px 8px;
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  background: var(--chip-bg);
+  color: var(--ink);
+  font: inherit;
+}
+
+.chat-title {
+  cursor: text;
+}
+
+/* a next-step answer's number key, after its words */
+.next-choice .q-number {
+  margin-left: 8px;
 }

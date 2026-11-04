@@ -1,6 +1,8 @@
-// The settings dialog, in tabs: the theme, the board's parts and layout, scrolling and motion, the terminal app and the editor.
+// The settings dialog, in tabs: the theme, the board's parts and layout, scrolling and motion, the terminal app and the editor, the keyboard shortcuts.
 
 import * as L from './board-logic.js'
+import * as K from './keys.js'
+import { rememberFocus, restoreFocus } from './refocus.js'
 import { THEMES } from './themes.js'
 
 const SETTINGS_KEY = 'ccc.settings'
@@ -144,6 +146,130 @@ function setupScrollButtons(dialog, { getSettings, keep }) {
 }
 
 /** Fills and wires the dialog; `onChange` gets the new settings after every change. */
+const KEY_PROMPT = 'Press the new keys… Esc cancels'
+
+/**
+ * The Keys tab: every command with its shortcut, as this keyboard writes it, a Change button that
+ * waits for the next keys pressed, a Remove button, and Reset to defaults. A shortcut given to a
+ * command another one had moves to it, and the tab says so. `keep` gets the person's own keys.
+ */
+function setupKeys(dialog, { getSettings, keep }) {
+  const list = document.querySelector('#keys-list')
+  const status = document.querySelector('#keys-status')
+  const reset = document.querySelector('#keys-reset')
+  let picking = null
+  let layout = null
+  const say = text => {
+    status.textContent = text
+    status.hidden = !text
+  }
+  const label = id => K.COMMANDS.find(command => command.id === id)?.label ?? id
+  const show = () => {
+    const own = getSettings().keys
+    // off, the list stays to look at and change, greyed, as the board takes none of its keys
+    list.classList.toggle('off', !getSettings().shortcuts)
+    const bound = K.bindings(own)
+    const groups = [...new Set(K.COMMANDS.map(command => command.group))]
+    // drawn again after a change: the cursor stays on that row's button
+    const kept = rememberFocus(list)
+    list.replaceChildren(
+      ...groups.map(group =>
+        node(
+          'fieldset',
+          { class: 'keys-group' },
+          node('legend', {}, group),
+          ...K.COMMANDS.filter(command => command.group === group).map(command => {
+            const keys = bound[command.id]
+            const isPicking = picking === command.id
+            const shown = isPicking ? KEY_PROMPT : keys.length ? keys.map(chord => K.formatChord(chord, layout)).join('  ') : 'No key'
+            const chip = node('span', { class: `chip key-chip${keys.length ? '' : ' none'}${isPicking ? ' picking' : ''}` }, shown)
+            const change = node('button', { type: 'button', class: 'secondary key-change' }, isPicking ? 'Cancel' : 'Change')
+            change.addEventListener('click', () => (isPicking ? stop() : start(command.id)))
+            const remove = node('button', { type: 'button', class: 'scroll-button-remove key-remove', 'aria-label': `Remove the shortcut of ${command.label}`, title: 'No shortcut for this' }, '×')
+            remove.disabled = keys.length === 0
+            remove.addEventListener('click', () => keep(K.cleanCustom({ ...own, [command.id]: [] })))
+            const isChanged = command.id in own
+            const defaults = command.keys.map(chord => K.formatChord(chord, layout)).join(' ') || 'no shortcut'
+            const back = node('button', { type: 'button', class: 'scroll-button-remove key-back', 'aria-label': `Put back the default shortcut of ${command.label}`, title: `Put back ${defaults}` }, '↺')
+            // kept in its place when there is nothing to put back, so the rows line up
+            back.classList.toggle('unchanged', !isChanged)
+            back.disabled = !isChanged
+            back.addEventListener('click', () => {
+              const rest = { ...own }
+              delete rest[command.id]
+              keep(K.cleanCustom(rest))
+            })
+            return node(
+              'div',
+              { class: `key-row${isChanged ? ' changed' : ''}`, role: 'group', 'aria-label': command.label },
+              node('span', { class: 'key-label' }, command.label, isChanged ? node('span', { class: 'key-changed' }, ' · changed') : ''),
+              chip,
+              change,
+              back,
+              remove,
+            )
+          }),
+        ),
+      ),
+    )
+    reset.disabled = Object.keys(own).length === 0
+    restoreFocus(list, kept)
+  }
+  const onKey = event => {
+    if (!picking) return
+    // the keys pressed only pick: Escape does not close the window, Enter does not click anything
+    if (event.key === 'Escape') {
+      event.preventDefault()
+      event.stopPropagation()
+      return stop()
+    }
+    const chord = K.chordOf(event)
+    if (!chord) return
+    event.preventDefault()
+    event.stopPropagation()
+    const problem = K.bindProblem(chord)
+    if (problem) return say(problem)
+    const id = picking
+    const { custom, movedFrom } = K.rebind(getSettings().keys, id, chord)
+    picking = null
+    window.removeEventListener('keydown', onKey, true)
+    say(movedFrom.length ? `${K.formatChord(chord, layout)} is now ${label(id)}. ${movedFrom.map(label).join(' and ')} has no shortcut now.` : `${K.formatChord(chord, layout)} is now ${label(id)}.`)
+    keep(custom)
+  }
+  const start = id => {
+    picking = id
+    say('')
+    window.addEventListener('keydown', onKey, true)
+    show()
+  }
+  const stop = () => {
+    if (!picking) return
+    picking = null
+    window.removeEventListener('keydown', onKey, true)
+    show()
+  }
+  reset.addEventListener('click', () => {
+    stop()
+    say('Every shortcut is back to its default.')
+    keep({})
+  })
+  // a note about a change is for then: closed, Settings opens next time without it
+  dialog.addEventListener('close', () => {
+    stop()
+    say('')
+  })
+  // the keyboard's own letters, so a symbol key shows as it is on this keyboard
+  navigator.keyboard
+    ?.getLayoutMap?.()
+    .then(map => {
+      layout = map
+      show()
+    })
+    .catch(() => {})
+  say('')
+  return { show }
+}
+
 export function setupSettings(initial, { onChange, onResetLayout }) {
   let settings = initial
   const dialog = document.querySelector('#settings')
@@ -155,6 +281,7 @@ export function setupSettings(initial, { onChange, onResetLayout }) {
   const shiftScroll = document.querySelector('#opt-shift-scroll')
   const editor = document.querySelector('#opt-editor')
   const showNotes = document.querySelector('#opt-show-notes')
+  const shortcuts = document.querySelector('#opt-shortcuts')
 
   document.querySelector('#theme-choices').replaceChildren(
     ...THEMES.map(theme =>
@@ -176,6 +303,7 @@ export function setupSettings(initial, { onChange, onResetLayout }) {
   shiftScroll.checked = settings.shiftScroll
   editor.value = settings.editor
   showNotes.checked = settings.showNotes
+  shortcuts.checked = settings.shortcuts
 
   const toggle = document.querySelector('#motion-toggle')
   const freeze = document.querySelector('#freeze-toggle')
@@ -189,11 +317,14 @@ export function setupSettings(initial, { onChange, onResetLayout }) {
     saveSettings(settings)
     showMotion()
     scrollButtons.show()
+    keys.show()
     onChange(settings)
   }
   const scrollButtons = setupScrollButtons(dialog, { getSettings: () => settings, keep: kept => update({ scrollButtons: kept }) })
+  const keys = setupKeys(dialog, { getSettings: () => settings, keep: kept => update({ keys: kept }) })
   showMotion()
   scrollButtons.show()
+  keys.show()
   // one click in the header turns every motion off or on, as the box in the settings does
   toggle.addEventListener('click', () => update({ animations: !settings.animations }))
   freeze.addEventListener('click', () => update({ freeze: !settings.freeze }))
@@ -209,6 +340,7 @@ export function setupSettings(initial, { onChange, onResetLayout }) {
   shiftScroll.addEventListener('change', () => update({ shiftScroll: shiftScroll.checked }))
   editor.addEventListener('change', () => update({ editor: editor.value }))
   showNotes.addEventListener('change', () => update({ showNotes: showNotes.checked }))
+  shortcuts.addEventListener('change', () => update({ shortcuts: shortcuts.checked }))
   setupTabs()
   document.querySelector('#layout-reset').addEventListener('click', onResetLayout)
   document.querySelector('#settings-open').addEventListener('click', () => dialog.showModal())
