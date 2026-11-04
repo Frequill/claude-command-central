@@ -2,13 +2,13 @@
 """Run by Claude Code's PermissionRequest hook for the tools that ask for approval: lets the person
 allow or deny a call from CCC's chat window instead of the Claude app.
 
-Claude Code puts its approval box in front of the person and runs this hook at the same time;
-whichever answers first wins. While the box waits, this hook leaves a note of it for the board (the
-call it is about), and takes the decision the board's server leaves for that very note. When the
-person answers in the app instead, the turn is stopped or nothing comes, it takes its note away and
-ends without a word, and the app decides as usual.
+Claude Code puts its approval box in front of the person and runs this hook at the same time, in
+the app, in VS Code and in a terminal alike; whichever answers first wins. While the box waits, this
+hook leaves a note of it for the board (the call it is about), and takes the decision the board's
+server leaves for that very note. When the person answers where the session runs instead, the turn
+is stopped or nothing comes, it takes its note away and ends without a word, and the session
+decides as usual.
 
-Only the desktop app and VS Code run the two side by side, so in a terminal session it ends at once.
 It never fails the session: any problem ends it quietly.
 """
 
@@ -23,7 +23,6 @@ from pathlib import Path
 
 APPROVALS_DIR = Path(os.environ.get("CCC_APPROVALS_DIR", Path.home() / ".claude" / "ccc" / "approvals"))
 SAFE_ID = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
-SIDE_BY_SIDE = {"claude-desktop", "claude-vscode"}
 # the question box and the plan have boxes of their own; answer_from_ccc.py takes the questions
 OWN_BOXES = {"AskUserQuestion", "ExitPlanMode"}
 MAX_INPUT_BYTES = 1024 * 1024
@@ -147,22 +146,39 @@ def decision(chosen: str, tool: str = "", given: dict = None, branch: str = None
     return {"hookSpecificOutput": {"hookEventName": "PermissionRequest", "decision": answer}}
 
 
-def answered_elsewhere(transcript, tool: str, given: dict) -> bool:
-    """Whether the transcript already holds the result of the latest call like this one: the
-    person turned it down in the app, the turn was stopped, or it was allowed and has run."""
+def size_of(transcript) -> int:
+    """How long the transcript is now, in bytes; 0 when there is none yet."""
+    try:
+        return Path(transcript).stat().st_size
+    except (OSError, TypeError, ValueError):
+        return 0
+
+
+def answered_elsewhere(transcript, tool: str, given: dict, since: int = 0) -> bool:
+    """Whether the transcript holds the result of a call like this one, written from byte `since` on
+    (where the transcript ended when the hook began): the person turned it down where the session
+    runs, the turn was stopped, or it was allowed and has run. The same call made before and done
+    then is not this one: a terminal writes the call itself down only once it is answered."""
     try:
         path = Path(transcript)
         size = path.stat().st_size
+        start = max(0, size - TRANSCRIPT_TAIL_BYTES)
         with path.open("rb") as handle:
-            handle.seek(max(0, size - TRANSCRIPT_TAIL_BYTES))
+            handle.seek(start)
             lines = handle.read().split(b"\n")
     except (OSError, TypeError, ValueError):
         return False
+    # where each line begins in the file, to tell what was written since the hook began
+    at = start
+    starts = []
+    for line in lines:
+        starts.append(at)
+        at += len(line) + 1
     # the call is known by what the box shows of it, so a field the engine adds to the input does not hide it
     wanted = shown(tool, given)
     call_id = None
     is_done = False
-    for line in lines:
+    for line, line_at in zip(lines, starts):
         try:
             record = json.loads(line)
         except ValueError:
@@ -174,7 +190,7 @@ def answered_elsewhere(transcript, tool: str, given: dict) -> bool:
                 continue
             if block.get("type") == "tool_use" and block.get("name") == tool and isinstance(block.get("input"), dict) and shown(tool, block["input"]) == wanted:
                 call_id, is_done = block.get("id"), False
-            elif block.get("type") == "tool_result" and call_id and block.get("tool_use_id") == call_id:
+            elif block.get("type") == "tool_result" and call_id and block.get("tool_use_id") == call_id and line_at >= since:
                 is_done = True
     return is_done
 
@@ -188,6 +204,7 @@ def wait_for_decision(session_id: str, tool: str, given: dict, transcript, clock
     answer_path = APPROVALS_DIR / f"{session_id}.answer.json"
     ended_path = APPROVALS_DIR / f"{session_id}.ended.json"
     started = clock()
+    since = size_of(transcript)
     note = {"box": box_id, "tool": tool, "at": int(started * 1000), "beat": int(started * 1000), **shown(tool, given)}
     write_whole(note_path, note)
     try:
@@ -199,7 +216,7 @@ def wait_for_decision(session_id: str, tool: str, given: dict, transcript, clock
                 return decision(read[0], tool, given, read[1], read[2])
             if clock() - checked >= TRANSCRIPT_EVERY_S:
                 checked = clock()
-                if answered_elsewhere(transcript, tool, given):
+                if answered_elsewhere(transcript, tool, given, since):
                     return None
                 if is_ours(note_path, box_id):
                     write_whole(note_path, {**note, "beat": int(checked * 1000)})
@@ -210,14 +227,12 @@ def wait_for_decision(session_id: str, tool: str, given: dict, transcript, clock
 
 
 def leave_on_signal(signum, _frame):
-    """Claude Code withdraws the hook when the box was answered in the app: the note comes down."""
+    """Claude Code withdraws the hook when the box was answered where the session runs: the note comes down."""
     raise SystemExit(0)
 
 
 def main():
     try:
-        if os.environ.get("CLAUDE_CODE_ENTRYPOINT") not in SIDE_BY_SIDE:
-            return 0
         notice = json.loads(sys.stdin.buffer.read(MAX_INPUT_BYTES) or b"null")
         box = box_of(notice)
         if box is None:

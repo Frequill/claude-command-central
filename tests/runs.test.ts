@@ -168,7 +168,7 @@ describe("a message from CCC's chat", () => {
       ['/h/.claude/ccc/inbox/s1/1000-aa.json', JSON.stringify({ text: 'why did it fail?', images: [], mode: 'queue' })],
     ])
     const { $, did } = fakeSession(files)
-    const inbox = await inboxFor($, async () => undefined, undefined, undefined, undefined, () => tellRuns($))
+    const inbox = await inboxFor($, async () => undefined, undefined, undefined, undefined, undefined, () => tellRuns($))
     await inbox?.check()
     // the inbox hands a message over without waiting for it
     for (let step = 0; step < 100; step++) await Promise.resolve()
