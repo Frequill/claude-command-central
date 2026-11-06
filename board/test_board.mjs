@@ -8,7 +8,7 @@ import * as C from './chat-logic.js'
 import * as K from './keys.js'
 import { chooseCrater, planFlight } from './dragon.js'
 import * as P from './placement.js'
-import { cellsOf, closedStrip, gapAt, isRoomForCard, movedBack, movedBy, nextSpot, passedAt, resizedTo, rowsToFit, stripAt } from './grid.js'
+import { besideAt, cappedGap, cellsOf, closedStrip, gapAt, isRoomForCard, movedBack, movedBy, nextSpot, passedAt, resizedTo, rowsOnScreen, rowsToFit, stripAt } from './grid.js'
 
 const NOW = 1_000_000_000
 
@@ -35,9 +35,12 @@ test('sessions keep the order they started in, and nothing disappears for its ag
 })
 
 test('a card says where its session runs: the Claude app, VS Code or a terminal', () => {
-  assert.deepEqual(L.sourceOf({ entrypoint: 'claude-vscode' }), { kind: 'vscode', label: 'VS Code', about: 'Started in VS Code' })
+  assert.deepEqual(L.sourceOf({ entrypoint: 'claude-vscode' }), { kind: 'vscode', label: 'VS Code', short: 'VS Code', about: 'Started in VS Code' })
   assert.equal(L.sourceOf({ entrypoint: 'cli' }).label, 'Terminal')
   assert.equal(L.sourceOf({ entrypoint: 'claude-desktop' }).label, 'Claude app')
+  // a narrow card shows the short name
+  assert.equal(L.sourceOf({ entrypoint: 'claude-desktop' }).short, 'App')
+  assert.equal(L.sourceOf({ entrypoint: 'cli' }).short, 'CLI')
   assert.equal(L.sourceOf({ entrypoint: 'something-new' }), null)
   assert.equal(L.sourceOf({}), null)
   assert.equal(L.sourceOf(undefined), null)
@@ -2175,6 +2178,46 @@ test('a new card is as tall as lets two rows of cards fit on the screen', () => 
   // unknown room (a window not drawn yet): the size a card starts at
   assert.equal(rowsToFit(0), 32)
   assert.equal(rowsToFit(NaN), 32)
+})
+
+test('a card that fills an empty space is no taller than the screen shows', () => {
+  // 752 px between the bars, 14 kept at each end: a card of 36 rows (720 px less margins) shows whole
+  assert.equal(rowsOnScreen(752, 14), 36)
+  assert.ok(36 * 20 - 2 * 6 <= 752 - 2 * 14)
+  assert.equal(rowsOnScreen(0), Infinity)
+  const hole = { x: 6, y: 0, w: 6, h: 134 }
+  // a space that fits the screen is filled whole
+  assert.deepEqual(cappedGap({ x: 6, y: 0, w: 6, h: 30 }, { x: 7, y: 5 }, 36), { x: 6, y: 0, w: 6, h: 30 })
+  // in a taller one, the part around the pointer
+  assert.deepEqual(cappedGap(hole, { x: 7, y: 80 }, 36), { x: 6, y: 62, w: 6, h: 36 })
+  // near the top or the bottom it goes up to the end, leaving no strip too thin for a card
+  assert.deepEqual(cappedGap(hole, { x: 7, y: 30 }, 36), { x: 6, y: 0, w: 6, h: 36 })
+  assert.deepEqual(cappedGap(hole, { x: 7, y: 110 }, 36), { x: 6, y: 98, w: 6, h: 36 })
+  assert.equal(cappedGap(null, { x: 7, y: 5 }, 36), null)
+})
+
+test('a card held on the side of another goes beside it, and that one gets narrower', () => {
+  const Y = { id: 'Y', x: 0, y: 0, w: 6, h: 17 }
+  const Z = { id: 'Z', x: 6, y: 0, w: 6, h: 17 }
+  const below = { x: 0, y: 17, w: 6, h: 17 }
+  // a full row: the held card and Y share Y's width, half each, in Y's row
+  assert.deepEqual(besideAt(below, [Y, Z], { x: 0.5, y: 5 }), { spot: { x: 0, y: 0, w: 3, h: 17 }, moved: [{ ...Y, x: 3, w: 3 }] })
+  assert.deepEqual(besideAt(below, [Y, Z], { x: 5.5, y: 5 }), { spot: { x: 3, y: 0, w: 3, h: 17 }, moved: [{ ...Y, w: 3 }] })
+  // the middle of a card is not a side: the card goes above or under it, as before
+  assert.equal(besideAt(below, [Y, Z], { x: 3, y: 5 }), null)
+  assert.equal(besideAt(below, [Y, Z], { x: 1.6, y: 5 }), null)
+  // two cards side by side change places, each keeping its width
+  const left = { x: 0, y: 0, w: 6, h: 17 }
+  assert.deepEqual(besideAt(left, [Z], { x: 11.5, y: 5 }), { spot: { x: 6, y: 0, w: 6, h: 17 }, moved: [{ ...Z, x: 0 }] })
+  assert.deepEqual(besideAt(left, [Z], { x: 6.5, y: 5 }), { spot: { x: 0, y: 0, w: 6, h: 17 }, moved: [{ ...Z }] })
+  // the held card keeps its width when the other can still be as narrow as a card may be
+  const wide = { id: 'wide', x: 0, y: 0, w: 9, h: 17 }
+  assert.deepEqual(besideAt({ x: 0, y: 20, w: 3, h: 17 }, [wide], { x: 8.5, y: 5 }), { spot: { x: 6, y: 0, w: 3, h: 17 }, moved: [{ ...wide, w: 6 }] })
+  // too narrow to share: nothing, so the card is pushed down as before
+  assert.equal(besideAt(below, [{ id: 'N', x: 0, y: 0, w: 4, h: 17 }], { x: 0.2, y: 5 }), null)
+  // nothing under the pointer
+  assert.equal(besideAt(below, [Y, Z], { x: 3, y: 40 }), null)
+  assert.equal(besideAt(below, [Y, Z], null), null)
 })
 
 test('the keys scroll only as far as a card needs to show whole', () => {

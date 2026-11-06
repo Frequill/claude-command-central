@@ -8,7 +8,7 @@ import { jelly, loadLayout, makeResizable, makeSortable, saveLayout, watchWindow
 import { setupNotes } from './notes.js'
 import { loadSettings, setupSettings } from './settings.js'
 import { startScene } from './themes.js'
-import { makeGrid, rowsToFit } from './grid.js'
+import { makeGrid, rowsOnScreen, rowsToFit } from './grid.js'
 import * as K from './keys.js'
 import { rememberFocus, restoreFocus } from './refocus.js'
 import { artifactCard } from './artifact.js'
@@ -262,6 +262,11 @@ function setupLayout() {
     startRows: () => {
       const band = visibleBand()
       return rowsToFit(band.bottom - band.top, SHOW_GAP)
+    },
+    // a card that fills an empty space (Shift) is no taller than the screen shows
+    screenRows: () => {
+      const band = visibleBand()
+      return rowsOnScreen(band.bottom - band.top, SHOW_GAP)
     },
     // the + in an empty space: the start window, and what it starts lands in that space
     onAddAt: gap => {

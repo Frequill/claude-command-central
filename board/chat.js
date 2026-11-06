@@ -232,7 +232,7 @@ function drawStats(chat) {
   const stats = context.statsOf(chat.id)
   if (!stats || stats.signature === chat.statsSignature) return
   chat.statsSignature = stats.signature
-  chat.side.replaceChildren(stats.node)
+  chat.side.replaceChildren(chat.sideClose, stats.node)
 }
 
 function buildCard(sessionId) {
@@ -261,6 +261,8 @@ function buildCard(sessionId) {
   const menu = el('div', { class: 'slash-menu', role: 'listbox', 'aria-label': 'Commands and skills', hidden: true })
   const form = el('form', { class: 'chat-compose' }, dock, menu, emojiPanel, thumbs, el('div', { class: 'compose-row' }, el('div', { class: 'compose-tools' }, emoji, attach), text, suggestKey, stop, el('div', { class: 'compose-buttons' }, send)), el('div', { class: 'compose-bar' }, note), picker)
   const side = el('aside', { class: 'chat-side', 'aria-label': 'What the card tells' })
+  // a narrow card slides the panel in over the chat: there it has its own ×, so it always closes
+  const sideClose = el('button', { type: 'button', class: 'chat-close side-close', 'aria-label': 'Hide the card’s facts', title: 'Hide the facts panel' }, icon('M4 4l8 8M12 4l-8 8'))
   // shown while the session is stopped because CCC's keeper crashed
   const restart = el('button', { type: 'button', class: 'primary', title: 'Starts it again in the background, where it left off' }, 'Restart')
   const lostBar = el('div', { class: 'chat-lost', role: 'status', hidden: true }, el('span', { class: 'chat-lost-text' }, 'CCC\u2019s keeper crashed, and this session stopped with it. Its conversation is saved.'), restart)
@@ -272,11 +274,25 @@ function buildCard(sessionId) {
   const artifactPlace = el('div', { class: 'chat-artifact', hidden: true, 'aria-label': 'Artifact' })
   const body = el('div', { class: 'chat-body' }, el('div', { class: 'chat-main' }, scroll, form), side, designPane, artifactPlace)
   const root = el('article', { class: `glass tile expanded-tile${context.isSideHidden(sessionId) ? ' side-hidden' : ''}`, 'data-session': sessionId, 'data-ghost': 'light' }, head, lostBar, backBar, body, el('span', { class: 'grip grip-x', 'data-axis': 'x', 'aria-hidden': 'true' }), el('span', { class: 'grip grip-y', 'data-axis': 'y', 'aria-hidden': 'true' }), el('span', { class: 'grip', 'aria-hidden': 'true' }), el('span', { class: 'grip grip-bl', 'data-axis': 'corner-bl', 'aria-hidden': 'true' }), el('span', { class: 'grip grip-tr', 'data-axis': 'corner-tr', 'aria-hidden': 'true' }), el('span', { class: 'grip grip-tl', 'data-axis': 'corner-tl', 'aria-hidden': 'true' }))
-  const chat = { id: sessionId, root, head, lostBar, backBar, backSignature: '', designPane, design: null, isDesignShown: false, artifactPlace, artifact: null, isArtifactShown: false, hasArtifactAsked: false, log, live, dock, scroll, thumbs, text, queue, send, stop, note, side, form, menu, emojiPicker: emojiPanel, suggestKey, suggestion: '', slash: { list: null, at: 0, shown: [], index: 0 }, mention: { shown: [], index: 0, asked: 0, timer: 0 }, menuFor: '', images: [], files: [], items: [], signature: '', timer: 0, isSending: false, isFollowing: true, canSend: false, problem: '', openSteps: new Set(), openGroups: new Set(), openPrompts: new Set(), steps: new Map(), drafts: new Map(), approvals: new Map() }
+  const chat = { id: sessionId, root, head, sideClose, lostBar, backBar, backSignature: '', designPane, design: null, isDesignShown: false, artifactPlace, artifact: null, isArtifactShown: false, hasArtifactAsked: false, log, live, dock, scroll, thumbs, text, queue, send, stop, note, side, form, menu, emojiPicker: emojiPanel, suggestKey, suggestion: '', slash: { list: null, at: 0, shown: [], index: 0 }, mention: { shown: [], index: 0, asked: 0, timer: 0 }, menuFor: '', images: [], files: [], items: [], signature: '', timer: 0, isSending: false, isFollowing: true, canSend: false, problem: '', openSteps: new Set(), openGroups: new Set(), openPrompts: new Set(), steps: new Map(), drafts: new Map(), approvals: new Map() }
 
   // hovering the panel leaves the wheel to the page; a click in it lets the wheel scroll the panel,
   // until a click somewhere else or Esc
   side.addEventListener('pointerdown', () => side.classList.add('is-scrolling'))
+  sideClose.addEventListener('click', () => toggleSide(chat))
+  // the panel over the chat goes with a click in the chat it covers
+  scroll.addEventListener('pointerdown', () => {
+    if (isSideOver(chat) && !root.classList.contains('side-hidden')) toggleSide(chat)
+  })
+  // the header fits the card at every width; and a card first drawn narrow does not open on a panel
+  // over its chat, one kept open from a wider card on a bigger screen
+  new ResizeObserver(() => {
+    if (!head.clientWidth) return
+    fitHead(chat)
+    if (chat.isSideChecked) return
+    chat.isSideChecked = true
+    if (isSideOver(chat) && !root.classList.contains('side-hidden')) toggleSide(chat, { isKept: false })
+  }).observe(head)
   // a narrow window slides the panel in over the chat: it stops above the write box, never over it
   // the write box growing a line, or a question box opening above it, takes room from the chat:
   // a chat showing its newest line keeps showing it now, rather than jumping there at the next redraw
@@ -939,12 +955,23 @@ function mentionKey(chat, event) {
   return false
 }
 
-/** Folds the panel of facts in or out; the chat takes the room it leaves. */
-function toggleSide(chat) {
+/**
+ * Folds the panel of facts in or out; the chat takes the room it leaves. Beside the chat, the card
+ * keeps it that way across reloads; over the chat (a narrow card), it is only for now.
+ */
+function toggleSide(chat, { isKept = !isSideOver(chat) } = {}) {
   const isHidden = chat.root.classList.toggle('side-hidden')
   chat.headSignature = ''
   drawHead(chat, context.sessionOf(chat.id))
-  context.onSide(chat.id, isHidden)
+  if (isKept) context.onSide(chat.id, isHidden)
+}
+
+/**
+ * Whether the card is narrow enough that its panel slides in over the chat rather than beside it:
+ * the stylesheet decides (@container chat-window), and places the panel itself then.
+ */
+function isSideOver(chat) {
+  return chat.root.clientWidth > 0 && getComputedStyle(chat.side).position === 'absolute'
 }
 
 function grow(text) {
@@ -983,7 +1010,7 @@ function drawHead(chat, session) {
   const title = context.titleOf(id) ?? session?.folder ?? 'Session'
   const state = session ? L.sessionState(session, Date.now()) : 'ended'
   const background = context.terminalOf?.(id) ?? null
-  const source = background || session?.planned ? { kind: 'terminal', label: 'Background' } : L.sourceOf(session)
+  const source = background || session?.planned ? { kind: 'terminal', label: 'Background', short: 'CCC', about: 'Runs in CCC’s background' } : L.sourceOf(session)
   const link = L.openLink(session)
   const facts = C.sessionSetup(session, background)
   const caveman = context.cavemanOf?.(id) ?? { level: 'off', isOwn: false }
@@ -1009,7 +1036,7 @@ function drawHead(chat, session) {
     'button',
     { type: 'button', class: 'setup-toggle', 'aria-haspopup': 'dialog', 'aria-expanded': String(Boolean(chat.isSetupOpen)), title: 'Model, effort and mode of this session' },
     icon('M2 4.5h7M12 4.5h2M2 11.5h2M7 11.5h7M10.5 3v3M5.5 10v3'),
-    el('span', {}, [C.modelLabel(facts.modelId, context.modelVersions?.() ?? {}), facts.effort, facts.mode].filter(Boolean).join(' · ') || 'Session settings'),
+    el('span', { class: 'head-label' }, [C.modelLabel(facts.modelId, context.modelVersions?.() ?? {}), facts.effort, facts.mode].filter(Boolean).join(' · ') || 'Session settings'),
   )
   setup.addEventListener('click', () => toggleSetup(chat))
   const isCaveman = caveman.level !== 'off'
@@ -1019,6 +1046,8 @@ function drawHead(chat, session) {
       type: 'button',
       class: 'chat-close caveman-toggle',
       'aria-pressed': String(isCaveman),
+      // its words in the header's ⋯ menu, where an icon alone would not say what it is
+      'data-label': isCaveman ? `Caveman mode: ${caveman.level}` : 'Caveman mode',
       'aria-label': isCaveman ? `Caveman mode is on (${caveman.level}). Switch it off` : 'Switch caveman mode on',
       title: isCaveman
         ? `Caveman mode: ${caveman.level}. Claude answers tersely to save tokens. Click to switch it off; pick the level in the session settings.`
@@ -1038,6 +1067,7 @@ function drawHead(chat, session) {
           type: 'button',
           class: 'chat-close terminal-toggle',
           'aria-pressed': String(Boolean(isShown)),
+          'data-label': isShown ? 'Hide its terminal' : 'Show its terminal',
           'aria-label': isShown ? 'Hide its terminal' : 'Show its terminal',
           title: isShown ? 'Hide its terminal: Claude keeps working in the background' : 'Show its terminal: the screen Claude runs in, in the background',
         },
@@ -1051,6 +1081,7 @@ function drawHead(chat, session) {
             type: 'button',
             class: 'chat-close terminal-toggle',
             disabled: true,
+            'data-label': 'Its terminal',
             'aria-label': 'Its terminal opens once Claude runs',
             title: session?.planned ? 'Its terminal opens once Claude runs: send your first message' : 'Its terminal opens once Claude runs again: send a message to resume it',
           },
@@ -1072,7 +1103,7 @@ function drawHead(chat, session) {
           title: chat.isDesignShown ? 'Back to the chat' : `Claude is designing: ${design.title}. Show its ${design.screens} screen${design.screens === 1 ? '' : 's'} here`,
         },
         icon('M8 2.5a5.5 5.5 0 1 0 0 11c.9 0 1.2-.6 1.2-1.1 0-.8-.6-1-.6-1.7 0-.6.5-1 1.1-1h1.3a2.5 2.5 0 0 0 2.5-2.5C13.5 4.6 11 2.5 8 2.5zM5 7.5h.01M6.5 5h.01M9.5 5h.01'),
-        el('span', {}, chat.isDesignShown ? 'Chat' : 'Design'),
+        el('span', { class: 'head-label' }, chat.isDesignShown ? 'Chat' : 'Design'),
         isNewDesign ? el('span', { class: 'design-dot', 'aria-label': 'new screens' }) : null,
       )
     : null
@@ -1090,7 +1121,7 @@ function drawHead(chat, session) {
             : `Show ${artifacts.count === 1 ? artifacts.title : `its ${artifacts.count} artifacts (newest: ${artifacts.title})`} beside the chat. The card widens to the board's full width; the cards beside it move down`,
         },
         icon('M2.5 3h11v10h-11zM8.5 3v10M10.5 6h1M10.5 8.5h1'),
-        el('span', {}, artifacts.count === 1 ? 'Artifact' : `Artifacts · ${artifacts.count}`),
+        el('span', { class: 'head-label' }, artifacts.count === 1 ? 'Artifact' : `Artifacts · ${artifacts.count}`),
         isNewArtifact ? el('span', { class: 'design-dot', 'aria-label': 'new or changed' }) : null,
       )
     : null
@@ -1098,10 +1129,11 @@ function drawHead(chat, session) {
   const parts = [
     el('span', { class: 'dot', style: `background:${context.colorOf(id)}`, 'aria-hidden': 'true' }),
     titleNode(chat, session, title),
-    source ? el('span', { class: `source source-${source.kind}` }, source.label) : null,
+    // a narrow card shows the short name of where the session runs
+    source ? el('span', { class: `source source-${source.kind}`, title: source.about ?? source.label }, el('span', { class: 'head-long' }, source.label), el('span', { class: 'head-short' }, source.short ?? source.label)) : null,
     el('span', { class: 'chat-where' }, [session?.folder, session?.branch].filter(Boolean).join(' · ')),
     el('span', { class: `pill ${state === 'working' ? 'pill-work live' : state === 'needs-you' ? 'pill-wait' : 'pill-done'}`, ...(back ? { title: back.text } : {}) }, back?.label ?? L.STATE_LABEL[state] ?? state),
-    link ? el('a', { class: 'open-link', href: link.href, title: link.about }, 'Open', icon('M9 2h5v5M14 2 7 9', 11)) : null,
+    link ? el('a', { class: 'open-link', href: link.href, title: link.about }, el('span', { class: 'head-label' }, 'Open'), icon('M9 2h5v5M14 2 7 9', 11)) : null,
     setup,
     designButton,
     artifactButton,
@@ -1110,10 +1142,119 @@ function drawHead(chat, session) {
     panel,
     close,
   ]
-  chat.head.replaceChildren(...parts.filter(Boolean))
+  chat.headParts = parts.filter(Boolean)
+  chat.head.replaceChildren(...chat.headParts)
+  fitHead(chat)
   if (chat.isSetupOpen) drawSetup(chat, session)
   chat.root.setAttribute('aria-label', `Chat: ${title}`)
 }
+
+// ---------- a header that fits its card ----------
+
+// the header's buttons that go into its ⋯ menu when the card is too narrow for them all, the first
+// one first. The side panel's button and × always stay in the header, so a card can never be stuck.
+const INTO_MORE = ['.caveman-toggle', '.terminal-toggle', '.design-toggle:not(.artifact-toggle)', '.artifact-toggle', '.setup-toggle', '.open-link']
+
+/**
+ * Lays the header out for the card's width: every button in it when they fit, else as many as fit,
+ * and the rest in a ⋯ menu beside the side panel's button. A narrow card shows its labels shorter
+ * first (the stylesheet), so this only moves what still does not fit; and when even that is too
+ * much, the header gets tight (is-tight in the stylesheet).
+ */
+function fitHead(chat) {
+  const head = chat.head
+  if (!chat.headParts || chat.isRenaming || !head.isConnected || head.clientWidth === 0) return
+  const more = moreMenu(chat)
+  const wasOpen = !more.menu.hidden
+  head.classList.remove('is-tight')
+  head.replaceChildren(...chat.headParts)
+  more.menu.replaceChildren()
+  if (head.scrollWidth <= head.clientWidth) {
+    closeMore(chat)
+    return
+  }
+  head.insertBefore(more.button, chat.headParts.find(node => node.classList.contains('side-toggle')) ?? null)
+  const moved = new Set()
+  for (const selector of INTO_MORE) {
+    if (head.scrollWidth <= head.clientWidth) break
+    const node = chat.headParts.find(part => part.matches(selector))
+    if (!node) continue
+    node.remove()
+    moved.add(node)
+  }
+  // the narrowest cards also let where it runs go, and the title shrink to what is left
+  if (head.scrollWidth > head.clientWidth) head.classList.add('is-tight')
+  // in the menu in the header's own order, top to bottom as it was left to right
+  more.menu.replaceChildren(...chat.headParts.filter(node => moved.has(node)))
+  if (wasOpen) placeMore(chat)
+  else closeMore(chat)
+}
+
+/** The ⋯ button and its menu, made once for the card: the menu sits in the card, under the header. */
+function moreMenu(chat) {
+  if (chat.more) return chat.more
+  const button = el('button', { type: 'button', class: 'chat-close chat-more', 'aria-haspopup': 'menu', 'aria-expanded': 'false', 'aria-label': 'More of the card’s buttons', title: 'More: the buttons the card has no room for' }, icon('M3.5 8h.01M8 8h.01M12.5 8h.01'))
+  const menu = el('div', { class: 'chat-more-menu', role: 'menu', hidden: true })
+  button.addEventListener('click', () => (menu.hidden ? placeMore(chat) : closeMore(chat)))
+  // a pick does its own thing, then the menu goes
+  menu.addEventListener('click', event => {
+    if (event.target.closest('button, a')) closeMore(chat)
+  })
+  menu.addEventListener('keydown', event => {
+    if (event.key !== 'Escape') return
+    event.preventDefault()
+    closeMore(chat)
+    button.focus({ preventScroll: true })
+  })
+  chat.root.append(menu)
+  chat.more = { button, menu }
+  return chat.more
+}
+
+function placeMore(chat) {
+  const { button, menu } = chat.more
+  menu.hidden = false
+  button.setAttribute('aria-expanded', 'true')
+  // under the ⋯, its right edge at the button's, inside the card
+  menu.style.top = `${chat.head.offsetTop + chat.head.offsetHeight + 6}px`
+  menu.style.right = `${Math.max(8, chat.root.clientWidth - (button.offsetLeft + button.offsetWidth))}px`
+}
+
+function closeMore(chat) {
+  if (!chat.more) return
+  chat.more.menu.hidden = true
+  chat.more.button.setAttribute('aria-expanded', 'false')
+}
+
+// a button showing its icon alone, in a narrow card, says its words at once under the pointer
+const headTip = el('div', { class: 'tok-tip', role: 'tooltip', hidden: true })
+document.body.append(headTip)
+document.addEventListener('pointerover', event => {
+  const button = event.target.closest?.('.chat-head button, .chat-head a')
+  const label = button?.querySelector('.head-label')
+  if (!label || label.getClientRects().length > 0) return
+  headTip.textContent = label.textContent
+  headTip.hidden = false
+  const box = button.getBoundingClientRect()
+  headTip.style.left = `${Math.min(Math.max(8, box.left + box.width / 2 - headTip.offsetWidth / 2), window.innerWidth - headTip.offsetWidth - 8)}px`
+  headTip.style.top = `${box.bottom + 6}px`
+})
+const hideHeadTip = event => {
+  if (!event.relatedTarget || !event.target.closest?.('.chat-head button, .chat-head a')?.contains(event.relatedTarget)) headTip.hidden = true
+}
+document.addEventListener('pointerout', hideHeadTip)
+document.addEventListener('pointerdown', () => (headTip.hidden = true), true)
+
+// a click anywhere but the menu and its ⋯ closes it
+document.addEventListener(
+  'pointerdown',
+  event => {
+    for (const chat of chats.values()) {
+      if (chat.more && !chat.more.menu.hidden && !chat.more.menu.contains(event.target) && !chat.more.button.contains(event.target)) closeMore(chat)
+    }
+  },
+  true,
+)
 
 // ---------- the design tab ----------
 
@@ -2004,7 +2145,14 @@ function releaseSides(keep) {
 
 document.addEventListener('pointerdown', event => releaseSides(event.target.closest?.('.chat-side')), true)
 document.addEventListener('keydown', event => {
-  if (event.key === 'Escape') releaseSides(null)
+  if (event.key !== 'Escape') return
+  releaseSides(null)
+  // Esc that nothing else took closes a panel over the chat, in the card the cursor or pointer is in
+  if (event.defaultPrevented) return
+  for (const chat of chats.values()) {
+    const isHere = chat.root.contains(document.activeElement) || chat.root.matches(':hover')
+    if (isHere && isSideOver(chat) && !chat.root.classList.contains('side-hidden')) toggleSide(chat)
+  }
 })
 
 /** Whether Claude works in the session right now: a session gone quiet or ended has nothing to stop. */
@@ -2172,9 +2320,11 @@ function drawBack(chat, session) {
   restoreFocus(chat.backBar, kept)
 }
 
-function say(chat, problem) {
+function say(chat, problem, isKept = false) {
   chat.problem = problem
   chat.note.textContent = problem
+  // a kept one stays until the next message is sent: the person must see why nothing happened
+  if (isKept) return
   setTimeout(() => {
     if (chat.problem !== problem) return
     chat.problem = ''
@@ -2212,6 +2362,7 @@ async function sendMessage(chat, mode) {
   const tooLong = C.lengthProblem(text)
   if (tooLong) return say(chat, tooLong)
   chat.isSending = true
+  chat.problem = ''
   chat.send.disabled = true
   chat.queue.disabled = true
   const card = mode === 'queue' && text && chat.images.length === 0 && chat.files.length === 0 ? openCard(chat) : null
@@ -2252,7 +2403,7 @@ async function sendMessage(chat, mode) {
     if (C.composeState(session, Boolean(context.isResumable?.(chat.id))).resumeHere) {
       const problem = await context.onResume(chat.id)
       const started = session?.planned ? 'Starting Claude in the background with your message.' : 'Resuming it in the background: your message goes in as it starts.'
-      setTimeout(() => say(chat, problem || started), 0)
+      setTimeout(() => say(chat, problem || started, Boolean(problem)), 0)
     }
     for (const image of chat.images) URL.revokeObjectURL(image.url)
     chat.images = []

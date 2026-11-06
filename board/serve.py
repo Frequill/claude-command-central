@@ -2755,11 +2755,13 @@ def take_over(backgrounds, terms, transcripts, app_ids: dict, sessions_dir: Path
     it up there: (True if it was handed over just now, '') or (False, why it cannot be). One CCC started
     in the background already is left as it is. It must have ended: two Claudes in one conversation
     would write over each other. One the Claude app or VS Code holds is woken there instead."""
+    # CCC's own goes first: a session planned on the board has no history yet until its first
+    # message starts it, and that start must not be turned away for it
+    if backgrounds.get(session_id):
+        return False, ""
     path = transcripts.find(session_id)
     if path is None:
         return False, "That conversation is not in Claude's history on this Mac."
-    if backgrounds.get(session_id):
-        return False, ""
     if session_id in app_ids:
         return False, "It lives in the Claude app: open it there to wake it."
     facts = transcripts.describe(session_id)

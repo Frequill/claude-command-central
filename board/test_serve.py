@@ -2505,6 +2505,9 @@ class BackgroundTest(unittest.TestCase):
         self.assertEqual(kept.get("s1"), {"folder": str(self.home), "mode": "plan", "at": 100_000})
         # one that is CCC's already is left as it is
         self.assertEqual(take("s1"), (False, ""))
+        # so is one planned on the board, which has no history before its first message starts it
+        kept.keep("new", str(self.home), "auto", 100_000, planned=True)
+        self.assertEqual(take("new"), (False, ""))
         # running in CCC's background counts as running too
         kept.forget("s1")
         terms.cards = [{"id": "t1", "kind": "claude", "sessionId": "s1"}]

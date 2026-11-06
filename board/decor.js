@@ -147,16 +147,43 @@ function mountStatusBar(look, onEmblem, onEmblemTwice) {
     )
   }
   const emblem = (EMBLEMS[look] ?? EMBLEMS.inferno)()
+  // what the emblem does, shown at once under the pointer or the keyboard's focus: a title shows only
+  // after a wait, so nobody finds out the emblem is a button
+  const faceTip = el(
+    'div',
+    { id: 'hud-face-tip', class: 'tok-tip hud-face-tip', role: 'tooltip', hidden: true },
+    el('strong', {}, 'Click: close the gaps'),
+    el('span', { class: 'tok-tip-note' }, 'The cards pack together, top first, each keeping its size'),
+    el('strong', {}, 'Click twice: reset the layout'),
+    el('span', { class: 'tok-tip-note' }, 'Every card goes back, two to a row'),
+  )
+  document.body.append(faceTip)
   const face = el(
     'button',
     {
       type: 'button',
       class: 'hud-face',
-      title: 'Close the gaps: the cards pack together again, top first, each keeping its size. Click twice to reset the layout: every card back, two to a row',
       'aria-label': 'Close the gaps between the cards; clicked twice, reset the layout',
+      'aria-describedby': 'hud-face-tip',
     },
     emblem.node,
   )
+  // just above the emblem, in its middle, kept inside the window
+  const showFaceTip = () => {
+    faceTip.hidden = false
+    const box = face.getBoundingClientRect()
+    const left = Math.min(Math.max(8, box.left + box.width / 2 - faceTip.offsetWidth / 2), window.innerWidth - faceTip.offsetWidth - 8)
+    faceTip.style.left = `${left}px`
+    faceTip.style.top = `${Math.max(8, box.top - faceTip.offsetHeight - 8)}px`
+  }
+  const hideFaceTip = () => {
+    faceTip.hidden = true
+  }
+  face.addEventListener('pointerenter', showFaceTip)
+  face.addEventListener('focus', showFaceTip)
+  face.addEventListener('pointerleave', hideFaceTip)
+  face.addEventListener('blur', hideFaceTip)
+  window.addEventListener('blur', hideFaceTip)
   face.addEventListener('click', event => {
     // the first click has closed the gaps already when a second comes: that one puts every card back
     const action = L.emblemAction(event.detail)
@@ -197,6 +224,8 @@ function mountStatusBar(look, onEmblem, onEmblemTwice) {
     },
     stop() {
       bar.remove()
+      faceTip.remove()
+      window.removeEventListener('blur', hideFaceTip)
       document.body.classList.remove('has-status-bar')
     },
   }

@@ -136,6 +136,10 @@ When Claude publishes an artifact in a session (the Artifact tool), its card get
 
 **+ → An artifact** lists every artifact Claude published in a conversation on this Mac, the one changed last first, to search by title, session or folder. **Open in CCC** puts one on the board as a card of its own, in the space whose + you clicked, to move and size like any card; it stays across reloads until its × takes it off. One whose page is no longer on this Mac has its claude.ai link instead.
 
+## Small screens
+
+A card's header always fits the card. On a narrow card, buttons show their icon alone (hover one for its name), and the name of where the session runs gets shorter. Whatever still has no room goes into a **⋯** menu. The facts panel's button and the × always stay in the header. On a narrow card the facts panel slides in over the chat: its own × closes it, and so do Esc and a click in the chat. A panel opened over the chat is only for now, so one you keep open beside the chat on a big screen does not come back over the chat on a laptop.
+
 ## Themes
 
 Twelve of them, from Clean to Cyberpunk 2077. Pick one in Settings.

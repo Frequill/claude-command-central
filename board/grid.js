@@ -7,9 +7,11 @@
 // Cards stay where they are put: room left empty stays empty, until the person closes the gaps. An
 // empty space offers a + to start something there, and an empty strip across the whole board a −
 // that closes it, the cards below moving up. A card dropped keeps its size; dropped into an
-// empty space with Shift held, it fills the space. A card held over the lower half of a card below it
-// in its column goes under it, and the cards between rise into the room it left; over the upper half
-// of a card above it, it goes above, and they go down.
+// empty space with Shift held, it fills the space, as far down as the screen shows. A card held over
+// the left or the right quarter of another goes beside it, and that one gets narrower to make room.
+// A card held over the lower half of a card below it in its column goes under it, and the cards
+// between rise into the room it left; over the upper half of a card above it, it goes above, and
+// they go down.
 
 import { edgeSpeed, holdHand, jelly } from './layout.js'
 
@@ -158,6 +160,31 @@ export function gapAt(nodes, cell, { columns = COLUMNS, rows } = {}) {
   return wide.w * wide.h >= tall.w * tall.h ? wide : tall
 }
 
+/**
+ * How many rows tall a card can be and still be seen whole on this screen: `room` is the height
+ * between the bars at the top and the bottom of the window, in px, and `gap` the room kept between a
+ * card and a bar. No limit when the room is not known.
+ */
+export function rowsOnScreen(room, gap = 0) {
+  if (!Number.isFinite(room) || room <= 0) return Infinity
+  // a card of h rows shows h rows less the margin above and below it
+  return Math.max(LEAST.h, Math.floor((room - 2 * gap + 2 * MARGIN) / ROW))
+}
+
+/**
+ * An empty space cut to at most `most` rows, so a card that fills it is seen whole on the screen. In
+ * a taller space it is the part around `cell` (the cell under the pointer). It goes up to the top of
+ * the space, or down to its bottom, when what it would leave there is too thin for a card.
+ */
+export function cappedGap(gap, cell, most) {
+  if (!gap || !cell || !(most < gap.h)) return gap
+  const last = gap.y + gap.h - most
+  let y = Math.min(last, Math.max(gap.y, cell.y - Math.floor(most / 2)))
+  if (y - gap.y < LEAST.h) y = gap.y
+  else if (last - y < LEAST.h) y = last
+  return { ...gap, y, h: most }
+}
+
 /** Whether a space is big enough for a card. */
 export function isRoomForCard(gap) {
   return Boolean(gap) && gap.w >= LEAST.w && gap.h >= LEAST.h
@@ -219,6 +246,42 @@ export function passedAt(from, others, cell) {
 
 const overlaps = (a, b) => a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h
 
+// how much of a card's width, at its left and at its right, puts a card held there beside it
+const SIDE = 1 / 4
+
+/**
+ * A card held over the left or the right quarter of another card goes beside it, on that side, and
+ * the other card gets narrower to make room. Nothing moves to another row. The two share the other
+ * card's width, plus the room the held card left when it was right next to it in the same rows, so
+ * two cards side by side change places. The held card keeps its own width if the other one can still
+ * be as narrow as a card may be; otherwise they get half each. The held card takes the other's top
+ * and height, so the two make one row. `from` is where the held card was when the drag began,
+ * `others` where every other card was ({ x, y, w, h } and anything else), and `point` the pointer in
+ * grid cells, with fractions ({ x, y }). Gives the held card's new place and the card that got
+ * narrower, or null when the pointer is not on a side of a card, or the two do not fit side by side.
+ */
+export function besideAt(from, others, point) {
+  if (!point) return null
+  const under = others.find(node => point.x >= node.x && point.x < node.x + node.w && point.y >= node.y && point.y < node.y + node.h)
+  if (!under) return null
+  const side = point.x < under.x + under.w * SIDE ? 'left' : point.x >= under.x + under.w * (1 - SIDE) ? 'right' : null
+  if (!side) return null
+  // the room the held card left counts when it touches the other card's side, in the same rows
+  const isSameRows = from.y === under.y && from.h === under.h
+  const left = isSameRows && from.x + from.w === under.x ? from.x : under.x
+  const right = isSameRows && under.x + under.w === from.x ? from.x + from.w : under.x + under.w
+  const room = right - left
+  const ownW = room - from.w >= LEAST.w ? from.w : Math.floor(room / 2)
+  const otherW = room - ownW
+  if (ownW < LEAST.w || otherW < LEAST.w) return null
+  const spot = { x: side === 'left' ? left : left + otherW, y: under.y, w: ownW, h: under.h }
+  const narrower = { ...under, x: side === 'left' ? left + ownW : left, w: otherW }
+  // neither of the two may land on a third card
+  const stays = others.filter(node => node !== under)
+  if ([spot, narrower].some(rect => stays.some(node => overlaps(rect, node)))) return null
+  return { spot, moved: [narrower] }
+}
+
 /**
  * A card resized: a card in its way gets smaller to make room, from the side that faces it, and is
  * never pushed away. When a card in the way is at its smallest, the resized card stops there. `from`
@@ -265,9 +328,10 @@ const IN_GAP_MS = 10_000
 /**
  * Makes `box` the grid. `onStart` and `onEnd` mark the time a card is held, so the board does not
  * redraw under it; `oldPlace(id)` is a card's place on the old free board, in pixels, if it had one;
- * `onAddAt(gap)` is the + in an empty space, clicked; `startRows()` how many rows tall a new card is.
+ * `onAddAt(gap)` is the + in an empty space, clicked; `startRows()` how many rows tall a new card is;
+ * `screenRows()` how many rows tall a card can be and still be seen whole (rowsOnScreen).
  */
-export function makeGrid(box, { onStart, onEnd, oldPlace, wobbles, animates, onAddAt, startRows = () => FIRST.h }) {
+export function makeGrid(box, { onStart, onEnd, oldPlace, wobbles, animates, onAddAt, startRows = () => FIRST.h, screenRows = () => Infinity }) {
   // the bundle puts the class itself on the page
   const GridStack = window.GridStack.GridStack ?? window.GridStack
   // GridStack scrolls the page while a card is resized with the pointer within a row of the window's
@@ -338,8 +402,9 @@ export function makeGrid(box, { onStart, onEnd, oldPlace, wobbles, animates, onA
     if (!held || !document.body.classList.contains('is-dragging')) return
     const cell = gaps.cellAt(pointer)
     // the room the card was taken from is empty too, so a card held over the space next to it counts
-    // at once; only that room alone is no space to fill
-    const gap = cell ? gapAt(held.before, cell) : null
+    // at once; only that room alone is no space to fill. A space taller than the screen is filled
+    // only as far as the screen shows, around the pointer.
+    const gap = cell ? cappedGap(gapAt(held.before, cell), cell, screenRows()) : null
     const isOnlyOwnRoom = gap && overlaps(gap, held.from) && gap.w * gap.h <= held.from.w * held.from.h
     const space = isRoomForCard(gap) && !isOnlyOwnRoom ? gap : null
     held.gap = held.isShift ? space : null
@@ -362,9 +427,10 @@ export function makeGrid(box, { onStart, onEnd, oldPlace, wobbles, animates, onA
   })
   grid.on('drag', () => aim())
   // GridStack only pushes the cards in the way down, both for a card moved and for one resized. Here a
-  // card moved past others in its own column has them make room as in a list (passedAt), and a card
-  // resized has the ones in its way get smaller (resizedTo), while it is held, so where everything
-  // lands shows before it is let go.
+  // card held on the left or right side of another goes beside it, and that one gets narrower
+  // (besideAt); a card moved past others in its own column has them make room as in a list
+  // (passedAt); and a card resized has the ones in its way get smaller (resizedTo). All of it shows
+  // while the card is held, so where everything lands is seen before it is let go.
   const moveNodeCheck = grid.engine.moveNodeCheck.bind(grid.engine)
   const placeAll = (spot, changed = []) => {
     const set = (node, place) => {
@@ -384,7 +450,10 @@ export function makeGrid(box, { onStart, onEnd, oldPlace, wobbles, animates, onA
       placeAll(spot, given)
       return true
     }
-    const pass = passedAt(held.from, held.before, gaps.cellAt(scroller.pointer()))
+    // a narrow window has one card a row: there is nothing to go beside
+    const pointer = scroller.pointer()
+    const beside = grid.getColumn() === COLUMNS ? besideAt(held.from, held.before, gaps.pointAt(pointer)) : null
+    const pass = beside ?? passedAt(held.from, held.before, gaps.cellAt(pointer))
     if (pass) {
       placeAll(pass.spot, pass.moved)
       held.isPassing = true
@@ -621,10 +690,15 @@ function gapMarks(box, nodes, onAddAt, onCloseStrip) {
     mark.style.width = `${gap.w * column - 2 * MARGIN}px`
     mark.style.height = `${gap.h * ROW - 2 * MARGIN}px`
   }
-  const cellAt = point => {
+  // a point of the window in grid cells, with fractions, and the cell it is in
+  const pointAt = point => {
     if (!point) return null
     const area = box.getBoundingClientRect()
-    return { x: Math.floor(((point.x - area.left) / area.width) * COLUMNS), y: Math.floor((point.y - area.top) / ROW) }
+    return { x: ((point.x - area.left) / area.width) * COLUMNS, y: (point.y - area.top) / ROW }
+  }
+  const cellAt = point => {
+    const at = pointAt(point)
+    return at && { x: Math.floor(at.x), y: Math.floor(at.y) }
   }
   const hide = () => {
     shown = null
@@ -656,6 +730,7 @@ function gapMarks(box, nodes, onAddAt, onCloseStrip) {
     if (found) onCloseStrip?.(found)
   })
   return {
+    pointAt,
     cellAt,
     hide,
     /** The empty space a held card is over, or none: the card fills it, or it says how to. */

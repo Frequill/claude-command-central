@@ -479,9 +479,9 @@ export function arrivals(onBoard, ids) {
 }
 
 const SOURCES = {
-  'claude-desktop': { kind: 'app', label: 'Claude app', about: 'Started in the Claude app' },
-  'claude-vscode': { kind: 'vscode', label: 'VS Code', about: 'Started in VS Code' },
-  cli: { kind: 'terminal', label: 'Terminal', about: 'Started in a terminal' },
+  'claude-desktop': { kind: 'app', label: 'Claude app', short: 'App', about: 'Started in the Claude app' },
+  'claude-vscode': { kind: 'vscode', label: 'VS Code', short: 'VS Code', about: 'Started in VS Code' },
+  cli: { kind: 'terminal', label: 'Terminal', short: 'CLI', about: 'Started in a terminal' },
 }
 
 /**

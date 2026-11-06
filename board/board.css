@@ -4774,6 +4774,11 @@ body.theme-inferno .notes-text {
   animation: emblem-nod 0.35s ease-out;
 }
 
+/* what the emblem does: one click, then two, with a little room between */
+.hud-face-tip strong:not(:first-child) {
+  margin-top: 6px;
+}
+
 @keyframes emblem-nod {
   40% {
     transform: scale(0.88);
@@ -6246,6 +6251,16 @@ body.theme-inferno .live-reply {
     box-shadow: -12px 0 28px rgba(0, 0, 0, 0.35);
     animation: side-in 0.22s ease-out;
   }
+
+  /* over the chat, the panel closes from its own corner, as the header's button may be far away */
+  .chat-side .side-close {
+    display: inline-grid;
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    float: right;
+    margin: 0 0 6px 8px;
+  }
 }
 
 @keyframes side-in {
@@ -6310,6 +6325,94 @@ body.theme-inferno .live-reply {
 
 .chat-close:hover {
   border-color: var(--accent);
+}
+
+/* the header fits its card: the folder and branch give way first, the title keeps a few words */
+.expanded-tile .chat-title {
+  min-width: min(7em, 30%);
+}
+
+.expanded-tile .chat-where {
+  flex-shrink: 100;
+}
+
+.head-short {
+  display: none;
+}
+
+/* a narrow card: buttons show their icon alone, where the session runs its short name; what still
+   does not fit goes into the ⋯ menu (chat.js) */
+@container chat-window (max-width: 700px) {
+  .chat-head .head-label,
+  .chat-head .head-long,
+  .chat-head .chat-where {
+    display: none;
+  }
+
+  .chat-head .head-short {
+    display: inline;
+  }
+}
+
+/* the narrowest cards: where it runs goes too, and the title takes what is left, so the side panel's
+   button and × always stay in reach */
+.chat-head.is-tight {
+  gap: 6px;
+}
+
+.chat-head.is-tight .source {
+  display: none;
+}
+
+.expanded-tile .chat-head.is-tight .chat-title {
+  min-width: 0;
+}
+
+/* the ⋯ menu: the header's buttons that had no room, one a row, with their words */
+.chat-more-menu {
+  position: absolute;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 4px;
+  min-width: 190px;
+  padding: 6px;
+  border-radius: 10px;
+  border: 1px solid var(--panel-border);
+  background: var(--panel-solid);
+  box-shadow: 0 14px 40px rgba(0, 0, 0, 0.35);
+}
+
+.chat-more-menu[hidden] {
+  display: none;
+}
+
+.chat-more-menu > * {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 8px;
+  width: auto;
+  height: auto;
+  min-height: 30px;
+  margin: 0;
+  padding: 4px 10px;
+  white-space: nowrap;
+  text-align: left;
+}
+
+.chat-more-menu .head-label {
+  display: inline;
+}
+
+.chat-more-menu [data-label]::after {
+  content: attr(data-label);
+}
+
+/* the panel's own ×, only while it lies over the chat (below) */
+.side-close {
+  display: none;
 }
 
 .chat-scroll {
