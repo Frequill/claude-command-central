@@ -3407,6 +3407,13 @@ button.q-option:disabled {
   outline-offset: 1px;
 }
 
+.next-own {
+  align-self: center;
+  font-size: 12px;
+  font-style: italic;
+  color: var(--ink-3);
+}
+
 .next-note {
   font-size: 12px;
   color: var(--ink-3);

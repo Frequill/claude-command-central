@@ -92,7 +92,7 @@ Everything on the board can work without a mouse. Turn it on in **Settings → K
 | ⌃Tab / ⌃⇧Tab | Next / previous card, row by row |
 | ⌘1 … ⌘9 | Card 1 to 8, and ⌘9 the last |
 | ⌥⌘N | The next card that needs you, with the cursor on its question or approval (the current card's own first) |
-| 1 … 9 | Answers the box that waits, as Claude's own boxes do: in a question that option (one question with one choice is sent at once), in an approval 1 allows once and 2 denies, in the next-step box that answer (its last number, Write your own, leaves you typing). Works with the cursor on the box, or in the empty write box; once you have typed something, numbers are text. Each answer shows its number |
+| 1 … 9 | Answers the box that waits, as Claude's own boxes do: in a question that option (one question with one choice is sent at once), in an approval 1 allows once and 2 denies, in the next-step box that answer (to say something else, just type it). Works with the cursor on the box, or in the empty write box; once you have typed something, numbers are text. Each answer shows its number |
 | ⌘. or ⌃C | Stop Claude in the current card, as its Stop button does. In a terminal card ⌃C (and every Ctrl key) stays the shell's |
 | F2 | Rename the current card (or double-click its name) |
 | ⇧⌘M | Its model, effort and mode menu |

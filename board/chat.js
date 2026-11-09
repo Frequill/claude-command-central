@@ -2061,7 +2061,7 @@ function drawNextStep(chat, session, next) {
   const endedAt = session.turn.endedAt
   const given = sentChoices.get(chat.id)
   const sent = given?.endedAt === endedAt ? given : null
-  // with the keyboard shortcuts on, each answer shows its number, and the last one is your own words
+  // with the keyboard shortcuts on, each answer shows its number, and a hint after them says your own words work too
   const isNumbered = Boolean(context.shortcutsOn?.())
   const number = i => (isNumbered && i < 9 ? el('span', { class: 'q-number', 'aria-hidden': 'true' }, String(i + 1)) : null)
   const buttons = next.choices.map((choice, i) => {
@@ -2075,8 +2075,7 @@ function drawNextStep(chat, session, next) {
     })
     return button
   })
-  const own = isNumbered && !sent ? el('button', { type: 'button', class: 'next-choice next-own', title: 'Write your own answer in the box below' }, 'Write your own', number(buttons.length)) : null
-  own?.addEventListener('click', () => chat.text.focus())
+  const own = isNumbered && !sent ? el('span', { class: 'next-own' }, 'or write your own…') : null
   const note = given?.problem || (sent ? 'Sent. Claude takes it in a moment.' : '')
   const box = el(
     'div',
@@ -2102,8 +2101,8 @@ function drawNextStep(chat, session, next) {
 /**
  * A number key in the empty write box, with the keyboard shortcuts on: answers the box that waits in
  * this chat, as Claude's own boxes take one. An approval (1 allows once, 2 denies), else a question
- * (that option), else the next-step box (that answer; its last number, "write your own", leaves the
- * cursor here). True when a box took the key; with no box waiting the number is typed as always.
+ * (that option), else the next-step box (that answer). True when a box took the key; with no box
+ * waiting, or a number past its answers, the number is typed as always.
  */
 function answerByNumber(chat, event) {
   if (!context.shortcutsOn?.()) return false
@@ -2128,8 +2127,7 @@ function answerByNumber(chat, event) {
   const picked = choices[n - 1]
   if (!picked || picked.disabled) return false
   event.preventDefault()
-  // "write your own": the cursor is here already
-  if (!picked.classList.contains('next-own')) picked.click()
+  picked.click()
   return true
 }
 
