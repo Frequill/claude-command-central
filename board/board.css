@@ -7622,6 +7622,23 @@ body.theme-inferno .live-reply {
   padding-left: 22px;
 }
 
+/* a list inside a list item sits close under it */
+.md li > ul,
+.md li > ol {
+  margin: 2px 0 4px;
+}
+
+/* a task ("- [ ] …") shows its box where the bullet would be */
+.md li.md-task {
+  list-style: none;
+}
+
+.md .md-box {
+  margin: 0 6px 0 -20px;
+  vertical-align: -2px;
+  accent-color: var(--accent);
+}
+
 .md code {
   padding: 1px 5px;
   border-radius: 5px;

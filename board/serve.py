@@ -164,7 +164,7 @@ BOARD_FILES = {"/": "index.html", "/index.html": "index.html", "/board.css": "bo
                "/layout.js": "layout.js", "/settings.js": "settings.js", "/notes.js": "notes.js",
                "/decor.js": "decor.js", "/dragon.js": "dragon.js",
                "/arrivals.js": "arrivals.js", "/chat.js": "chat.js", "/chat-logic.js": "chat-logic.js",
-               "/markdown.js": "markdown.js", "/placement.js": "placement.js", "/keys.js": "keys.js", "/refocus.js": "refocus.js",
+               "/markdown.js": "markdown.js", "/compose-format.js": "compose-format.js", "/placement.js": "placement.js", "/keys.js": "keys.js", "/refocus.js": "refocus.js",
                "/eva-logo.png": "eva-logo.png",
                "/terminal.js": "terminal.js", "/xterm.js": "xterm.js", "/xterm.css": "xterm.css", "/xterm-fit.js": "xterm-fit.js",
                "/grid.js": "grid.js", "/gridstack.js": "gridstack.js", "/gridstack.css": "gridstack.css",

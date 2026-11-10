@@ -12,6 +12,7 @@ import { optionNumber } from './keys.js'
 import { rememberFocus, restoreFocus } from './refocus.js'
 import { designTab } from './design.js'
 import { blocks } from './markdown.js'
+import * as F from './compose-format.js'
 
 const REFRESH_MS = 1500
 const SVG_NS = 'http://www.w3.org/2000/svg'
@@ -309,8 +310,10 @@ function buildCard(sessionId) {
   // words written and not sent yet come back after a reload
   text.value = C.draftOf(drafts(), sessionId, Date.now())
   if (text.value) requestAnimationFrame(() => grow(text))
+  text.addEventListener('beforeinput', event => noteJoinedLine(chat, event))
   text.addEventListener('input', event => {
     typeEmoji(chat, event)
+    formatTyped(chat, event)
     saveDraftSoon(chat)
     grow(text)
     showSlashMenu(chat)
@@ -324,6 +327,7 @@ function buildCard(sessionId) {
     // with nothing written yet, a number answers the box that waits (as Claude's own boxes take one)
     if (!text.value && answerByNumber(chat, event)) return
     if (takeSuggestion(chat, event)) return
+    if (formatKey(chat, event)) return
     if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
       event.preventDefault()
       sendMessage(chat, C.enterMode(Boolean(context.sessionOf(chat.id)?.turn?.isRunning), event.metaKey || event.ctrlKey))
@@ -331,9 +335,15 @@ function buildCard(sessionId) {
   })
   text.addEventListener('paste', event => {
     const files = [...(event.clipboardData?.items ?? [])].filter(item => item.kind === 'file').map(item => item.getAsFile()).filter(Boolean)
-    if (files.length === 0) return
+    if (files.length > 0) {
+      event.preventDefault()
+      for (const file of files) addFile(chat, file)
+      return
+    }
+    const next = pastedFormat(chat, event.clipboardData)
+    if (!next) return
     event.preventDefault()
-    for (const file of files) addFile(chat, file)
+    applyEdit(chat, next)
   })
   restart.addEventListener('click', async () => {
     restart.disabled = true
@@ -380,6 +390,93 @@ function buildCard(sessionId) {
   scroll.addEventListener('pointerdown', () => markHand(chat))
   scroll.addEventListener('keydown', () => markHand(chat))
   return chat
+}
+
+// ---------- Markdown typing help (compose-format.js) ----------
+
+function boxOf(chat) {
+  return { value: chat.text.value, start: chat.text.selectionStart, end: chat.text.selectionEnd }
+}
+
+/**
+ * The write box's Markdown keys: Shift+Enter goes on with a list or quote, Tab and Shift+Tab move
+ * list lines in and out, ⌘B, ⌘I and ⇧⌘X make bold, italic and strikethrough, and a `, *, _ or ~
+ * typed over selected words wraps them. True when one took the key.
+ */
+function formatKey(chat, event) {
+  if (event.isComposing || event.altKey || event.ctrlKey) return false
+  const box = boxOf(chat)
+  const isSelected = box.start !== box.end
+  let next = null
+  if (event.key === 'Enter' && event.shiftKey && !event.metaKey) next = F.newLine(box)
+  else if (event.key === 'Tab' && !event.metaKey) next = F.indentLines(box, event.shiftKey)
+  else if (event.metaKey && !event.shiftKey && event.code === 'KeyB') next = F.wrap(box, '**')
+  else if (event.metaKey && !event.shiftKey && event.code === 'KeyI') next = F.wrap(box, '*')
+  else if (event.metaKey && event.shiftKey && event.code === 'KeyX') next = F.wrap(box, '~~')
+  else if (!event.metaKey && isSelected && ['`', '*', '_', '~'].includes(event.key)) next = F.wrap(box, event.key, false)
+  if (!next) return false
+  event.preventDefault()
+  applyEdit(chat, next)
+  return true
+}
+
+/** Before a deletion: whether it takes a line break away, so the numbers of a list are put in order after it. */
+function noteJoinedLine(chat, event) {
+  if (!event.inputType?.startsWith('delete')) return
+  const { value, start, end } = boxOf(chat)
+  const gone = start !== end ? value.slice(start, end) : event.inputType.includes('Backward') ? value.slice(Math.max(0, start - 1), start) : value.slice(start, start + 1)
+  chat.isLineJoined = gone.includes('\n')
+}
+
+/** After something went in: a code fence typed closes itself, and a list line deleted leaves the numbers in order. */
+function formatTyped(chat, event) {
+  if (chat.isFormatting) return
+  const isJoined = chat.isLineJoined
+  chat.isLineJoined = false
+  const box = boxOf(chat)
+  const next = event.inputType === 'insertText' && (event.data === '`' || event.data === '~') ? F.closeFence(box) : isJoined ? F.renumber(box) : null
+  if (next && next.value !== box.value) applyEdit(chat, next)
+}
+
+/**
+ * A paste as Markdown: a web address over selected words makes a link of them, and a copy from a
+ * web page or a document keeps its lists, bold, links and the rest. null for a plain paste, which
+ * goes in as it always does; inside a code block everything goes in as it is.
+ */
+function pastedFormat(chat, data) {
+  const box = boxOf(chat)
+  const link = F.linkOver(box, data?.getData('text/plain'))
+  if (link) return link
+  const html = data?.getData('text/html')
+  if (!html || F.isInCodeAt(box.value, box.start)) return null
+  const markdown = F.markdownOfHtml(new DOMParser().parseFromString(html, 'text/html').body)
+  return markdown === null ? null : F.insertText(box, markdown)
+}
+
+/**
+ * Puts the box as a helper left it, through the browser's own typing of just the part that
+ * changed, so ⌘Z takes the change back as one step and the box's input handlers all hear it.
+ */
+function applyEdit(chat, next) {
+  const box = chat.text
+  const old = box.value
+  if (next.value !== old) {
+    let from = 0
+    while (from < old.length && from < next.value.length && old[from] === next.value[from]) from += 1
+    let back = 0
+    while (back < old.length - from && back < next.value.length - from && old[old.length - 1 - back] === next.value[next.value.length - 1 - back]) back += 1
+    const text = next.value.slice(from, next.value.length - back)
+    box.setSelectionRange(from, old.length - back)
+    chat.isFormatting = true
+    const isDone = document.execCommand(text ? 'insertText' : 'delete', false, text)
+    chat.isFormatting = false
+    // a browser without the old typing command: the text goes in all the same, without its undo step
+    if (!isDone || box.value !== next.value) {
+      box.value = next.value
+      box.dispatchEvent(new Event('input', { bubbles: true }))
+    }
+  }
+  box.setSelectionRange(next.start, next.end)
 }
 
 // ---------- emoji ----------
@@ -1447,7 +1544,8 @@ function drawItem(chat, item) {
  */
 function promptText(chat, text) {
   const words = String(text ?? '')
-  const body = el('div', { class: 'prompt-text' }, words)
+  // what the person wrote shows with its Markdown, as Claude's replies do: lists, bold, code and the rest
+  const body = el('div', { class: 'prompt-text' }, markdown(words))
   if (!C.isLongPrompt(words)) return body
   const key = C.promptKey(words)
   const isOpen = chat.openPrompts.has(key)
@@ -2600,7 +2698,7 @@ function drawBlock(block, chat) {
     case 'heading':
       return el(block.level <= 2 ? 'h3' : 'h4', {}, spans(block.inline))
     case 'list':
-      return el(block.ordered ? 'ol' : 'ul', block.ordered && block.start > 1 ? { start: block.start } : {}, block.items.map(item => el('li', {}, spans(item))))
+      return el(block.ordered ? 'ol' : 'ul', block.ordered && block.start > 1 ? { start: block.start } : {}, block.items.map((item, i) => el('li', item[0]?.t === 'box' ? { class: 'md-task' } : {}, spans(item), (block.nested?.[i] ?? []).map(inner => drawBlock(inner, chat)))))
     case 'table':
       return el('div', { class: 'md-table' }, el('table', {}, el('thead', {}, el('tr', {}, block.head.map(cell => el('th', {}, spans(cell))))), el('tbody', {}, block.rows.map(row => el('tr', {}, row.map(cell => el('td', {}, spans(cell))))))))
     case 'quote':
@@ -2722,6 +2820,8 @@ function spans(list) {
   return list.flatMap(span => {
     if (span.t === 'strong') return el('strong', {}, lines(span.text))
     if (span.t === 'em') return el('em', {}, lines(span.text))
+    if (span.t === 'del') return el('del', {}, lines(span.text))
+    if (span.t === 'box') return el('input', { type: 'checkbox', class: 'md-box', disabled: true, ...(span.done ? { checked: true } : {}), 'aria-label': span.done ? 'Done' : 'To do' })
     if (span.t === 'code') return el('code', {}, span.text)
     if (span.t === 'link') return el('a', { href: span.href, target: '_blank', rel: 'noopener noreferrer' }, span.text)
     return lines(span.text)

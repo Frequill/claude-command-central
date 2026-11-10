@@ -5,6 +5,7 @@ import * as L from './board-logic.js'
 import { nearestCrater } from './arrivals.js'
 import { blocks, inline } from './markdown.js'
 import * as C from './chat-logic.js'
+import * as F from './compose-format.js'
 import * as K from './keys.js'
 import { chooseCrater, planFlight } from './dragon.js'
 import * as P from './placement.js'
@@ -2235,4 +2236,155 @@ test('the keys scroll only as far as a card needs to show whole', () => {
   assert.equal(at(-200, 900), 1000 - 200 - 73 - 14)
   // never past the ends of the page
   assert.equal(at(40, 348, 0), 0)
+})
+
+// the write box as text with "|" where the cursor is, and back
+const boxAt = text => ({ value: text.replace('|', ''), start: text.indexOf('|'), end: text.indexOf('|') })
+const shown = box => (box ? box.value.slice(0, box.start) + '|' + box.value.slice(box.start) : null)
+
+test('Shift+Enter goes on with a list, a task list or a quote, on empty items too', () => {
+  assert.equal(shown(F.newLine(boxAt('1. one|'))), '1. one\n2. |')
+  // in the middle of a list the numbers after it move on by one
+  assert.equal(shown(F.newLine(boxAt('1. one\n2. two|\n3. three'))), '1. one\n2. two\n3. |\n4. three')
+  assert.equal(shown(F.newLine(boxAt('1) one|'))), '1) one\n2) |')
+  assert.equal(shown(F.newLine(boxAt('  - a|'))), '  - a\n  - |')
+  assert.equal(shown(F.newLine(boxAt('- [x] done|'))), '- [x] done\n- [ ] |')
+  // the words after the cursor go along to the new item
+  assert.equal(shown(F.newLine(boxAt('- one|two'))), '- one\n- |two')
+  // empty items go on as well, so the numbers can go down first, and a line of just a marker starts a list
+  assert.equal(shown(F.newLine(boxAt('- a\n- |'))), '- a\n- \n- |')
+  assert.equal(shown(F.newLine(boxAt('1. \n2. |'))), '1. \n2. \n3. |')
+  assert.equal(shown(F.newLine(boxAt('1. |'))), '1. \n2. |')
+  assert.equal(shown(F.newLine(boxAt('1.|'))), '1. \n2. |')
+  assert.equal(shown(F.newLine(boxAt('-|'))), '- \n- |')
+  assert.equal(shown(F.newLine(boxAt('Steps:\n1. |'))), 'Steps:\n1. \n2. |')
+  assert.equal(shown(F.newLine(boxAt('1. a\n   - b\n   - |'))), '1. a\n   - b\n   - \n   - |')
+  assert.equal(shown(F.newLine(boxAt('> quoted|'))), '> quoted\n> |')
+  assert.equal(shown(F.newLine(boxAt('> |'))), '|')
+  // in a code block the indent goes on and no list rule applies
+  assert.equal(shown(F.newLine(boxAt('```\n  code|'))), '```\n  code\n  |')
+  assert.equal(F.newLine(boxAt('```\n- not a list|')), null)
+  // anywhere else, and before a list marker, the key makes a plain new line
+  assert.equal(F.newLine(boxAt('plain|')), null)
+  assert.equal(F.newLine(boxAt('|- a')), null)
+  assert.equal(F.newLine({ value: '- ab', start: 2, end: 4 }), null)
+})
+
+test('Tab moves a list item under the one above it, Shift+Tab back out, and the numbers follow', () => {
+  assert.equal(shown(F.indentLines(boxAt('1. a\n2. b|'))), '1. a\n   1. b|')
+  assert.equal(shown(F.indentLines(boxAt('- a\n- b|'))), '- a\n  - b|')
+  assert.equal(shown(F.indentLines(boxAt('1. a\n   1. b|\n2. c'), true)), '1. a\n2. b|\n3. c')
+  // as far out as it goes: the key is taken, and nothing changes
+  assert.equal(shown(F.indentLines(boxAt('- a|'), true)), '- a|')
+  // a plain line keeps Tab for moving to the next button; a code block takes it
+  assert.equal(F.indentLines(boxAt('plain|')), null)
+  assert.equal(shown(F.indentLines(boxAt('```\nx|'))), '```\n  x|')
+  // a selection over several lines moves them all, and stays on them
+  const moved = F.indentLines({ value: 'a\nb\n\nc', start: 0, end: 6 })
+  assert.equal(moved.value, '  a\n  b\n\n  c')
+  assert.deepEqual([moved.start, moved.end], [0, moved.value.length])
+})
+
+test('numbered lists near the cursor are put back in order, the first number kept', () => {
+  assert.equal(F.renumber(boxAt('1. a\n3. b\n7. c|')).value, '1. a\n2. b\n3. c')
+  assert.equal(F.renumber(boxAt('5. a\n9. b|')).value, '5. a\n6. b')
+  // a nested list starts at 1, and its parent goes on past it
+  assert.equal(F.renumber(boxAt('1. a\n   4. b\n   9. c\n5. d|')).value, '1. a\n   1. b\n   2. c\n2. d')
+  // a list past a blank line is somebody else's, and left as written
+  assert.equal(F.renumber(boxAt('1. a\n1. b|\n\n1. x\n1. y')).value, '1. a\n2. b\n\n1. x\n1. y')
+  // the cursor stays on its words when a number grows
+  assert.equal(shown(F.renumber(boxAt('9. a\n1. b|'))), '9. a\n10. b|')
+})
+
+test('the mark keys wrap the selection, or take the mark off again', () => {
+  const sel = (value, start, end) => ({ value, start, end })
+  assert.deepEqual(F.wrap(sel('make bold now', 5, 9), '**'), sel('make **bold** now', 7, 11))
+  assert.deepEqual(F.wrap(sel('make **bold** now', 7, 11), '**'), sel('make bold now', 5, 9))
+  assert.deepEqual(F.wrap(sel('make **bold** now', 5, 13), '**'), sel('make bold now', 5, 9))
+  // italic over bold words makes them both, not plain
+  assert.deepEqual(F.wrap(sel('make **bold** now', 7, 11), '*'), sel('make ***bold*** now', 8, 12))
+  // a mark typed over words only wraps: * twice is bold
+  assert.deepEqual(F.wrap(sel('make *it* now', 6, 8), '*', false), sel('make **it** now', 7, 9))
+  assert.deepEqual(F.wrap(sel('ab', 1, 1), '~~'), sel('a~~~~b', 3, 3))
+})
+
+test('a code fence closes itself, and a web address pasted over words makes a link', () => {
+  assert.equal(shown(F.closeFence(boxAt('```|'))), '```|\n```')
+  assert.equal(shown(F.closeFence(boxAt('text\n  ~~~|'))), 'text\n  ~~~|\n  ~~~')
+  // the fence that closes an open block is left alone
+  assert.equal(F.closeFence(boxAt('```\ncode\n```|')), null)
+  assert.equal(F.closeFence(boxAt('a ```|')), null)
+  const sel = (value, start, end) => ({ value, start, end })
+  assert.equal(F.linkOver(sel('see docs here', 4, 8), ' https://x.com/a ').value, 'see [docs](https://x.com/a) here')
+  assert.equal(F.linkOver(sel('see docs here', 4, 8), 'not a link'), null)
+  assert.equal(F.linkOver(sel('see docs here', 4, 4), 'https://x.com'), null)
+  assert.equal(F.linkOver(sel('a\nb', 0, 3), 'https://x.com'), null)
+})
+
+// a page's nodes as DOMParser gives them, with only what markdownOfHtml reads
+function page(name, attrs = {}, ...kids) {
+  const childNodes = kids.map(kid => (typeof kid === 'string' ? { nodeType: 3, nodeName: '#text', textContent: kid } : kid))
+  return {
+    nodeType: 1,
+    nodeName: name,
+    childNodes,
+    get textContent() {
+      return childNodes.map(child => child.textContent).join('')
+    },
+    getAttribute: key => (key in attrs ? attrs[key] : null),
+    style: attrs.style ?? {},
+  }
+}
+
+test('a copy from a web page or a document pastes as Markdown', () => {
+  const body = page('BODY', {},
+    page('H2', {}, 'Setup'),
+    page('P', {}, 'Run ', page('CODE', {}, 'npm test'), ' and read ', page('A', { href: 'https://x.com/docs' }, 'the docs'), '. It is ', page('STRONG', {}, 'important '), 'and ', page('EM', {}, 'quick'), '.'),
+    page('OL', {}, page('LI', {}, 'First'), page('LI', {}, 'Second', page('UL', {}, page('LI', {}, 'detail'), page('LI', {}, page('INPUT', { type: 'checkbox', checked: '' }), ' done')))),
+    page('BLOCKQUOTE', {}, page('P', {}, 'A quote')),
+    page('PRE', { class: 'language-bash' }, 'ls -la\necho hi\n'),
+    page('TABLE', {}, page('TR', {}, page('TH', {}, 'Name'), page('TH', {}, 'Size')), page('TR', {}, page('TD', {}, 'a|b'), page('TD', {}, '3'))),
+  )
+  assert.equal(F.markdownOfHtml(body), [
+    '## Setup',
+    '',
+    'Run `npm test` and read [the docs](https://x.com/docs). It is **important** and *quick*.',
+    '',
+    '1. First',
+    '2. Second',
+    '   - detail',
+    '   - [x] done',
+    '',
+    '> A quote',
+    '',
+    '```bash',
+    'ls -la',
+    'echo hi',
+    '```',
+    '',
+    '| Name | Size |',
+    '| --- | --- |',
+    '| a\\|b | 3 |',
+  ].join('\n'))
+})
+
+test('Google Docs bold and italic come from the styles, and a plain copy pastes as it is', () => {
+  const docs = page('BODY', {}, page('B', { style: { fontWeight: 'normal' } },
+    page('P', {}, page('SPAN', { style: { fontWeight: '400' } }, 'Text with '), page('SPAN', { style: { fontWeight: '700' } }, 'bold'), ' and ', page('SPAN', { style: { fontStyle: 'italic' } }, 'slant'), page('SPAN', { style: { textDecoration: 'line-through' } }, ' gone')),
+    page('UL', {}, page('LI', {}, page('P', {}, 'one')), page('LI', {}, page('P', {}, 'two'))),
+  ))
+  assert.equal(F.markdownOfHtml(docs), 'Text with **bold** and *slant* ~~gone~~\n\n- one\n- two')
+  // an editor copies lines in divs, with colours but no marks: that goes in as plain text
+  assert.equal(F.markdownOfHtml(page('BODY', {}, page('DIV', {}, page('DIV', {}, page('SPAN', {}, 'const x = 1')), page('DIV', {}, page('SPAN', {}, '  return x'))))), null)
+  assert.equal(F.markdownOfHtml(page('BODY', {}, page('A', { href: 'javascript:alert(1)' }, 'no'))), null)
+})
+
+test('the chat reads nested lists, task boxes, strikethrough and underscores', () => {
+  const [list] = blocks('1. a\n2. b\n   - c\n   - [x] d\n3. e')
+  assert.deepEqual(list.items.map(item => item.at(-1).text), ['a', 'b', 'e'])
+  assert.deepEqual(list.nested.map(inner => inner?.map(one => one.ordered) ?? null), [null, [false], null])
+  assert.deepEqual(list.nested[1][0].items[1], [{ t: 'box', done: true }, { t: 'text', text: 'd' }])
+  // a list with nothing nested has no nested part at all
+  assert.equal(blocks('- a\n- b')[0].nested, undefined)
+  assert.deepEqual(inline('~~gone~~ and _soft_ but snake_case_name'), [{ t: 'del', text: 'gone' }, { t: 'text', text: ' and ' }, { t: 'em', text: 'soft' }, { t: 'text', text: ' but snake_case_name' }])
 })

@@ -1,5 +1,6 @@
-// The little Markdown Claude writes, read into plain blocks the chat window draws with
-// textContent: paragraphs, headings, lists, tables, quotes and code. No HTML is ever passed on.
+// The little Markdown Claude and the person write, read into plain blocks the chat window draws
+// with textContent: paragraphs, headings, lists (nested, and tasks), tables, quotes and code. No HTML
+// is ever passed on.
 
 /** Blocks of a text: `{ type: 'paragraph' | 'heading' | 'list' | 'table' | 'quote' | 'code' | 'rule', ... }`. */
 export function blocks(markdown) {
@@ -51,15 +52,9 @@ export function blocks(markdown) {
     }
     const item = listItem(line)
     if (item) {
-      const items = []
-      while (i < lines.length && listItem(lines[i])?.ordered === item.ordered) {
-        const next = listItem(lines[i])
-        const text = [next.text]
-        i += 1
-        while (i < lines.length && lines[i].trim() && !listItem(lines[i]) && /^\s{2,}/.test(lines[i])) text.push(lines[i++].trim())
-        items.push(inline(text.join(' ')))
-      }
-      out.push({ type: 'list', ordered: item.ordered, start: item.start, items })
+      const read = readList(lines, i, item.indent)
+      out.push(read.list)
+      i = read.next
       continue
     }
     const body = []
@@ -81,12 +76,55 @@ function startsBlock(lines, i) {
   )
 }
 
+/**
+ * A list from line `i` on, its items at indent `base`: `{ list, next }`, `next` the first line after
+ * it. A list line indented two or more spaces past an item is a list of its own inside that item
+ * (`nested`, one entry per item, null for an item with none); other indented lines go on with the
+ * item's words. An item that starts with "[ ]" or "[x]" is a task, drawn with its box.
+ */
+function readList(lines, i, base) {
+  const first = itemAt(lines[i])
+  const items = []
+  const nested = []
+  while (i < lines.length) {
+    const next = itemAt(lines[i])
+    if (!next || next.ordered !== first.ordered || next.indent < base || next.indent >= base + 2) break
+    const text = [next.text]
+    let inside = null
+    i += 1
+    while (i < lines.length && lines[i].trim()) {
+      const inner = itemAt(lines[i])
+      if (inner && inner.indent >= base + 2) {
+        const read = readList(lines, i, inner.indent)
+        inside = [...(inside ?? []), read.list]
+        i = read.next
+      } else if (!inner && /^\s{2,}/.test(lines[i])) text.push(lines[i++].trim())
+      else break
+    }
+    items.push(itemSpans(text.join(' ')))
+    nested.push(inside)
+  }
+  const list = { type: 'list', ordered: first.ordered, start: first.start, items }
+  if (nested.some(Boolean)) list.nested = nested
+  return { list, next: i }
+}
+
+function itemSpans(text) {
+  const task = /^\[([ xX])\]\s+/.exec(text)
+  return task ? [{ t: 'box', done: task[1] !== ' ' }, ...inline(text.slice(task[0].length))] : inline(text)
+}
+
+/** A list line at any indent: `{ indent, ordered, start, text }`, or null. */
+function itemAt(line) {
+  const found = /^( *)(?:([-*+])|(\d{1,9})[.)])\s+(.*)$/.exec(line ?? '')
+  if (!found) return null
+  return { indent: found[1].length, ordered: !found[2], start: found[3] === undefined ? undefined : Number(found[3]), text: found[4] }
+}
+
+/** A list line that starts a list: indented three spaces at most, as Markdown has it. */
 function listItem(line) {
-  const bullet = /^\s{0,3}[-*+]\s+(.*)$/.exec(line)
-  if (bullet) return { ordered: false, text: bullet[1] }
-  const number = /^\s{0,3}(\d{1,9})[.)]\s+(.*)$/.exec(line)
-  if (number) return { ordered: true, start: Number(number[1]), text: number[2] }
-  return null
+  const item = itemAt(line)
+  return item && item.indent <= 3 ? item : null
 }
 
 function isTableRow(line) {
@@ -98,13 +136,13 @@ function cells(line) {
 }
 
 /**
- * The spans of a line: `{ t: 'text' | 'strong' | 'em' | 'code' | 'link', text, href? }`. A link
+ * The spans of a line: `{ t: 'text' | 'strong' | 'em' | 'del' | 'code' | 'link', text, href? }`. A link
  * keeps its address only when it is http or https. An address written as it is (https://…, or
  * <https://…>) is a link too, without the full stop or bracket that ends the sentence around it.
  */
 export function inline(text) {
   const spans = []
-  const pattern = /(`+)([\s\S]+?)\1|\*\*([\s\S]+?)\*\*|__([\s\S]+?)__|\[([^\]\n]+)\]\(([^)\s]+)\)|(?<![\w*])\*(?!\s)([^*\n]+?)\*(?![\w*])|<(https?:\/\/[^\s<>]+)>|(?<![\w/])(https?:\/\/[^\s<>"'`]+)/gi
+  const pattern = /(`+)([\s\S]+?)\1|\*\*([\s\S]+?)\*\*|__([\s\S]+?)__|\[([^\]\n]+)\]\(([^)\s]+)\)|(?<![\w*])\*(?!\s)([^*\n]+?)\*(?![\w*])|<(https?:\/\/[^\s<>]+)>|(?<![\w/])(https?:\/\/[^\s<>"'`]+)|~~(?!\s)([^~\n]+?)~~|(?<![\w_])_(?![\s_])([^_\n]+?)_(?![\w_])/gi
   let last = 0
   for (const match of String(text ?? '').matchAll(pattern)) {
     if (match.index > last) spans.push({ t: 'text', text: text.slice(last, match.index) })
@@ -118,7 +156,8 @@ export function inline(text) {
       // what was cut off the end goes on as words
       last = match.index + address.length
       continue
-    } else spans.push({ t: 'em', text: match[7] })
+    } else if (match[10] !== undefined) spans.push({ t: 'del', text: match[10] })
+    else spans.push({ t: 'em', text: match[7] ?? match[11] })
     last = match.index + match[0].length
   }
   if (last < String(text ?? '').length) spans.push({ t: 'text', text: text.slice(last) })

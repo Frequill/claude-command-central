@@ -102,6 +102,20 @@ Everything on the board can work without a mouse. Turn it on in **Settings → K
 
 The current card is the one you last clicked or went to; once you use the keyboard it has a ring. In menus, dialogs and boxes the arrow keys move between the buttons, Enter or Space presses one and Esc closes the session menu. **Settings → Keys** changes any shortcut, removes one, puts one back (**↺**) or all of them (**Reset to defaults**). A shortcut needs Cmd, Ctrl or Option, so typing stays as it is, and a shortcut given to another command moves there. Shortcuts follow the keys' places, so they work on any keyboard layout, and they are shown as your keyboard writes them.
 
+## Writing in the chat
+
+The write box takes Markdown as the Claude app's prompt box does, and Claude gets it as Markdown. These work whether or not keyboard shortcuts are on:
+
+| Keys | Does |
+| --- | --- |
+| ⇧Enter | A new line. In a list it starts the next item (`2. `, `- `, an empty `[ ] ` after a task); empty items too, so the numbers can go down first; a line of just `1.` or `-` starts a list. Backspace over the marker ends it. In a quote it goes on with `> `. In a code block it keeps the indent |
+| Tab / ⇧Tab | Moves a list item under the one above it, or back out; with several lines selected, all of them. Numbered lists keep their numbers in order, also when you delete a line |
+| ⌘B / ⌘I / ⇧⌘X | Bold, italic, strikethrough around the selection, or off again |
+| `` ` `` `*` `_` `~` | Typed over selected words, wraps them (`*` twice makes them bold) |
+| ```` ``` ```` | At the start of a line, adds the closing fence below |
+
+Pasting a web address over selected words makes them a link. Pasting from a web page, a document or Google Docs keeps its headings, lists, task boxes, quotes, code, tables, bold, italic and links; a copy from a terminal or an editor goes in as the text it is. Your sent messages show their Markdown in the chat, as Claude's replies do.
+
 ## Messages that wait
 
 A message written while Claude works waits in the queue, shown under the chat with **Send now**, and goes in once Claude is done. When that turn ends with a question for you (its buttons in the chat), the queued message waits for your answer instead: a button, or anything you write after the question, goes in first, and the queued message follows once that turn is done. **Send now** still sends it at once.
